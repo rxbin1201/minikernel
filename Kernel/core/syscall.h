@@ -66,7 +66,7 @@
 #define SYS_NTP       58 /* (server oder 0, NtpResult*, uhr_stellen) -> 0 oder Fehler */
 #define SYS_SOCKPORT  59 /* (fd) -> lokaler Port des Sockets */
 #define SYS_CPUINFO   60 /* (index, CpuInfo*) -> 0 oder ERR_NOENT am Ende */
-#define SYS_GPU       62 /* (op): Intel-Grafik-Tests: 1 = Page-Flipping, 2 = Hardware-Mauszeiger, 3 = Blitter, 4 = Zaehler/Messung, 5 = EDID, 6 = Skalierer, 7 = Moduswechsel (igdtest) -> 0 ok, < 0 Fehler (Details im Kernel-Log) */
+#define SYS_GPU       62 /* (op): Intel-Grafik-Tests: 1 = Page-Flipping, 2 = Hardware-Mauszeiger, 3 = Blitter, 4 = Zaehler/Messung, 5 = EDID, 6 = Skalierer, 7 = Moduswechsel, 8 = DisplayPort (igdtest) -> 0 ok, < 0 Fehler (Details im Kernel-Log) */
 #define SYS_SETMODE   63 /* (breite, hoehe, hz100; 0 = egal) -> 0; breite 0 = Modus der Firmware. ERR_NOSYS ohne Treiber, ERR_NOENT unbekannt, ERR_AGAIN Grafikprogramm laeuft, ERR_IO */
 #define SYS_KLOG      61 /* (u64 *pos, buf, max) -> Bytes aus dem Kernel-Log ab *pos (wird weitergezaehlt), 0 = Ende */
 

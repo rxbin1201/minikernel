@@ -47,6 +47,9 @@ int igd_scale_test(void);
 /* Stufe 4, Teil 3 (igdtest mode): die per HDMI moeglichen Modi aus der EDID je einige Sekunden setzen, dann zurueck */
 int igd_mode_test(void);
 
+/* DisplayPort, Teil 1 (igdtest dp): nur lesen. Auf den Ports B-D per AUX nach DP-Geraeten suchen, DPCD und EDID (igd_dp.c) */
+int igd_dp_test(void);
+
 /* Fest eingebaut: Modi des Monitors (EDID, per HDMI moeglich, hoechstens so gross wie der Framebuffer der Firmware)
  * im Betrieb umschalten; die Konsole passt sich an. hz in 1/100 Hz (0 = hoechste Bildrate bzw. beim Setzen egal);
  * w = 0 setzt den Modus der Firmware. */

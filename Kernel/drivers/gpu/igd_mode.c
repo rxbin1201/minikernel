@@ -151,6 +151,10 @@ static int ddc_pin(int port)
     return port >= 1 && port <= 3 ? port : 0;
 }
 
+/* Grenze fuer den Hinweis hinter jedem Zeitablauf (HDMI: 300 MHz; DisplayPort: je nach Verbindung) */
+static uint32_t    dtd_limit = GEN9_HDMI_MAX_KHZ;
+static const char *dtd_note = "  [ueber 300 MHz: per HDMI auf Gen9 nicht moeglich]";
+
 static int edid_checksum(const uint8_t *b)
 {
     uint8_t s = 0;
@@ -202,7 +206,7 @@ static uint32_t dtd_print(const uint8_t *d, const char *what)
     kprintf("igdmode:   %s %ux%u%s @ %u.%02u Hz, Pixeltakt %u.%02u MHz, gesamt %ux%u, HSync %u+%u, VSync %u+%u, %s %s%s\n",
             what, t.ha, t.va, t.interlaced ? "i" : "", hz / 100, hz % 100, t.khz / 1000, t.khz % 1000 / 10, t.ht, t.vt,
             t.hso, t.hsw, t.vso, t.vsw, t.hpos ? "H+" : "H-", t.vpos ? "V+" : "V-",
-            t.khz > GEN9_HDMI_MAX_KHZ ? "  [ueber 300 MHz: per HDMI auf Gen9 nicht moeglich]" : "");
+            t.khz > dtd_limit ? dtd_note : "");
     return t.khz;
 }
 
@@ -1161,4 +1165,20 @@ void igd_modes_boot(void)
     if (rc)
         kprintf("igd: igdmode=%s: %s\n", want, rc == IGD_MODE_NOMODE ? "diesen Modus bietet der Monitor nicht an (resolution zeigt die Liste)"
                                                                     : "Umschalten fehlgeschlagen");
+}
+
+/* Fuer igd_dp.c: EDID (blocks Bloecke, schon gelesen) auswerten, Zeitablaeufe ueber limit_khz mit note markieren */
+void igd_edid_dump(const uint8_t *e, int blocks, uint32_t limit_khz, const char *note)
+{
+    uint32_t l = dtd_limit;
+    const char *n = dtd_note;
+    dtd_limit = limit_khz;
+    dtd_note = note;
+    edid_base(e);
+    if (blocks > 1 && edid_checksum(e + 128) && e[128] == 0x02)
+        edid_cta(e + 128);
+    else if (blocks > 1)
+        kprintf("igdmode: Erweiterungsblock Typ %#x (nicht ausgewertet)\n", e[128]);
+    dtd_limit = l;
+    dtd_note = n;
 }

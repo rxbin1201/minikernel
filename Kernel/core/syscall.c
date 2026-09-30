@@ -400,7 +400,8 @@ static void syscall_do(SyscallFrame *f)
             : f->rdi == 4 ? igd_info_report()
             : f->rdi == 5 ? igd_edid_test()
             : f->rdi == 6 ? igd_scale_test()
-            : f->rdi == 7 ? igd_mode_test() : ERR_INVAL;
+            : f->rdi == 7 ? igd_mode_test()
+            : f->rdi == 8 ? igd_dp_test() : ERR_INVAL;
         break;
     case SYS_PCIINFO: {
         PciInfo pi;
