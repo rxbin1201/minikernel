@@ -51,6 +51,19 @@ einer gemeinsamen Run-Queue und laufen auf jeder CPU. Kernel-Code ist durch eine
 
 In der Shell: `burn 5000 & burn 5000 & cpus` zeigt zwei ausgelastete CPUs.
 
+## Intel-Grafik (Gen9: Skylake bis Comet Lake, z.B. UHD Graphics 630)
+
+`Kernel/drivers/gpu/igd.c` setzt auf der Anzeige auf, die die UEFI-Firmware eingerichtet hat (Pipe, Anschluss,
+Modus bleiben unveraendert), und ergaenzt:
+
+- **Hardware-Mauszeiger:** eigene Ebene der Pipe; Konsole und Grafikprogramme verschieben ihn nur noch
+- **Doppelpufferung:** ganze Bilder von Grafikprogrammen (`gfx_present_all`) kommen in einen verdeckten Puffer und
+  werden beim Bildwechsel umgeschaltet (kein Tearing)
+
+`noigd` in der Kommandozeile schaltet beides ab. `igdtest` bzw. `igdtest cursor` pruefen Page-Flipping und
+Mauszeiger einzeln und schreiben Messwerte ins Kernel-Log (`dmesg`). QEMU emuliert keine Intel-GPU: getestet wird
+auf echter Hardware (bisher i5-8400T, UHD 630, 3440x1440 ueber HDMI).
+
 ## Fehlersuche
 
 - **Selbsttests:** `make test` (alle Gruppen) oder `make test TESTS=disk,user`; jede Gruppe laeuft auch einzeln.
