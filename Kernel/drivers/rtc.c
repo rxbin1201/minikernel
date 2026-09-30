@@ -18,6 +18,31 @@
 #define REG_CENT   0x32
 
 static uint64_t base_unix, base_ms;
+static volatile uint32_t base_seq; /* ungerade, waehrend base_* geaendert werden: Leser ohne Lock wiederholen dann */
+
+static void set_base(uint64_t unix_s, uint64_t ms)
+{
+    base_seq++;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    base_unix = unix_s;
+    base_ms = ms;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    base_seq++;
+}
+
+/* Liest base_* zusammenpassend (auch ohne Big Kernel Lock, z.B. aus SYS_TIME) */
+static void get_base(uint64_t *unix_s, uint64_t *ms)
+{
+    uint32_t seq;
+    do {
+        while ((seq = base_seq) & 1)
+            __asm__ __volatile__("pause");
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        *unix_s = base_unix;
+        *ms = base_ms;
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    } while (seq != base_seq);
+}
 static int      valid;
 
 static uint8_t cmos_read(uint8_t reg)
@@ -157,8 +182,7 @@ void rtc_init(void)
         kprintf("rtc: keine gueltige Uhrzeit in der RTC\n");
         return;
     }
-    base_unix = datetime_to_unix(&dt);
-    base_ms = time_ms();
+    set_base(datetime_to_unix(&dt), time_ms());
     valid = 1;
     unix_to_datetime(base_unix, &dt);
     kprintf("rtc: %04d-%02d-%02d %02d:%02d:%02d\n", dt.year, dt.month, dt.day, dt.hour, dt.min, dt.sec);
@@ -170,21 +194,25 @@ uint64_t rtc_now(void)
 {
     if (!valid)
         return 0;
-    return base_unix + (time_ms() - base_ms) / 1000;
+    uint64_t u, ms;
+    get_base(&u, &ms);
+    return u + (time_ms() - ms) / 1000;
 }
 
 uint64_t rtc_now_ms(void)
 {
     if (!valid)
         return 0;
-    return base_unix * 1000 + (time_ms() - base_ms);
+    uint64_t u, ms;
+    get_base(&u, &ms);
+    return u * 1000 + (time_ms() - ms);
 }
 
 int rtc_set_ms(uint64_t ms)
 {
     if (rtc_set(ms / 1000) != 0)
         return -1;
-    base_ms -= ms % 1000; /* die laufende Sekunde ist schon zum Teil vorbei */
+    set_base(base_unix, base_ms - ms % 1000); /* die laufende Sekunde ist schon zum Teil vorbei */
     return 0;
 }
 
@@ -296,8 +324,7 @@ int rtc_set(uint64_t t)
 #undef ENC
     cmos_write(REG_B, (uint8_t)((b | 0x02) & ~0x80)); /* 24-Stunden-Modus, Aktualisierung wieder an */
 
-    base_unix = t;
-    base_ms = time_ms();
+    set_base(t, time_ms());
     valid = 1;
     return 0;
 }

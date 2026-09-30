@@ -61,6 +61,7 @@ void sched_tick(void); /* mit BKL */
  * Thread. Dann den BKL nehmen und sched_preempt() aufrufen. */
 int  sched_tick_prepare(void);
 void sched_preempt(void);
+int  sched_has_waiting(void); /* wartet ein bereiter Thread? (ohne BKL, fuer SYS_YIELD) */
 
 uint64_t sched_switch_count(void);
 uint64_t sched_wakeup_count(void); /* Aufweckvorgaenge insgesamt (Schlaf-Ende und Events) */

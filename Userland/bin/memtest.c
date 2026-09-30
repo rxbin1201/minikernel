@@ -9,10 +9,43 @@ static int fail(const char *what)
     return 1;
 }
 
+/* memtest N: N Runden brk wachsen/schrumpfen und mmap/munmap mit Musterpruefung, ohne Ausgabe (Last fuer SMP-Tests:
+ * mehrere davon gleichzeitig pruefen, dass diese Syscalls ohne Big Kernel Lock parallel richtig laufen) */
+static int rounds(int n)
+{
+    char *base = sys_brk(0);
+    for (int r = 0; r < n; r++) {
+        int len = (64 + r % 7 * 16) * 1024;
+        char *end = sys_brk(base + len);
+        if (end != base + len)
+            return fail("brk wachsen (Runden)");
+        for (int i = 0; i < len; i += 4096)
+            base[i] = (char)(r + i);
+        volatile unsigned char *m = (volatile unsigned char *)sys_mmap(32 * 1024);
+        if ((s64)m < 0)
+            return fail("mmap (Runden)");
+        for (int i = 0; i < 32 * 1024; i += 512)
+            m[i] = (unsigned char)(r ^ i);
+        for (int i = 0; i < len; i += 4096)
+            if (base[i] != (char)(r + i))
+                return fail("brk Inhalt (Runden)");
+        for (int i = 0; i < 32 * 1024; i += 512)
+            if (m[i] != (unsigned char)(r ^ i))
+                return fail("mmap Inhalt (Runden)");
+        if (sys_munmap((void *)m, 32 * 1024) != 0 || sys_brk(base) != base)
+            return fail("freigeben (Runden)");
+    }
+    return 0;
+}
+
 void _start(int argc, char **argv)
 {
-    (void)argc;
-    (void)argv;
+    if (argc > 1) {
+        int n = 0;
+        for (const char *s = argv[1]; *s >= '0' && *s <= '9'; s++)
+            n = n * 10 + (*s - '0');
+        sys_exit(rounds(n));
+    }
 
     /* brk: 1 MiB Heap anfordern, beschreiben, pruefen, wieder verkleinern */
     char *base = sys_brk(0);

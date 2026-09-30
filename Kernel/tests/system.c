@@ -387,9 +387,12 @@ void test_smp(void)
 
     unsigned k = n < 4 ? n : 4, busy = 0;
     uint64_t before[SMP_MAX_CPUS], sum = 0, bkl_before = 0, bkl_after = 0;
+    uint64_t su0 = 0, sb0 = 0, su1 = 0, sb1 = 0;
     for (unsigned i = 0; i < n; i++) {
         before[i] = smp_cpu(i)->ticks_user;
         bkl_before += smp_cpu(i)->bkl_timer;
+        su0 += smp_cpu(i)->sys_unlocked;
+        sb0 += smp_cpu(i)->sys_bkl;
     }
     int pids[4], started = 1;
     for (unsigned i = 0; i < k; i++)
@@ -405,7 +408,12 @@ void test_smp(void)
         if (d >= 50) /* mindestens eine halbe Sekunde im User-Mode */
             busy++;
         bkl_after += smp_cpu(i)->bkl_timer;
+        su1 += smp_cpu(i)->sys_unlocked;
+        sb1 += smp_cpu(i)->sys_bkl;
     }
+    kprintf("  (Syscalls waehrenddessen: %lu ohne BKL, %lu mit BKL)\n", (unsigned long)(su1 - su0),
+            (unsigned long)(sb1 - sb0));
+    check("burn: Syscalls laufen ueberwiegend ohne BKL (sys_ticks)", su1 - su0 > 1000 && su1 - su0 > 10 * (sb1 - sb0));
     uint64_t bkl_ticks = bkl_after - bkl_before;
     kprintf("  (%u x burn 1500 ms: %lu User-Ticks, %u CPU(s) mit mindestens 50; davon %lu Timer-Ticks mit BKL)\n", k,
             (unsigned long)sum, busy, (unsigned long)bkl_ticks);
@@ -419,4 +427,19 @@ void test_smp(void)
         check("Mit freien CPUs werden rechnende kaum unterbrochen", bkl_ticks * 10 < sum);
 
     smp_stress(n);
+
+    /* brk/mmap/munmap laufen ohne BKL: mehrere Prozesse gleichzeitig, jeder prueft seinen Speicher */
+    uint64_t frames = pmm_free_frame_count(), heap0 = heap_total_bytes(), tables0 = paging_table_frames();
+    int mpids[4], mok = 1;
+    for (unsigned i = 0; i < k; i++)
+        mpids[i] = process_spawn("/bin/memtest", "memtest 300", 0);
+    for (unsigned i = 0; i < k; i++) {
+        int code = -1, faulted = 0;
+        if (mpids[i] <= 0 || process_wait(mpids[i], 0, &code, &faulted, 20000) != 0 || code != 0 || faulted)
+            mok = 0;
+    }
+    thread_sleep_ms(50); /* Idle-Thread raeumt Adressraeume und Stacks auf */
+    uint64_t grown = (heap_total_bytes() - heap0) / 4096 + (paging_table_frames() - tables0);
+    check("brk/mmap/munmap ohne BKL: mehrere memtest gleichzeitig fehlerfrei", mok);
+    check("brk/mmap/munmap ohne BKL: alle Frames zurueck", frames - pmm_free_frame_count() == grown);
 }

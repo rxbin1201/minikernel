@@ -24,7 +24,10 @@
  *   paging_lock  Kernel-Bereich der Seitentabellen
  *   pmm_lock     physische Frames
  * Reihenfolge: BKL -> sched_lock -> heap_lock -> paging_lock -> pmm_lock. Den Threadwechsel selbst macht nur, wer den
- * BKL haelt. Der Selbsttest "smp" prueft Heap und PMM mit Threads, die den BKL abgeben. */
+ * BKL haelt. Der Selbsttest "smp" prueft Heap und PMM mit Threads, die den BKL abgeben.
+ *
+ * Syscalls ohne BKL (syscall_unlocked in syscall.c): ticks, getpid, time, cpuinfo, yield (wenn niemand wartet) und
+ * brk/mmap/munmap. Sie fassen nur den eigenen Prozess an (ein Thread je Prozess) oder Teile mit eigenem Lock. */
 
 #define SMP_MAX_CPUS 16
 
@@ -42,6 +45,7 @@ typedef struct Cpu {
     volatile int   online;
     uint64_t       ticks_user, ticks_kernel, ticks_idle; /* Timer-Ticks nach Zustand der CPU */
     uint64_t       bkl_timer;   /* Timer-Interrupts in User-Code, die doch den BKL holen mussten (Threadwechsel/Kill) */
+    uint64_t       sys_unlocked, sys_bkl; /* Syscalls ohne bzw. mit BKL (syscall_dispatch) */
 } Cpu;
 
 #define CPU_OFF_KERNEL_RSP 8

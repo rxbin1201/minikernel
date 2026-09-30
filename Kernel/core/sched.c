@@ -412,6 +412,12 @@ int sched_tick_prepare(void)
     return waiting;
 }
 
+/* Wartet ein bereiter Thread auf eine CPU? (Momentaufnahme, ohne BKL) */
+int sched_has_waiting(void)
+{
+    return *(Thread *volatile *)&rq_head != 0;
+}
+
 /* Naechster Thread nach Round-Robin (mit BKL, IF = 0) */
 void sched_preempt(void)
 {

@@ -277,10 +277,56 @@ static void sys_sleep(uint64_t ms)
 
 static void syscall_do(SyscallFrame *f);
 
+/* Syscalls, die nur Daten des eigenen Prozesses anfassen (ein Prozess hat genau einen Thread, sein Speicher und der
+ * User-Teil seiner Seitentabellen gehoeren nur ihm) oder Teile mit eigenem Lock (PMM, Heap, Scheduler, Uhr): sie
+ * laufen ohne Big Kernel Lock und damit auf allen CPUs gleichzeitig. 1 = erledigt, 0 = normaler Weg mit BKL.
+ * Ein Kill wird hier nicht geprueft; das holt der naechste Timer-Tick oder Syscall mit BKL nach. */
+static int syscall_unlocked(SyscallFrame *f)
+{
+    Process *p = process_current();
+    int64_t ret;
+    switch (f->rax) {
+    case SYS_TICKS:  ret = (int64_t)apic_ticks(); break;
+    case SYS_GETPID: ret = process_pid(p); break;
+    case SYS_TIME:   ret = (int64_t)rtc_now(); break;
+    case SYS_YIELD:
+        if (sched_has_waiting())
+            return 0; /* ein anderer Thread wartet: wechseln geht nur mit BKL */
+        ret = 0;
+        break;
+    case SYS_BRK:    ret = process_brk(p, f->rdi); break;
+    case SYS_MMAP:   ret = process_mmap(p, f->rdi); break;
+    case SYS_MUNMAP: ret = process_munmap(p, f->rdi, f->rsi); break;
+    case SYS_CPUINFO: {
+        Cpu *c = smp_cpu((unsigned)f->rdi);
+        if (!process_user_range_ok(p, f->rsi, sizeof(CpuInfo), 1))
+            ret = ERR_FAULT;
+        else if (!c)
+            ret = ERR_NOENT;
+        else {
+            CpuInfo ci = {c->index, c->apic_id, c->ticks_user, c->ticks_kernel, c->ticks_idle};
+            memcpy((void *)f->rsi, &ci, sizeof(ci));
+            ret = 0;
+        }
+        break;
+    }
+    default:
+        return 0;
+    }
+    f->rax = (uint64_t)ret;
+    return 1;
+}
+
 /* Wird von syscall_entry auf dem Kernel-Stack des Threads aufgerufen (IF = 0). Aus dem User-Mode kommend haelt die
  * CPU den Big Kernel Lock nie (smp.h). */
 void syscall_dispatch(SyscallFrame *f)
 {
+    Cpu *c = this_cpu();
+    if (syscall_unlocked(f)) {
+        c->sys_unlocked++;
+        return;
+    }
+    c->sys_bkl++;
     bkl_acquire();
     syscall_do(f);
     bkl_release();
@@ -333,19 +379,6 @@ static void syscall_do(SyscallFrame *f)
     case SYS_KILL:     ret = process_kill_pid((uint32_t)f->rdi); break;
     case SYS_PROCINFO: ret = sys_procinfo(f->rdi, f->rsi); break;
     case SYS_USBINFO:  ret = sys_usbinfo(f->rdi, f->rsi); break;
-    case SYS_CPUINFO: {
-        Cpu *c = smp_cpu((unsigned)f->rdi);
-        if (!process_user_range_ok(process_current(), f->rsi, sizeof(CpuInfo), 1))
-            ret = ERR_FAULT;
-        else if (!c)
-            ret = ERR_NOENT;
-        else {
-            CpuInfo ci = {c->index, c->apic_id, c->ticks_user, c->ticks_kernel, c->ticks_idle};
-            memcpy((void *)f->rsi, &ci, sizeof(ci));
-            ret = 0;
-        }
-        break;
-    }
     case SYS_PCIINFO: {
         PciInfo pi;
         if (!process_user_range_ok(process_current(), f->rsi, sizeof(pi), 1))
