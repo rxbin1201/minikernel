@@ -72,6 +72,12 @@ typedef struct {
     uint32_t cycle;
 } Ring;
 
+/* Ereignisring eines Interrupters */
+typedef struct {
+    Trb     *trbs;
+    uint32_t deq, cycle;
+} EvRing;
+
 typedef struct {
     Ring     ring;
     int      active;
@@ -115,8 +121,8 @@ typedef struct Xhci {
     int      ports, slots, ctx_size;
     uint64_t *dcbaa;
     Ring     cmd;
-    Trb     *events;
-    uint32_t ev_deq, ev_cycle;
+    EvRing   ev[2];             /* 0: mit Interrupt (Tastatur, Maus, Kommandos, Ports); 1: ohne (Massenspeicher) */
+    int      nrings;            /* 2, wenn der Controller mindestens zwei Interrupter hat */
     volatile int cmd_done;
     int      cmd_cc, cmd_slot;
     uint8_t  port_proto[256];   /* 2 oder 3: USB-Hauptversion des Ports */
@@ -219,12 +225,13 @@ static void requeue_interrupt(UsbDevice *d, int dci)
     doorbell(d->x, d->slot, dci);
 }
 
-static void process_events(Xhci *x)
+static void process_ring(Xhci *x, int n)
 {
+    EvRing *r = &x->ev[n];
     int any = 0;
     for (;;) {
-        Trb *t = &x->events[x->ev_deq];
-        if ((t->d3 & 1) != x->ev_cycle)
+        Trb *t = &r->trbs[r->deq];
+        if ((t->d3 & 1) != r->cycle)
             break;
         barrier();
         uint32_t type = (t->d3 >> 10) & 0x3F;
@@ -257,15 +264,21 @@ static void process_events(Xhci *x)
             x->port_changed[(t->d0 >> 24) & 0xFF] = 1;
         }
 
-        x->ev_deq++;
-        if (x->ev_deq == RING_TRBS) {
-            x->ev_deq = 0;
-            x->ev_cycle ^= 1;
+        r->deq++;
+        if (r->deq == RING_TRBS) {
+            r->deq = 0;
+            r->cycle ^= 1;
         }
         any = 1;
     }
-    if (any) /* ERDP: neuer Lesezeiger; Bit 3 (Event Handler Busy) loeschen */
-        wr64(x->rt, 0x38, (uint64_t)&x->events[x->ev_deq] | (1u << 3));
+    if (any) /* ERDP des Interrupters: neuer Lesezeiger; Bit 3 (Event Handler Busy) loeschen */
+        wr64(x->rt, 0x38 + 32u * (uint32_t)n, (uint64_t)&r->trbs[r->deq] | (1u << 3));
+}
+
+static void process_events(Xhci *x)
+{
+    for (int n = 0; n < x->nrings; n++)
+        process_ring(x, n);
 }
 
 /* ---------- Kommandos ---------- */
@@ -280,7 +293,7 @@ static int xhci_cmd(Xhci *x, uint32_t d0, uint32_t d1, uint32_t d2, uint32_t d3)
         kprintf("xhci: Kommando (Typ %u) ohne Antwort\n", (d3 >> 10) & 0x3F);
         kprintf("xhci: USBCMD %#x USBSTS %#x CRCR %#x%08x, Ereignis[0].d3 %#x, Kommando[0].d3 %#x, ERDP %#x\n",
                 rd32(x->op, OP_USBCMD), rd32(x->op, OP_USBSTS), rd32(x->op, OP_CRCR + 4), rd32(x->op, OP_CRCR),
-                x->events[0].d3, x->cmd.trbs[0].d3, rd32(x->rt, 0x38));
+                x->ev[0].trbs[0].d3, x->cmd.trbs[0].d3, rd32(x->rt, 0x38));
         return -1;
     }
     return x->cmd_cc == CC_SUCCESS ? 0 : -x->cmd_cc;
@@ -350,8 +363,11 @@ int usb_bulk(UsbDevice *d, uint8_t endpoint_address, void *buf, uint32_t len, ui
         uint32_t packets_left = e->mps ? (remaining + e->mps - 1) / e->mps : 0;
         if (packets_left > 31)
             packets_left = 31;
-        ring_push(&e->ring, lo(addr), hi(addr), chunk | (packets_left << 17),
-                  (TRB_NORMAL << 10) | (remaining ? (1u << 4) : (1u << 5))); /* Chain oder IOC */
+        /* Chain, am Ende IOC. Interrupter Target: das Ende kommt in den Ereignisring von Interrupter 1, der keine
+         * Interrupts ausloest (hier wird ohnehin darauf gewartet; Massenspeicher macht tausende Transfers, die sonst
+         * jedes Mal den USB-Thread umsonst wecken wuerden) */
+        ring_push(&e->ring, lo(addr), hi(addr), chunk | (packets_left << 17) | ((uint32_t)(x->nrings - 1) << 22),
+                  (TRB_NORMAL << 10) | (remaining ? (1u << 4) : (1u << 5)));
         addr += chunk;
     } while (remaining);
     doorbell(x, d->slot, dci);
@@ -895,8 +911,8 @@ static int init_controller(Xhci *x, const PciDevice *pci)
     uint64_t need = caplen + OP_PORTS + (uint64_t)x->ports * 0x10;
     if (dboff + 4ULL * (x->slots + 1) > need)
         need = dboff + 4ULL * (x->slots + 1);
-    if (rtsoff + 0x40 > need)
-        need = rtsoff + 0x40;
+    if (rtsoff + 0x60 > need) /* Runtime-Register bis einschliesslich Interrupter 1 */
+        need = rtsoff + 0x60;
     if (paging_map_mmio(bar, need + 0x100) != 0)
         return -1;
     x->op = x->cap + caplen;
@@ -962,10 +978,15 @@ static int init_controller(Xhci *x, const PciDevice *pci)
     x->ctrl_buf = blk_dma_alloc(4096);
     if (!x->dcbaa || !x->ctrl_buf || ring_init(&x->cmd) != 0)
         return -1;
-    x->events = blk_dma_alloc(RING_TRBS * sizeof(Trb));
-    uint64_t *erst = blk_dma_alloc(4096);
-    if (!x->events || !erst)
+    x->nrings = ((hcs1 >> 8) & 0x7FF) >= 2 ? 2 : 1; /* MaxIntrs */
+    uint64_t *erst = blk_dma_alloc(4096);          /* je Interrupter ein Segment-Tabelleneintrag (16 Byte) */
+    if (!erst)
         return -1;
+    for (int n = 0; n < x->nrings; n++) {
+        x->ev[n].trbs = blk_dma_alloc(RING_TRBS * sizeof(Trb));
+        if (!x->ev[n].trbs)
+            return -1;
+    }
 
     uint32_t scratch = ((hcs2 >> 21) & 0x1F) << 5 | ((hcs2 >> 27) & 0x1F);
     if (scratch) {
@@ -985,14 +1006,17 @@ static int init_controller(Xhci *x, const PciDevice *pci)
     wr64(x->op, OP_DCBAAP, (uint64_t)x->dcbaa);
     wr64(x->op, OP_CRCR, (uint64_t)x->cmd.trbs | 1); /* Ring Cycle State = 1 */
 
-    erst[0] = (uint64_t)x->events;
-    erst[1] = RING_TRBS; /* Segmentgroesse (Rest reserviert) */
-    x->ev_deq = 0;
-    x->ev_cycle = 1;
-    wr32(x->rt, 0x28, 1);                          /* ERSTSZ */
-    wr64(x->rt, 0x38, (uint64_t)x->events);        /* ERDP */
-    wr64(x->rt, 0x30, (uint64_t)erst);             /* ERSTBA (zuletzt) */
-    wr32(x->rt, 0x20, rd32(x->rt, 0x20) | 1);      /* IMAN: Interrupt Pending loeschen; IE bleibt aus (wir pollen) */
+    for (int n = 0; n < x->nrings; n++) { /* Interrupter n: Register ab rt + 0x20 + 32 * n */
+        uint32_t ir = 0x20 + 32u * (uint32_t)n;
+        erst[n * 8] = (uint64_t)x->ev[n].trbs;
+        erst[n * 8 + 1] = RING_TRBS;               /* Segmentgroesse; je Interrupter 64 Byte (ERSTBA-Ausrichtung) */
+        x->ev[n].deq = 0;
+        x->ev[n].cycle = 1;
+        wr32(x->rt, ir + 0x08, 1);                 /* ERSTSZ */
+        wr64(x->rt, ir + 0x18, (uint64_t)x->ev[n].trbs); /* ERDP */
+        wr64(x->rt, ir + 0x10, (uint64_t)&erst[n * 8]);  /* ERSTBA (zuletzt) */
+        wr32(x->rt, ir, IMAN_IP);                  /* Interrupt Pending loeschen, IE aus (Interrupter 0: enable_interrupts) */
+    }
 
     wr32(x->op, OP_USBCMD, rd32(x->op, OP_USBCMD) | CMD_RS);
     if (!WAIT_UNTIL(!(rd32(x->op, OP_USBSTS) & STS_HCH), 500)) {

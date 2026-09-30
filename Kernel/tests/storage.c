@@ -3,6 +3,7 @@
 #include "lib/kprintf.h"
 #include "lib/string.h"
 #include "drivers/block/blk.h"
+#include "mm/pmm.h"
 #include "fs/fs.h"
 #include "drivers/usb/usb.h"
 #include "drivers/rtc.h"
@@ -22,6 +23,24 @@ void test_usb(void)
     if (n) { /* jedes Kommando beim Erkennen der Geraete loest ein Ereignis und damit einen Interrupt aus */
         kprintf("  (%lu xHCI-Interrupts per MSI-X/MSI)\n", (unsigned long)usb_irq_count());
         check("xHCI meldet Ereignisse per Interrupt (MSI-X/MSI)", usb_irq_count() > 0);
+    }
+    /* Massenspeicher: das Ende der Transfers landet beim Interrupter ohne Interrupts (der Aufrufer wartet selbst) */
+    for (int i = 0; i < blk_count(); i++) {
+        BlkDev *d = blk_get(i);
+        if (!d || memcmp(d->name, "usb", 3) != 0)
+            continue;
+        uint8_t *buf = blk_dma_alloc(8 * 512);
+        uint64_t irq0 = usb_irq_count();
+        int ok = buf != 0;
+        for (int k = 0; ok && k < 25; k++)
+            ok = blk_read(d, (uint64_t)k * 8, 8, buf) == 0;
+        uint64_t irqs = usb_irq_count() - irq0;
+        kprintf("  (%s: 25 x 8 Sektoren gelesen, %lu Interrupts dabei)\n", d->name, (unsigned long)irqs);
+        check("USB-Massenspeicher: Lesen klappt", ok);
+        check("USB-Massenspeicher: Transfers loesen keine Interrupts aus", irqs <= 2);
+        if (buf)
+            pmm_free_frame((uint64_t)buf); /* blk_dma_alloc: 4 KiB = ein Frame */
+        break;
     }
     for (unsigned i = 0; i < n; i++) {
         usb_device_info(i, &info);
