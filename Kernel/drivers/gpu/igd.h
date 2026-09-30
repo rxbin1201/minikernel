@@ -31,4 +31,13 @@ int igd_flip_test(void);
 /* Stufe 2, nur auf Befehl (igdtest cursor): Hardware-Mauszeiger einschalten, 3 s im Kreis bewegen, wieder aus */
 int igd_cursor_test(void);
 
+/* Fest eingebaut (ohne "noigd" in der Kommandozeile): Hardware-Mauszeiger und Doppelpufferung */
+int  igd_cursor_available(void);
+void igd_cursor_move(int x, int y, int visible); /* Spitze des Pfeils bei (x, y) */
+
+/* Grafikmodus: Rechteck anzeigen. Ein ganzes Bild kommt in den verdeckten Puffer und wird beim Bildwechsel
+ * umgeschaltet. 1 = erledigt, 0 = nicht zustaendig (dann wie bisher in den Framebuffer). */
+int  igd_gfx_blit(const uint32_t *src, uint32_t pitch, int x, int y, int w, int h);
+void igd_gfx_end(void); /* Grafikmodus endet: wieder den Framebuffer der Firmware anzeigen */
+
 #endif

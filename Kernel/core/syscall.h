@@ -42,7 +42,7 @@
 #define SYS_USBINFO   35 /* (index, UsbInfo*) -> 0 oder ERR_NOENT am Ende (Struktur siehe usb.h) */
 
 #define SYS_VIDEOINFO 41 /* (index, VideoInfo*) -> 0 oder ERR_NOENT am Ende: verfuegbare Grafikmodi */
-#define SYS_GFX       47 /* (op, arg): 0 = Bildschirm uebernehmen -> (Breite << 32) | Hoehe, 1 = GfxBlit* kopieren, 2 = freigeben */
+#define SYS_GFX       47 /* (op, arg): 0 = Bildschirm uebernehmen -> (Breite << 32) | Hoehe, 1 = GfxBlit* kopieren, 2 = freigeben, 3 = Hardware-Mauszeiger (arg = x | y << 16 | sichtbar << 32; ERR_NOSYS ohne) */
 #define SYS_FONT      48 /* (zeichen, out[16]) -> 0: 8x16-Glyph (Bit 7 = links) */
 #define SYS_FDAVAIL   49 /* (fd) -> wartende Bytes einer Pipe, 0 = noch nichts, -1 = Ende */
 #define SYS_STATFS    46 /* (pfad, u64 out[2]) -> 0: Groesse und freier Platz in Bytes */

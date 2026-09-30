@@ -7,6 +7,7 @@ static u32    *gfx_front;       /* gfx_screen plus Mauszeiger: das, was auf dem 
 Clip           gfx_clip;
 static Clip    gfx_base = {0, 0, 1 << 30, 1 << 30}; /* aeussere Grenze: jedes gfx_set_clip wird darauf beschraenkt */
 static int     gfx_cur_x, gfx_cur_y, gfx_cur_visible = 1;
+static int     gfx_hw_cursor; /* der Kernel zeigt den Zeiger als eigene Ebene (Intel-Grafik): nichts einzeichnen */
 
 /* ---------- Speicher ---------- */
 
@@ -354,7 +355,7 @@ static const char *const gfx_cursor_img[GFX_CUR_H] = {
     "X    X..X   ", "     X..X   ", "      X..X  ", "      X..X  ", "       XX   ",
 };
 
-static void gfx_blit_front(int x, int y, int w, int h)
+static void gfx_blit_from(const u32 *src, int x, int y, int w, int h)
 {
     if (x < 0) { w += x; x = 0; }
     if (y < 0) { h += y; y = 0; }
@@ -362,8 +363,15 @@ static void gfx_blit_front(int x, int y, int w, int h)
     if (y + h > gfx_screen.h) h = gfx_screen.h - y;
     if (w <= 0 || h <= 0)
         return;
-    GfxBlit b = {(u64)(gfx_front + (u64)y * (u64)gfx_screen.w + (u64)x), (unsigned)gfx_screen.w, x, y, w, h};
+    GfxBlit b = {(u64)(src + (u64)y * (u64)gfx_screen.w + (u64)x), (unsigned)gfx_screen.w, x, y, w, h};
     sys_gfx(1, &b);
+}
+
+/* SYS_GFX 3: Hardware-Mauszeiger setzen; 0 = ok, sonst gibt es keinen */
+static s64 gfx_hw_cursor_set(void)
+{
+    u64 arg = ((u64)(gfx_cur_x & 0xFFFF)) | ((u64)(gfx_cur_y & 0xFFFF) << 16) | ((u64)(gfx_cur_visible != 0) << 32);
+    return sys_gfx(3, (const void *)arg);
 }
 
 /* Rechteck aus gfx_screen in die Anzeige uebernehmen, Zeiger darueber zeichnen */
@@ -396,8 +404,12 @@ void gfx_compose(int x, int y, int w, int h)
 
 void gfx_present(int x, int y, int w, int h)
 {
+    if (gfx_hw_cursor) { /* Zeiger ist eine eigene Ebene: direkt aus gfx_screen, ohne Zwischenkopie */
+        gfx_blit_from(gfx_screen.px, x, y, w, h);
+        return;
+    }
     gfx_compose(x, y, w, h);
-    gfx_blit_front(x, y, w, h);
+    gfx_blit_from(gfx_front, x, y, w, h);
 }
 
 void gfx_present_all(void)
@@ -412,6 +424,10 @@ void gfx_move_cursor(int x, int y)
     int ox = gfx_cur_x, oy = gfx_cur_y;
     gfx_cur_x = x;
     gfx_cur_y = y;
+    if (gfx_hw_cursor) {
+        gfx_hw_cursor_set();
+        return;
+    }
     gfx_present(ox, oy, GFX_CUR_W, GFX_CUR_H);
     gfx_present(x, y, GFX_CUR_W, GFX_CUR_H);
 }
@@ -419,6 +435,10 @@ void gfx_move_cursor(int x, int y)
 void gfx_show_cursor(int visible)
 {
     gfx_cur_visible = visible;
+    if (gfx_hw_cursor) {
+        gfx_hw_cursor_set();
+        return;
+    }
     gfx_present(gfx_cur_x, gfx_cur_y, GFX_CUR_W, GFX_CUR_H);
 }
 
@@ -529,6 +549,7 @@ int gfx_open(void)
     gfx_cur_x = gfx_mprev.x;
     gfx_cur_y = gfx_mprev.y;
     gfx_cur_visible = gfx_mprev.attached != 0;
+    gfx_hw_cursor = gfx_hw_cursor_set() == 0;
     gfx_qh = gfx_qt = 0;
     gfx_left_down = gfx_right_down = 0;
     while (sys_getchar() >= 0) /* alte Tasten verwerfen */
@@ -558,6 +579,8 @@ int gfx_resume(void)
     gfx_cur_x = gfx_mprev.x;
     gfx_cur_y = gfx_mprev.y;
     gfx_left_down = gfx_right_down = 0;
+    if (gfx_hw_cursor)
+        gfx_hw_cursor_set();
     gfx_present_all();
     return 0;
 }

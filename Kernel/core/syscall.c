@@ -555,6 +555,15 @@ static void syscall_do(SyscallFrame *f)
                     ret = 0;
                 }
             }
+        } else if (f->rdi == 3) { /* Hardware-Mauszeiger: rsi = x | y << 16 | sichtbar << 32 */
+            if (!console_gfx_owner(pid))
+                ret = ERR_INVAL;
+            else if (!igd_cursor_available())
+                ret = ERR_NOSYS;
+            else {
+                igd_cursor_move((int16_t)(f->rsi & 0xFFFF), (int16_t)((f->rsi >> 16) & 0xFFFF), (int)((f->rsi >> 32) & 1));
+                ret = 0;
+            }
         } else if (f->rdi == 2) {
             if (console_gfx_owner(pid)) {
                 console_gfx_release(pid);

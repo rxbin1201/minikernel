@@ -1,6 +1,7 @@
 #include "console/console.h"
 #include "arch/x86_64/cpu.h"
 #include "console/font.h"
+#include "drivers/gpu/igd.h"
 #include "mm/heap.h"
 #include "lib/kprintf.h"
 #include "core/sched.h"
@@ -69,8 +70,15 @@ static int      cur_wanted, cur_drawn;
 static uint32_t cur_s = 1;
 static void   (*tick_hook)(void);
 
+/* Mit Hardware-Mauszeiger (igd.c) wird nichts gezeichnet, nur die Zeiger-Ebene verschoben bzw. aus-/eingeschaltet.
+ * Im Grafikmodus steuert das Programm den Zeiger selbst (SYS_GFX 3). */
 static void cursor_hide(void)
 {
+    if (igd_cursor_available()) {
+        if (!gfx_mode)
+            igd_cursor_move(cur_x, cur_y, 0);
+        return;
+    }
     if (!cur_drawn || !shadow || gfx_mode)
         return;
     for (uint32_t y = 0; y < CUR_H * cur_s; y++) {
@@ -90,6 +98,11 @@ static void cursor_hide(void)
 
 static void cursor_show(void)
 {
+    if (igd_cursor_available()) {
+        if (!gfx_mode)
+            igd_cursor_move(cur_x, cur_y, cur_wanted);
+        return;
+    }
     if (!cur_wanted || !shadow || gfx_mode)
         return;
     cur_s = scale;
@@ -148,6 +161,7 @@ void console_gfx_release(uint32_t pid)
     memmove((void *)fb, shadow, (uint64_t)height_px * pitch * sizeof(uint32_t));
     cursor_show();
     irq_restore(f);
+    igd_gfx_end(); /* zeigte das Programm den zweiten Puffer: zurueck auf den Framebuffer (wartet ggf. ein Bild) */
 }
 
 int console_gfx_owner(uint32_t pid)
@@ -159,6 +173,8 @@ int console_gfx_owner(uint32_t pid)
 void console_gfx_blit(const uint32_t *src, uint32_t src_pitch, int x, int y, int w, int h)
 {
     if (!gfx_mode)
+        return;
+    if (igd_gfx_blit(src, src_pitch, x, y, w, h)) /* Intel-Grafik: ganze Bilder per Doppelpufferung */
         return;
     int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
     int x1 = x + w > (int)width_px ? (int)width_px : x + w, y1 = y + h > (int)height_px ? (int)height_px : y + h;

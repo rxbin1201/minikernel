@@ -9,6 +9,8 @@
 #include "mm/heap.h"
 #include "console/console.h"
 #include "core/sched.h"
+#include "core/cmdline.h"
+#include "lib/string.h"
 
 /* ---------- Register (Offsets in BAR0) ---------- */
 
@@ -175,6 +177,8 @@ static void dump_pipe(int p, const BootInfo *bi)
     }
 }
 
+static void display_init(const BootInfo *bi);
+
 void igd_init(const BootInfo *bi)
 {
     PciDevice d;
@@ -238,9 +242,12 @@ void igd_init(const BootInfo *bi)
         }
         dump_pipe(p, bi);
     }
-    if (info.scanout_pipe < 0)
+    if (info.scanout_pipe < 0) {
         kprintf("igd: keine Pipe zeigt den GOP-Framebuffer (%#lx) - bitte dieses Log schicken\n",
                 (unsigned long)bi->fb.base);
+        return;
+    }
+    display_init(bi);
 }
 
 /* ---------- Stufe 2: Page-Flipping (nur auf Befehl: igdtest) ---------- */
@@ -551,4 +558,188 @@ free_frames:
     for (uint32_t i = 0; i < got; i++)
         pmm_free_frame(frames[i]);
     return rc;
+}
+
+/* ---------- Fest eingebaut: Hardware-Mauszeiger und Doppelpufferung ----------
+ *
+ * Mauszeiger: eigene Ebene der Pipe (64x64 ARGB), die Konsole und Grafikprogramme nur noch verschieben.
+ * Doppelpufferung: Puffer A ist der Framebuffer der Firmware (Stolen Memory, fuer die CPU ueber die Aperture), B ein
+ * gleich grosser Puffer im RAM. Ein komplettes Bild eines Grafikprogramms kommt in den gerade nicht angezeigten Puffer,
+ * dann wird beim naechsten Bildwechsel umgeschaltet: kein Tearing. Teil-Updates gehen in den angezeigten Puffer; der
+ * andere wird vor seiner naechsten Anzeige ohnehin ganz ueberschrieben. Gewartet wird erst, bevor der naechste Puffer
+ * beschrieben wird: das Programm laeuft so von selbst im Takt der Bildrate.
+ * "noigd" in der Kommandozeile schaltet beides ab (dann wie vorher alles in Software). */
+
+static int       hw_cursor;           /* Zeiger-Ebene eingerichtet */
+static uint32_t  cursor_surf;
+static int       cursor_on = -1;
+static int       flip_ready;          /* Puffer B eingerichtet */
+static uint32_t  scr_w, scr_h, scr_stride;
+static uint32_t  surf_a, surf_b;
+static uint8_t  *buf_a, *buf_b;       /* CPU-Adressen: A ueber die Aperture (write-combining), B im RAM */
+static int       front_b;             /* 1: B wird angezeigt (oder der Wechsel dorthin steht an) */
+static uint32_t  pending;             /* Surface, deren Wechsel noch nicht bestaetigt ist, 0 = keiner */
+
+static void draw_cursor_image(uint64_t frames[4])
+{
+    uint32_t sc = console_scale();
+    if (sc < 1)
+        sc = 1;
+    if (sc > 3) /* 12x19 Punkte, 64x64 Pixel Platz */
+        sc = 3;
+    for (uint32_t y = 0; y < 64; y++)
+        for (uint32_t x = 0; x < 64; x++) {
+            uint32_t px = 0;
+            if (y / sc < 19 && x / sc < 12) {
+                char c = arrow[y / sc][x / sc];
+                px = c == 'X' ? 0xFF000000u : c == '.' ? 0xFFFFFFFFu : 0;
+            }
+            uint64_t off = (uint64_t)y * 256 + (uint64_t)x * 4;
+            *(uint32_t *)(frames[off >> 12] + (off & 4095)) = px;
+        }
+    for (int i = 0; i < 4; i++)
+        clflush_range(frames[i], 4096);
+}
+
+static int setup_cursor(int p)
+{
+    uint32_t plane_end = (rd(PLANE_BUF_CFG(p)) >> 16) & 0x3FF, start = plane_end + 1, end = start + 31;
+    uint32_t base = ggtt_entries / 2 + 0x30000; /* nicht dort, wo igdtest seine Probe-Bereiche hat */
+    uint64_t saved[4], frames[4];
+    if (end >= DDB_BLOCKS || ggtt_claim(base, 4, saved) != 0)
+        return -1;
+    for (int i = 0; i < 4; i++)
+        if (!(frames[i] = pmm_alloc_frame())) {
+            while (i--)
+                pmm_free_frame(frames[i]);
+            return -1;
+        }
+    draw_cursor_image(frames);
+    for (int i = 0; i < 4; i++)
+        ggtt[base + i] = frames[i] | PTE_VALID;
+    ggtt_flush();
+    cursor_surf = base << 12;
+    wr(CUR_BUF_CFG(p), (end << 16) | start);
+    wr(CUR_WM(p, 0), (1u << 31) | (1u << 14) | 8);
+    wr(CUR_CTL(p), 0);            /* erst sichtbar, wenn eine Maus da ist */
+    wr(CUR_BASE(p), cursor_surf);
+    hw_cursor = 1;
+    cursor_on = 0;
+    return 0;
+}
+
+static int setup_flip(int p)
+{
+    uint32_t pages = (uint32_t)(((uint64_t)scr_stride * scr_h + 4095) / 4096);
+    uint32_t base = ggtt_entries / 4; /* 1 GiB: getrennt von igdtest (ab 2 GiB) */
+    uint64_t *saved = kmalloc(sizeof(uint64_t) * pages);
+    if (!saved)
+        return -1;
+    int claim = ggtt_claim(base, pages, saved);
+    kfree(saved); /* die Eintraege gehoeren ab jetzt dauerhaft uns */
+    if (claim)
+        return -1;
+    uint64_t b = pmm_alloc_frames(pages); /* am Stueck: dann ist jede Zeile zusammenhaengend */
+    if (!b)
+        return -1;
+    for (uint32_t i = 0; i < pages; i++)
+        ggtt[base + i] = (b + (uint64_t)i * 4096) | PTE_VALID;
+    ggtt_flush();
+    buf_b = (uint8_t *)b;
+    surf_b = base << 12;
+    (void)p;
+    flip_ready = 1;
+    return 0;
+}
+
+static void display_init(const BootInfo *bi)
+{
+    if (cmdline_has("noigd")) {
+        kprintf("igd: 'noigd': Mauszeiger und Doppelpufferung bleiben in Software\n");
+        return;
+    }
+    int p = info.scanout_pipe;
+    uint32_t ctl = rd(PLANE_CTL(p)), size = rd(PLANE_SIZE(p));
+    scr_w = (size & 0xFFF) + 1;
+    scr_h = ((size >> 16) & 0xFFF) + 1;
+    scr_stride = (rd(PLANE_STRIDE(p)) & 0x3FF) * 64;
+    if ((ctl & (7u << 10)) || ((ctl >> 24) & 0xF) != 4 || scr_stride < scr_w * 4) {
+        kprintf("igd: Ebene nicht linear/32 Bit: Mauszeiger und Doppelpufferung bleiben in Software\n");
+        return;
+    }
+    surf_a = info.scanout_surf;
+    buf_a = (uint8_t *)bi->fb.base;
+    int c = setup_cursor(p), f = setup_flip(p);
+    kprintf("igd: Hardware-Mauszeiger %s, Doppelpufferung %s (zweiter Puffer %u KiB im RAM)\n", c == 0 ? "an" : "AUS",
+            f == 0 ? "an" : "AUS", (uint32_t)((uint64_t)scr_stride * scr_h / 1024));
+}
+
+int igd_cursor_available(void)
+{
+    return hw_cursor;
+}
+
+void igd_cursor_move(int x, int y, int visible)
+{
+    if (!hw_cursor)
+        return;
+    int p = info.scanout_pipe;
+    if (visible != cursor_on) {
+        wr(CUR_CTL(p), visible ? 0x27 : 0);
+        cursor_on = visible;
+    }
+    wr(CUR_POS(p), cur_pos(x, y));
+    wr(CUR_BASE(p), cursor_surf); /* uebernimmt Position/Sichtbarkeit beim naechsten Bildwechsel */
+}
+
+/* Wartet, bis der zuletzt angestossene Wechsel angezeigt wird (danach wird der andere Puffer nicht mehr gelesen) */
+static void wait_flip(void)
+{
+    if (!pending)
+        return;
+    int p = info.scanout_pipe;
+    for (int i = 0; i < 20 && (rd(PLANE_SURFLIVE(p)) & ~0xFFFu) != pending; i++)
+        thread_sleep_ms(2); /* hoechstens ein Bild (20 ms bei 50 Hz); schlafend, damit andere CPUs weiterkommen */
+    pending = 0;
+}
+
+static void copy_rect(uint8_t *dst, const uint32_t *src, uint32_t pitch, int x, int y, int w, int h, int flush)
+{
+    for (int yy = 0; yy < h; yy++) {
+        uint8_t *d = dst + (uint64_t)(y + yy) * scr_stride + (uint64_t)x * 4;
+        memcpy(d, src + (uint64_t)yy * pitch, (uint64_t)w * 4);
+        if (flush) /* RAM-Puffer B: die Display-Engine liest am CPU-Cache vorbei */
+            clflush_range((uint64_t)d, (uint64_t)w * 4);
+    }
+    __asm__ __volatile__("sfence" : : : "memory"); /* write-combining-Puffer leeren (A) */
+}
+
+int igd_gfx_blit(const uint32_t *src, uint32_t pitch, int x, int y, int w, int h)
+{
+    if (!flip_ready || x < 0 || y < 0 || (uint32_t)(x + w) > scr_w || (uint32_t)(y + h) > scr_h)
+        return 0;
+    if (x == 0 && y == 0 && (uint32_t)w == scr_w && (uint32_t)h == scr_h) { /* ganzes Bild: in den Hintergrund, umschalten */
+        wait_flip();
+        int to_b = !front_b;
+        copy_rect(to_b ? buf_b : buf_a, src, pitch, 0, 0, w, h, to_b);
+        pending = to_b ? surf_b : surf_a;
+        wr(PLANE_SURF(info.scanout_pipe), pending);
+        front_b = to_b;
+        return 1;
+    }
+    copy_rect(front_b ? buf_b : buf_a, src, pitch, x, y, w, h, front_b); /* Teil-Update: in den angezeigten Puffer */
+    return 1;
+}
+
+void igd_gfx_end(void)
+{
+    if (!flip_ready)
+        return;
+    wait_flip();
+    if (front_b) { /* die Konsole zeichnet in A */
+        pending = surf_a;
+        wr(PLANE_SURF(info.scanout_pipe), surf_a);
+        wait_flip();
+        front_b = 0;
+    }
 }
