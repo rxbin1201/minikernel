@@ -12,7 +12,8 @@ void     klog_putc(char c);
 uint64_t klog_total(void); /* bisher geschriebene Bytes; die aeltesten KLOG_SIZE davon sind noch da */
 
 /* Kopiert ab Position pos (0 = Anfang des Logs) hoechstens max Bytes; Ergebnis: Anzahl. Ist pos schon aus dem
- * Puffer gefallen, geht es beim aeltesten noch vorhandenen Byte weiter (*pos wird angepasst). */
+ * Puffer gefallen, geht es beim aeltesten noch vorhandenen Byte weiter (*pos wird angepasst). Liegt pos hinter
+ * dem Ende (z.B. ~0), wird *pos auf das Ende gesetzt: so erfaehrt man, wie weit das Log gerade reicht. */
 uint64_t klog_read(uint64_t *pos, char *buf, uint64_t max);
 
 #endif

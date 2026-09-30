@@ -60,8 +60,10 @@ Modus bleiben unveraendert), und ergaenzt:
 - **Doppelpufferung:** ganze Bilder von Grafikprogrammen (`gfx_present_all`) kommen in einen verdeckten Puffer und
   werden beim Bildwechsel umgeschaltet (kein Tearing)
 
-`noigd` in der Kommandozeile schaltet beides ab. `igdtest` bzw. `igdtest cursor` pruefen Page-Flipping und
-Mauszeiger einzeln und schreiben Messwerte ins Kernel-Log (`dmesg`). QEMU emuliert keine Intel-GPU: getestet wird
+`noigd` in der Kommandozeile schaltet beides ab. `igdtest`, `igdtest cursor` und `igdtest blit` pruefen
+Page-Flipping, Mauszeiger und Blitter einzeln und schreiben Messwerte ins Kernel-Log (`dmesg`). `igdtest info`
+zeigt, wie viele Bild-Updates es seit dem Start gab und was sie gekostet haben, und vergleicht die Kopierwege fuer
+ganze Bilder. QEMU emuliert keine Intel-GPU: getestet wird
 auf echter Hardware (bisher i5-8400T, UHD 630, 3440x1440 ueber HDMI).
 
 ## Fehlersuche

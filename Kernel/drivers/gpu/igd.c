@@ -581,6 +581,12 @@ uint8_t  *igd_buf_a, *igd_buf_b;       /* CPU-Adressen: A ueber die Aperture (wr
 static int       front_b;             /* 1: B wird angezeigt (oder der Wechsel dorthin steht an) */
 static uint32_t  pending;             /* Surface, deren Wechsel noch nicht bestaetigt ist, 0 = keiner */
 
+/* Zaehler fuer igdtest info: was kosten die Bild-Updates der Grafikprogramme? */
+static struct {
+    uint64_t full_n, full_wait_us, full_copy_us, full_max_us; /* ganze Bilder (Doppelpufferung) */
+    uint64_t part_n, part_px, part_us;                         /* Teil-Updates in den angezeigten Puffer */
+} bstat;
+
 static void draw_cursor_image(uint64_t frames[4])
 {
     uint32_t sc = console_scale();
@@ -719,16 +725,27 @@ int igd_gfx_blit(const uint32_t *src, uint32_t pitch, int x, int y, int w, int h
 {
     if (!igd_flip_ready || x < 0 || y < 0 || (uint32_t)(x + w) > igd_scr_w || (uint32_t)(y + h) > igd_scr_h)
         return 0;
+    uint64_t t0 = time_us();
     if (x == 0 && y == 0 && (uint32_t)w == igd_scr_w && (uint32_t)h == igd_scr_h) { /* ganzes Bild: in den Hintergrund, umschalten */
         wait_flip();
+        uint64_t t1 = time_us();
         int to_b = !front_b;
         copy_rect(to_b ? igd_buf_b : igd_buf_a, src, pitch, 0, 0, w, h, to_b);
         pending = to_b ? igd_surf_b : igd_surf_a;
         igd_wr(PLANE_SURF(igd_state.scanout_pipe), pending);
         front_b = to_b;
+        uint64_t t2 = time_us();
+        bstat.full_n++;
+        bstat.full_wait_us += t1 - t0;
+        bstat.full_copy_us += t2 - t1;
+        if (t2 - t1 > bstat.full_max_us)
+            bstat.full_max_us = t2 - t1;
         return 1;
     }
     copy_rect(front_b ? igd_buf_b : igd_buf_a, src, pitch, x, y, w, h, front_b); /* Teil-Update: in den angezeigten Puffer */
+    bstat.part_n++;
+    bstat.part_px += (uint64_t)w * (uint64_t)h;
+    bstat.part_us += time_us() - t0;
     return 1;
 }
 
@@ -743,4 +760,101 @@ void igd_gfx_end(void)
         wait_flip();
         front_b = 0;
     }
+}
+
+/* ---------- igdtest info: Zaehler und Vergleich der Kopierwege fuer ganze Bilder ---------- */
+
+static int has_clflushopt(void)
+{
+    uint32_t a = 7, b, c = 0, d;
+    __asm__ __volatile__("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d));
+    return (b >> 23) & 1;
+}
+
+static void flush_opt(uint64_t addr, uint64_t len)
+{
+    for (uint64_t a = addr & ~63ULL; a < addr + len; a += 64)
+        __asm__ __volatile__("clflushopt (%0)" : : "r"(a) : "memory");
+    __asm__ __volatile__("sfence" : : : "memory");
+}
+
+/* Kopieren mit Non-Temporal-Stores: die Daten gehen am Cache vorbei direkt in den RAM, kein clflush noetig */
+static void nt_copy(void *dst, const void *src, uint64_t n)
+{
+    uint64_t *d = dst;
+    const uint64_t *s = src;
+    for (uint64_t i = 0; i + 8 <= n / 8; i += 8)
+        for (int k = 0; k < 8; k++)
+            __asm__ __volatile__("movnti %1, %0" : "=m"(d[i + k]) : "r"(s[i + k]));
+    __asm__ __volatile__("sfence" : : : "memory");
+}
+
+static uint64_t us_avg(uint64_t us, uint64_t n)
+{
+    return n ? us / n : 0;
+}
+
+int igd_info_report(void)
+{
+    if (!igd_state.present || !igd_state.gen9) {
+        kprintf("igdinfo: keine Intel-Grafik (Gen9) gefunden\n");
+        return -1;
+    }
+    kprintf("igdinfo: Mauszeiger %s, Doppelpufferung %s, %ux%u, Zeile %u Byte\n", hw_cursor ? "Hardware" : "Software",
+            igd_flip_ready ? "an" : "aus", igd_scr_w, igd_scr_h, igd_scr_stride);
+    kprintf("igdinfo: ganze Bilder: %lu, je %lu us kopieren (max %lu us), %lu us auf den Bildwechsel gewartet\n",
+            (unsigned long)bstat.full_n, (unsigned long)us_avg(bstat.full_copy_us, bstat.full_n),
+            (unsigned long)bstat.full_max_us, (unsigned long)us_avg(bstat.full_wait_us, bstat.full_n));
+    kprintf("igdinfo: Teil-Updates: %lu, je %lu Pixel, %lu us\n", (unsigned long)bstat.part_n,
+            (unsigned long)us_avg(bstat.part_px, bstat.part_n), (unsigned long)us_avg(bstat.part_us, bstat.part_n));
+    if (!igd_flip_ready)
+        return 0;
+    if (front_b || pending) {
+        kprintf("igdinfo: Puffer B wird gerade angezeigt, Vergleich uebersprungen\n");
+        return 0;
+    }
+
+    /* Ein ganzes Bild aus einem RAM-Puffer (wie das Bild eines Programms) in den verdeckten Puffer B; je Weg das beste
+     * von 3 Laeufen. B wird nicht angezeigt, der Inhalt ist egal (das naechste ganze Bild ueberschreibt ihn). */
+    uint64_t size = (uint64_t)igd_scr_stride * igd_scr_h, pages = (size + 4095) / 4096;
+    uint64_t src = pmm_alloc_frames(pages);
+    if (!src) {
+        kprintf("igdinfo: kein Speicher fuer den Vergleich\n");
+        return 0;
+    }
+    uint32_t *sp = (uint32_t *)src;
+    for (uint64_t i = 0; i < size / 4; i++)
+        sp[i] = (uint32_t)i * 2654435761u;
+    int opt = has_clflushopt();
+    const char *names[] = {"memcpy ohne Zurueckschreiben (nicht anzeigbar)", "heute: memcpy + clflush je Zeile",
+                           "memcpy, danach clflushopt", "Non-Temporal-Stores (movnti)"};
+    for (int way = 0; way < 4; way++) {
+        if (way == 2 && !opt) {
+            kprintf("igdinfo:   %s: CPU kann kein clflushopt\n", names[way]);
+            continue;
+        }
+        uint64_t best = ~0ULL;
+        for (int run = 0; run < 3; run++) {
+            igd_clflush((uint64_t)igd_buf_b, size); /* gleiche Ausgangslage: B nicht im Cache */
+            uint64_t t0 = time_us();
+            if (way == 0) {
+                memcpy(igd_buf_b, sp, size);
+            } else if (way == 1) {
+                copy_rect(igd_buf_b, sp, igd_scr_stride / 4, 0, 0, (int)igd_scr_w, (int)igd_scr_h, 1);
+            } else if (way == 2) {
+                memcpy(igd_buf_b, sp, size);
+                flush_opt((uint64_t)igd_buf_b, size);
+            } else {
+                nt_copy(igd_buf_b, sp, size);
+            }
+            uint64_t t = time_us() - t0;
+            if (t < best)
+                best = t;
+        }
+        kprintf("igdinfo:   %s: %lu us (%lu MB/s)\n", names[way], (unsigned long)best,
+                (unsigned long)(size / (best ? best : 1)));
+    }
+    pmm_free_frames(src, pages);
+    kprintf("igdinfo: zum Vergleich Blitter (igdtest blit, hoechster Takt): ganzes Bild kopieren ca. 4200 us\n");
+    return 0;
 }
