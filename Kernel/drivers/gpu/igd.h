@@ -38,6 +38,9 @@ int igd_blit_test(void);
 /* igdtest info: Zaehler der Bild-Updates seit dem Start und Messung der Kopierwege fuer ganze Bilder (Kernel-Log) */
 int igd_info_report(void);
 
+/* Stufe 4, Teil 1 (igdtest edid): nur lesen. Monitordaten (EDID) ueber DDC, aktueller Zeitablauf und Takt (igd_mode.c) */
+int igd_edid_test(void);
+
 /* Fest eingebaut (ohne "noigd" in der Kommandozeile): Hardware-Mauszeiger und Doppelpufferung */
 int  igd_cursor_available(void);
 void igd_cursor_move(int x, int y, int visible); /* Spitze des Pfeils bei (x, y) */

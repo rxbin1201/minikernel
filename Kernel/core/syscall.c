@@ -391,7 +391,8 @@ static void syscall_do(SyscallFrame *f)
     case SYS_USBINFO:  ret = sys_usbinfo(f->rdi, f->rsi); break;
     case SYS_GPU:
         ret = f->rdi == 1 ? igd_flip_test() : f->rdi == 2 ? igd_cursor_test() : f->rdi == 3 ? igd_blit_test()
-            : f->rdi == 4 ? igd_info_report() : ERR_INVAL;
+            : f->rdi == 4 ? igd_info_report()
+            : f->rdi == 5 ? igd_edid_test() : ERR_INVAL;
         break;
     case SYS_PCIINFO: {
         PciInfo pi;
