@@ -99,6 +99,9 @@ typedef struct {
     uint8_t node[6], sel[6]; /* Weg vom Pin (node[0]) zum DAC (node[n-1]); sel = Eingang, der zum Naechsten fuehrt */
     int     n;
     uint8_t dev;             /* Art des Pins: 0 Line-Out, 1 Lautsprecher, 2 Kopfhoerer */
+    uint8_t jack;            /* Buchse nach aussen, die meldet, ob etwas eingesteckt ist */
+    uint8_t pinctl;          /* Pin-Steuerung, wenn der Ausgang an ist */
+    uint8_t muted;           /* Lautsprecher abgeschaltet, weil an einer Buchse etwas steckt */
 } Path;
 
 static volatile uint8_t *regs;
@@ -332,7 +335,11 @@ static void probe_codec(int cad)
             }
         }
         Node *pin = node(cad, p->node[0]);
-        cmd(cad, p->node[0], V_SET_PIN_CTL << 8 | 0x40 | (p->dev == 2 && (pin->pincaps & 8) ? 0x80 : 0));
+        p->pinctl = (uint8_t)(0x40 | (p->dev == 2 && (pin->pincaps & 8) ? 0x80 : 0));
+        p->jack = p->dev != 1 && ((pin->cfg >> 30) & 3) != 2 && (pin->pincaps & 4) && !((pin->cfg >> 8) & 1);
+        /* Buchse: nicht fest eingebaut (Anschluss 2), kann Stecker erkennen, und die Firmware verbietet es nicht
+         * (Default Config Misc Bit 0 = "Jack Detect Override") */
+        cmd(cad, p->node[0], V_SET_PIN_CTL << 8 | p->pinctl);
         if (pin->pincaps & (1u << 16))
             cmd(cad, p->node[0], V_SET_EAPD << 8 | 0x02);
         int dac = p->node[p->n - 1];
@@ -440,6 +447,38 @@ static void stream_start(void)
     running = 1;
 }
 
+/* Auto-Mute wie bei Windows/Linux: steckt an einer Buchse (Kopfhoerer, Line-Out) etwas, sind die eingebauten
+ * Lautsprecher aus; sonst an. Abgefragt beim Oeffnen und waehrend der Wiedergabe alle 300 ms. */
+static uint64_t automute_us;
+
+static void automute(int verbose)
+{
+    automute_us = time_us();
+    int plugged = 0;
+    for (int i = 0; i < npaths; i++)
+        if (paths[i].jack) {
+            int64_t sense = cmd(paths[i].cad, paths[i].node[0], V_GET_PIN_SENSE << 8);
+            if (sense > 0 && (sense & 0x80000000))
+                plugged = 1;
+        }
+    for (int i = 0; i < npaths; i++) {
+        Path *p = &paths[i];
+        if (p->dev != 1 || p->muted == plugged)
+            continue;
+        p->muted = (uint8_t)plugged;
+        cmd(p->cad, p->node[0], V_SET_PIN_CTL << 8 | (plugged ? 0 : p->pinctl));
+        if (verbose)
+            kprintf("hda: %s, Lautsprecher (Pin %#x) %s\n", plugged ? "Stecker in der Buchse" : "Buchse frei", p->node[0],
+                    plugged ? "aus" : "an");
+    }
+}
+
+static void automute_tick(void)
+{
+    if (time_us() - automute_us > 300000)
+        automute(1);
+}
+
 int hda_present(void)
 {
     return present;
@@ -477,6 +516,7 @@ int hda_open(uint32_t pid, uint32_t rate, uint32_t channels)
         cmd(paths[i].cad, dac, V_SET_STREAM << 8 | STREAM_TAG << 4);
     }
     set_dac_volume();
+    automute(1);
     written = played = 0; /* nach dem Start liest der Controller ab dem Anfang des Rings */
     bytes_per_sec = rate * 4;
     return 0;
@@ -491,6 +531,7 @@ int64_t hda_write(uint32_t pid, const void *buf, uint64_t len)
     len &= ~3ULL; /* ganze Stereo-Abtastwerte */
     while (done < len) {
         poll_position();
+        automute_tick();
         uint64_t fill = written - played, free = RING_BYTES - 1024 - fill; /* 1 KiB Abstand zur Leseposition */
         if (fill > RING_BYTES - 1024 || free < 256) {
             stream_start(); /* Puffer voll: spaetestens jetzt abspielen */
@@ -529,6 +570,7 @@ int hda_drain(uint32_t pid)
     while (running && played < written && time_ms() < end) {
         thread_sleep_ms(5);
         poll_position();
+        automute_tick();
     }
     /* Die DMA-Position laeuft der Ausgabe voraus (FIFO des Controllers; QEMU puffert deutlich mehr). Hinter den Daten
      * steht im Ring Stille: noch etwas weiterlaufen lassen, damit das Ende nicht abgeschnitten wird. */
@@ -634,5 +676,6 @@ void hda_init(void)
     wr32(SSYNC, 0);
     present = 1;
     stream_reset();
+    automute(1);
     kprintf("hda: bereit, %d Ausgang/Ausgaenge, Raten %#x\n", npaths, rates_ok & 0xFFF);
 }
