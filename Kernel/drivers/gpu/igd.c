@@ -303,26 +303,37 @@ int igd_flip_test(void)
         return -3;
     }
 
-    /* 2. Freier GGTT-Bereich ab der Haelfte des Adressraums: alle Eintraege gleich (leer oder dieselbe Ersatzseite) */
+    /* 2. Freier GGTT-Bereich ab der Haelfte des Adressraums. Die Firmware traegt nur ein, was sie braucht (den
+     * Framebuffer im Stolen Memory); der Rest der GGTT ist ungeloeschter Speicherinhalt, den niemand liest. Frei ist
+     * ein Bereich deshalb, wenn keiner seiner Eintraege gueltig ins Stolen Memory zeigt. Die alten Werte werden
+     * gesichert und am Ende genau so zurueckgeschrieben. */
     uint64_t bytes = (uint64_t)stride * h;
     uint32_t pages = (uint32_t)((bytes + 4095) / 4096), base = ggtt_entries / 2;
     if (base + pages > ggtt_entries) {
         kprintf("igdtest: GGTT zu klein\n");
         return -4;
     }
-    uint64_t filler = ggtt[base];
-    for (uint32_t i = 0; i < pages; i++)
-        if (ggtt[base + i] != filler) {
-            kprintf("igdtest: GGTT ab %#x ist belegt (Eintrag %u = %#lx), Abbruch\n", base, i,
-                    (unsigned long)ggtt[base + i]);
+    uint32_t garbage = 0;
+    for (uint32_t i = 0; i < pages; i++) {
+        uint64_t e = ggtt[base + i];
+        if ((e & PTE_VALID) && (e & PTE_ADDR) >= stolen_base && (e & PTE_ADDR) < stolen_base + stolen_size) {
+            kprintf("igdtest: GGTT-Eintrag %#x zeigt ins Stolen Memory (%#lx): wird benutzt, Abbruch\n", base + i,
+                    (unsigned long)e);
             return -5;
         }
-    kprintf("igdtest: GGTT-Eintraege %#x..%#x frei (Inhalt %#lx)\n", base, base + pages - 1, (unsigned long)filler);
+        if (e)
+            garbage++;
+    }
+    kprintf("igdtest: GGTT-Eintraege %#x..%#x frei (%u davon mit altem Speicherinhalt, werden wiederhergestellt)\n",
+            base, base + pages - 1, garbage);
 
     /* 3. Zweiter Bildpuffer im RAM: das aktuelle Bild mit invertierten Farben */
-    uint64_t *frames = kmalloc(sizeof(uint64_t) * pages);
+    uint64_t *frames = kmalloc(sizeof(uint64_t) * pages * 2); /* [0, pages): Seiten, [pages, 2 pages): alte GGTT */
     if (!frames)
         return -6;
+    uint64_t *saved = frames + pages;
+    for (uint32_t i = 0; i < pages; i++)
+        saved[i] = ggtt[base + i];
     uint32_t got = 0;
     for (; got < pages; got++)
         if (!(frames[got] = pmm_alloc_frame()))
@@ -372,7 +383,7 @@ int igd_flip_test(void)
     wr(PLANE_SURF(p), old_surf);
     int f2 = wait_live(p, old_surf);
     for (uint32_t i = 0; i < pages; i++)
-        ggtt[base + i] = filler;
+        ggtt[base + i] = saved[i];
     ggtt_flush();
     kprintf("igdtest: zurueck auf das Original: %s\n", f2 >= 0 ? "ok" : "NICHT bestaetigt");
     rc = f1 >= 0 && fails == 0 && f2 >= 0 ? 0 : -7;
