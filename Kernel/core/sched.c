@@ -27,7 +27,43 @@ struct Thread {
     void       *arg;
     Thread     *next;       /* Run-Queue, Dead-Liste oder Mutex-Wartekette (immer nur in einer davon) */
     Thread     *all_next;   /* Liste aller Threads */
+    uint8_t     fpu_raw[512 + 16]; /* FPU/SSE-Register (fxsave), 16-Byte-ausgerichtet: FPU(t) */
 };
+
+#define FPU(t) ((uint8_t *)(((uint64_t)(t)->fpu_raw + 15) & ~15ULL))
+
+/* ---------- FPU/SSE fuer Programme ----------
+ * Der Kernel selbst rechnet ohne FPU/SSE (-mno-sse). Die Register gehoeren also ganz den Programmen: beim
+ * Threadwechsel sichert fxsave die des alten Threads, fxrstor laedt die des neuen. Neue Threads starten mit dem
+ * Zustand nach fninit (alle Ausnahmen maskiert, MXCSR 0x1F80). */
+static uint8_t fpu_template[512] __attribute__((aligned(16)));
+
+void fpu_init(void)
+{
+    uint64_t cr0, cr4;
+    __asm__ __volatile__("mov %%cr0, %0" : "=r"(cr0));
+    cr0 &= ~((1ULL << 2) | (1ULL << 3)); /* EM, TS aus: FPU-Befehle laufen direkt */
+    cr0 |= (1ULL << 1) | (1ULL << 5);    /* MP, NE: Fehler als Ausnahme 16 */
+    __asm__ __volatile__("mov %0, %%cr0" : : "r"(cr0));
+    __asm__ __volatile__("mov %%cr4, %0" : "=r"(cr4));
+    cr4 |= (1ULL << 9) | (1ULL << 10);   /* OSFXSR (SSE, fxsave), OSXMMEXCPT */
+    __asm__ __volatile__("mov %0, %%cr4" : : "r"(cr4));
+    uint32_t mxcsr = 0x1F80;
+    __asm__ __volatile__("fninit; ldmxcsr %0" : : "m"(mxcsr));
+    __asm__ __volatile__("fxsave64 %0" : "=m"(fpu_template));
+}
+
+/* fork: das Kind uebernimmt die Register des laufenden Threads */
+void sched_fpu_copy_to(Thread *t)
+{
+    __asm__ __volatile__("fxsave64 (%0)" : : "r"(FPU(t)) : "memory");
+}
+
+/* exec: frische Register fuer das neue Programm */
+void sched_fpu_reset(void)
+{
+    __asm__ __volatile__("fxrstor64 %0" : : "m"(fpu_template));
+}
 
 extern void switch_context(uint64_t *old_rsp, uint64_t new_rsp);
 extern void thread_trampoline(void);
@@ -111,6 +147,8 @@ static void schedule_locked(void)
     if (target != as_current())
         as_switch(target);
 
+    __asm__ __volatile__("fxsave64 (%0)" : : "r"(FPU(prev)) : "memory");
+    __asm__ __volatile__("fxrstor64 (%0)" : : "r"(FPU(next)) : "memory");
     switch_context(&prev->rsp, next->rsp);
 }
 
@@ -175,6 +213,7 @@ static Thread *create(const char *name, ThreadEntry entry, void *arg, AddressSpa
         t->name[i] = name[i];
     t->entry = entry;
     t->arg   = arg;
+    memcpy(FPU(t), fpu_template, 512);
 
     /* Initialer Stack-Frame passend zu switch_context: r15 r14 r13 r12 rbx rbp, dann Ruecksprungadresse.
      * Nach dem 'ret' liegt rsp genau auf top (16-Byte-ausgerichtet), wie es der 'call' im Trampolin braucht. */
@@ -262,6 +301,7 @@ void sched_init(void)
     memset(&main_thread, 0, sizeof(main_thread));
     main_thread.id = 0;
     memcpy(main_thread.name, "main", 5);
+    memcpy(FPU(&main_thread), fpu_template, 512);
     main_thread.state = T_RUNNING;
     all_list = &main_thread;
     this_cpu()->current = &main_thread;

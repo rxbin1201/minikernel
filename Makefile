@@ -86,7 +86,7 @@ Image/kernel.elf: Build/kernel.debug.elf
 
 # statisch, bei USER_BASE gelinkt; -fpie erzeugt RIP-relativen Code (Adresse liegt ueber 2 GiB)
 USER_CFLAGS  = -O2 -Wall -Wextra -ffreestanding -fno-tree-loop-distribute-patterns -fpie -fno-stack-protector \
-               -mno-red-zone -mno-sse -mno-mmx -MMD -MP -I Userland/include/
+               -mno-red-zone -U_FORTIFY_SOURCE -MMD -MP -I Userland/include/
 USER_LDFLAGS = -nostdlib -static -no-pie -z max-page-size=0x1000 -z noexecstack -T Userland/user.ld
 
 USER_PROGS    := $(patsubst Userland/bin/%.c,%,$(wildcard Userland/bin/*.c))

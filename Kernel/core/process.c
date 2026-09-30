@@ -414,6 +414,8 @@ int process_fork(const SyscallFrame *f)
         p->thread = thread_create_in(p->name, fork_child_main, ctx, p->as);
         if (!p->thread)
             kfree(ctx);
+        else
+            sched_fpu_copy_to(p->thread); /* laeuft erst, wenn wir den BKL abgeben */
     }
     if (!p->thread) {
         if (p->as)
@@ -472,6 +474,7 @@ int process_exec(const char *path, const char *cmdline)
     thread_set_as(thread_current(), new_as); /* beim naechsten Threadwechsel gilt der neue Adressraum */
     as_switch(new_as);
     as_destroy(old_as);
+    sched_fpu_reset();
     to_user(p->entry, p->user_rsp, (uint64_t)p->argc, p->argv);
 }
 

@@ -10,6 +10,12 @@
 typedef struct Thread Thread;
 typedef void (*ThreadEntry)(void *arg);
 
+/* FPU/SSE fuer Programme: fpu_init vor sched_init (schaltet sie frei, merkt sich den Grundzustand); der Threadwechsel
+ * sichert und laedt die Register. fork: sched_fpu_copy_to(kind), exec: sched_fpu_reset(). */
+void fpu_init(void);
+void sched_fpu_copy_to(Thread *t);
+void sched_fpu_reset(void);
+
 /* Macht den aktuellen Kontrollfluss zum Thread 0 ("main") und legt den Idle-Thread an. */
 void sched_init(void);
 

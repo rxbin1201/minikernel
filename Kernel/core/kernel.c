@@ -134,6 +134,7 @@ void kmain(BootInfo *info)
         kprintf("Ohne Timer kann der Kernel nicht weiterlaufen, angehalten.\n");
         halt_forever();
     }
+    fpu_init();   /* FPU/SSE fuer Programme (die weiteren CPUs uebernehmen CR0/CR4 beim Start) */
     sched_init();
     smp_init(); /* weitere CPUs: laufen ab jetzt Threads aus der gemeinsamen Run-Queue */
     console_start_thread(); /* blaettert im Verlauf (Shift+Bild hoch/runter), zeichnet den Mauszeiger */

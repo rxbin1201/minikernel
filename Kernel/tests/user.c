@@ -421,6 +421,21 @@ void test_script(void)
         check("Skript-Tests brauchen /disk", 0);
         return;
     }
+    { /* FPU/SSE: mehr Programme als CPUs rechnen mit double/float und geben staendig die CPU ab: so wechseln sich
+         * zwei Programme auf derselben CPU ab, und ohne Sichern der Register landen die Werte des einen beim anderen */
+        enum { N = 8 };
+        int pid[N], ok = 1;
+        char cmd[N][16];
+        for (int i = 0; i < N; i++) {
+            ksnprintf(cmd[i], sizeof(cmd[i]), "fputest %d", 3 + 4 * i);
+            pid[i] = process_spawn("/bin/fputest", cmd[i], 0);
+        }
+        for (int i = 0; i < N; i++) {
+            int code = -1, faulted = 0;
+            ok &= pid[i] > 0 && process_wait(pid[i], 0, &code, &faulted, 20000) == 0 && !faulted && code == 0;
+        }
+        check("FPU/SSE-Register ueberstehen Threadwechsel (8 Programme, mehr als CPUs)", ok);
+    }
     int rc = run_sh("sh /etc/tests/shell.sh eins zwei drei");
     const char *want =
         "gross\nfuenf\ni=3\nw=a\nw=b\nw=c\nn=2\nsumme=20\nrechnen: 2\nargs=3\nfak5=120\nloop=1\nloop=3\nret=7\n"
