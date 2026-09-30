@@ -28,4 +28,7 @@ const IgdInfo *igd_info(void);
  * Ausgaben ins Kernel-Log. 0 = funktioniert, < 0 = Abbruch oder Fehler. */
 int igd_flip_test(void);
 
+/* Stufe 2, nur auf Befehl (igdtest cursor): Hardware-Mauszeiger einschalten, 3 s im Kreis bewegen, wieder aus */
+int igd_cursor_test(void);
+
 #endif

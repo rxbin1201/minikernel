@@ -40,6 +40,11 @@
 #define CUR_WM(p, lvl)        (0x70140 + PIPE_OFF(p) + 4u * (uint32_t)(lvl))
 #define DBUF_CTL              0x45008
 #define GFX_FLSH_CNTL         0x101008                  /* schreiben: GPU uebernimmt geaenderte GGTT-Eintraege */
+#define CUR_SURFLIVE(p)       (0x700AC + PIPE_OFF(p))   /* Mauszeiger-Bild, das gerade angezeigt wird */
+#define DE_PIPE_IMR(p)        (0x44404 + 0x10u * (uint32_t)(p)) /* Interrupt-Maske der Pipe */
+#define DE_PIPE_IIR(p)        (0x44408 + 0x10u * (uint32_t)(p)) /* festgehaltene Ereignisse (write 1 to clear) */
+#define PIPE_FIFO_UNDERRUN    (1u << 31)
+#define DDB_BLOCKS            892                       /* Gen9: 896 Bloecke, 4 davon fuer den Bypass-Pfad */
 
 #define GGTT_OFFSET           (8u << 20)                /* globale GTT in BAR0 ab 8 MiB, 64-Bit-Eintraege */
 #define PTE_VALID             1ULL
@@ -262,6 +267,69 @@ static int wait_live(int p, uint32_t surf)
     return (int)(rd(PIPE_FRMCOUNT(p)) - f0);
 }
 
+/* FIFO-Unterlauf der Pipe (der Display-Engine gingen die Daten aus: Flackern/Stoerstreifen) festhalten lassen. Nur
+ * die Maske wird geoeffnet, IER bleibt, wie es ist: es entsteht kein Interrupt, das Ereignis steht nur im IIR. */
+static uint32_t underrun_begin(int p)
+{
+    uint32_t imr = rd(DE_PIPE_IMR(p));
+    wr(DE_PIPE_IIR(p), PIPE_FIFO_UNDERRUN);
+    wr(DE_PIPE_IMR(p), imr & ~PIPE_FIFO_UNDERRUN);
+    return imr;
+}
+
+static int underrun_end(int p, uint32_t imr)
+{
+    int seen = (rd(DE_PIPE_IIR(p)) & PIPE_FIFO_UNDERRUN) != 0;
+    wr(DE_PIPE_IIR(p), PIPE_FIFO_UNDERRUN);
+    wr(DE_PIPE_IMR(p), imr);
+    return seen;
+}
+
+/* Prueft, ob der GGTT-Bereich [base, base + pages) frei ist, und sichert seine Eintraege nach saved. Die Firmware
+ * traegt nur ein, was sie braucht (den Framebuffer im Stolen Memory); der Rest der GGTT ist ungeloeschter
+ * Speicherinhalt, den niemand liest. Frei heisst deshalb: kein Eintrag zeigt gueltig ins Stolen Memory. */
+static int ggtt_claim(uint32_t base, uint32_t pages, uint64_t *saved)
+{
+    if (base + pages > ggtt_entries) {
+        kprintf("igdtest: GGTT zu klein\n");
+        return -4;
+    }
+    for (uint32_t i = 0; i < pages; i++) {
+        uint64_t e = ggtt[base + i];
+        if ((e & PTE_VALID) && (e & PTE_ADDR) >= stolen_base && (e & PTE_ADDR) < stolen_base + stolen_size) {
+            kprintf("igdtest: GGTT-Eintrag %#x zeigt ins Stolen Memory (%#lx): wird benutzt, Abbruch\n", base + i,
+                    (unsigned long)e);
+            return -5;
+        }
+        saved[i] = e;
+    }
+    return 0;
+}
+
+/* Gemeinsame Vorpruefung: Gen9, Framebuffer erkannt, GGTT-Eintrag der angezeigten Surface im Stolen Memory */
+static int preflight(const char *what)
+{
+    int p = info.scanout_pipe;
+    if (!info.gen9 || !regs || !ggtt || p < 0) {
+        kprintf("igdtest: keine passende Intel-GPU / kein erkannter Framebuffer\n");
+        return -1;
+    }
+    kprintf("igdtest: %s auf Pipe %c\n", what, 'A' + p);
+    uint32_t surf = rd(PLANE_SURF(p)) & ~0xFFFu;
+    uint64_t pte = ggtt[surf >> 12];
+    kprintf("igdtest: GGTT[%#x] = %#lx, Stolen Memory @ %#lx\n", surf >> 12, (unsigned long)pte,
+            (unsigned long)stolen_base);
+    if (!(pte & PTE_VALID) || (pte & PTE_ADDR) < stolen_base || (pte & PTE_ADDR) >= stolen_base + stolen_size) {
+        kprintf("igdtest: GGTT-Eintrag passt nicht zum Stolen Memory, Abbruch (nichts veraendert)\n");
+        return -3;
+    }
+    uint32_t imr = underrun_begin(p); /* laeuft die Anzeige schon vorher sauber? */
+    thread_sleep_ms(200);
+    kprintf("igdtest: vorher (200 ms): %s\n", underrun_end(p, imr) ? "FIFO-Unterlauf! (schon vor dem Test)" :
+                                                                    "kein FIFO-Unterlauf");
+    return 0;
+}
+
 /* Nur lesen: Aufteilung des Display-Puffers und Watermarks (Voraussetzung fuer den Hardware-Mauszeiger) */
 static void dump_ddb(int p)
 {
@@ -279,11 +347,9 @@ static void dump_ddb(int p)
 int igd_flip_test(void)
 {
     int p = info.scanout_pipe;
-    if (!info.gen9 || !regs || !ggtt || p < 0) {
-        kprintf("igdtest: keine passende Intel-GPU / kein erkannter Framebuffer\n");
-        return -1;
-    }
-    kprintf("igdtest: Stufe 2 - Page-Flipping auf Pipe %c\n", 'A' + p);
+    int pre = preflight("Stufe 2 - Page-Flipping");
+    if (pre)
+        return pre;
     dump_ddb(p);
 
     uint32_t ctl = rd(PLANE_CTL(p)), size = rd(PLANE_SIZE(p));
@@ -294,46 +360,21 @@ int igd_flip_test(void)
         return -2;
     }
 
-    /* 1. Verstehen wir die GGTT? Der Eintrag der angezeigten Surface muss ins Stolen Memory zeigen. */
-    uint64_t pte = ggtt[old_surf >> 12];
-    kprintf("igdtest: GGTT[%#x] = %#lx, Stolen Memory @ %#lx\n", old_surf >> 12, (unsigned long)pte,
-            (unsigned long)stolen_base);
-    if (!(pte & PTE_VALID) || (pte & PTE_ADDR) < stolen_base || (pte & PTE_ADDR) >= stolen_base + stolen_size) {
-        kprintf("igdtest: GGTT-Eintrag passt nicht zum Stolen Memory, Abbruch (nichts veraendert)\n");
-        return -3;
-    }
-
-    /* 2. Freier GGTT-Bereich ab der Haelfte des Adressraums. Die Firmware traegt nur ein, was sie braucht (den
-     * Framebuffer im Stolen Memory); der Rest der GGTT ist ungeloeschter Speicherinhalt, den niemand liest. Frei ist
-     * ein Bereich deshalb, wenn keiner seiner Eintraege gueltig ins Stolen Memory zeigt. Die alten Werte werden
-     * gesichert und am Ende genau so zurueckgeschrieben. */
+    /* 2. Freier GGTT-Bereich ab der Haelfte des Adressraums; alte Eintraege sichern */
     uint64_t bytes = (uint64_t)stride * h;
     uint32_t pages = (uint32_t)((bytes + 4095) / 4096), base = ggtt_entries / 2;
-    if (base + pages > ggtt_entries) {
-        kprintf("igdtest: GGTT zu klein\n");
-        return -4;
-    }
-    uint32_t garbage = 0;
-    for (uint32_t i = 0; i < pages; i++) {
-        uint64_t e = ggtt[base + i];
-        if ((e & PTE_VALID) && (e & PTE_ADDR) >= stolen_base && (e & PTE_ADDR) < stolen_base + stolen_size) {
-            kprintf("igdtest: GGTT-Eintrag %#x zeigt ins Stolen Memory (%#lx): wird benutzt, Abbruch\n", base + i,
-                    (unsigned long)e);
-            return -5;
-        }
-        if (e)
-            garbage++;
-    }
-    kprintf("igdtest: GGTT-Eintraege %#x..%#x frei (%u davon mit altem Speicherinhalt, werden wiederhergestellt)\n",
-            base, base + pages - 1, garbage);
-
-    /* 3. Zweiter Bildpuffer im RAM: das aktuelle Bild mit invertierten Farben */
     uint64_t *frames = kmalloc(sizeof(uint64_t) * pages * 2); /* [0, pages): Seiten, [pages, 2 pages): alte GGTT */
     if (!frames)
         return -6;
     uint64_t *saved = frames + pages;
-    for (uint32_t i = 0; i < pages; i++)
-        saved[i] = ggtt[base + i];
+    int claim = ggtt_claim(base, pages, saved);
+    if (claim) {
+        kfree(frames);
+        return claim;
+    }
+    kprintf("igdtest: GGTT-Eintraege %#x..%#x frei (alte Werte gesichert)\n", base, base + pages - 1);
+
+    /* 3. Zweiter Bildpuffer im RAM: das aktuelle Bild mit invertierten Farben */
     uint32_t got = 0;
     for (; got < pages; got++)
         if (!(frames[got] = pmm_alloc_frame()))
@@ -358,6 +399,7 @@ int igd_flip_test(void)
         ggtt[base + i] = frames[i] | PTE_VALID;
     ggtt_flush();
     uint32_t new_surf = base << 12;
+    uint32_t imr = underrun_begin(p);
     uint64_t t0 = time_ms();
     wr(PLANE_SURF(p), new_surf);
     int f1 = wait_live(p, new_surf);
@@ -385,13 +427,128 @@ int igd_flip_test(void)
     for (uint32_t i = 0; i < pages; i++)
         ggtt[base + i] = saved[i];
     ggtt_flush();
-    kprintf("igdtest: zurueck auf das Original: %s\n", f2 >= 0 ? "ok" : "NICHT bestaetigt");
-    rc = f1 >= 0 && fails == 0 && f2 >= 0 ? 0 : -7;
+    int underrun = underrun_end(p, imr);
+    kprintf("igdtest: zurueck auf das Original: %s; FIFO-Unterlauf waehrend des Tests: %s\n",
+            f2 >= 0 ? "ok" : "NICHT bestaetigt", underrun ? "JA" : "nein");
+    rc = f1 >= 0 && fails == 0 && f2 >= 0 && !underrun ? 0 : -7;
     kprintf("igdtest: %s\n", rc == 0 ? "Page-Flipping funktioniert" : "Page-Flipping mit Fehlern, bitte Log schicken");
 
 free_frames:
     for (uint32_t i = 0; i < got; i++)
         pmm_free_frame(frames[i]);
     kfree(frames);
+    return rc;
+}
+
+/* ---------- Stufe 2: Hardware-Mauszeiger (nur auf Befehl: igdtest cursor) ---------- */
+
+/* Pfeil wie der Software-Zeiger der Konsole ('X' schwarz, '.' weiss), doppelt so gross */
+static const char *const arrow[19] = {
+    "X           ", "XX          ", "X.X         ", "X..X        ", "X...X       ", "X....X      ", "X.....X     ",
+    "X......X    ", "X.......X   ", "X........X  ", "X.....XXXXX ", "X..X..X     ", "X.X X..X    ", "XX  X..X    ",
+    "X    X..X   ", "     X..X   ", "      X..X  ", "      X..X  ", "       XX   ",
+};
+
+static uint32_t cur_pos(int x, int y)
+{
+    uint32_t v = 0;
+    v |= x < 0 ? (1u << 15) | ((uint32_t)-x & 0xFFF) : ((uint32_t)x & 0xFFF);
+    v |= y < 0 ? (1u << 31) | (((uint32_t)-y & 0xFFF) << 16) : (((uint32_t)y & 0xFFF) << 16);
+    return v;
+}
+
+int igd_cursor_test(void)
+{
+    int p = info.scanout_pipe;
+    int pre = preflight("Stufe 2 - Hardware-Mauszeiger");
+    if (pre)
+        return pre;
+    dump_ddb(p);
+
+    /* Platz im Display-Puffer: direkt hinter der Bildebene 32 Bloecke (so viel gibt Linux dem Zeiger bei einer Pipe) */
+    uint32_t plane_end = (rd(PLANE_BUF_CFG(p)) >> 16) & 0x3FF;
+    uint32_t start = plane_end + 1, end = start + 31;
+    if (end >= DDB_BLOCKS) {
+        kprintf("igdtest: kein Platz im Display-Puffer hinter der Bildebene (%u), Abbruch\n", plane_end);
+        return -8;
+    }
+
+    /* 64x64 ARGB = 16 KiB = 4 Seiten, in der GGTT oberhalb des Flip-Bereichs */
+    uint32_t base = ggtt_entries / 2 + 0x20000, pages = 4;
+    uint64_t frames[4], saved[4];
+    int claim = ggtt_claim(base, pages, saved);
+    if (claim)
+        return claim;
+    uint32_t got = 0;
+    for (; got < pages; got++)
+        if (!(frames[got] = pmm_alloc_frame()))
+            break;
+    int rc = 0;
+    if (got < pages) {
+        rc = -6;
+        goto free_frames;
+    }
+    for (uint32_t y = 0; y < 64; y++)
+        for (uint32_t x = 0; x < 64; x++) {
+            uint32_t px = 0; /* durchsichtig */
+            if (y / 2 < 19 && x / 2 < 12) {
+                char c = arrow[y / 2][x / 2];
+                px = c == 'X' ? 0xFF000000u : c == '.' ? 0xFFFFFFFFu : 0;
+            }
+            uint64_t off = (uint64_t)y * 256 + (uint64_t)x * 4;
+            *(uint32_t *)(frames[off >> 12] + (off & 4095)) = px;
+        }
+    for (uint32_t i = 0; i < pages; i++) {
+        clflush_range(frames[i], 4096);
+        ggtt[base + i] = frames[i] | PTE_VALID;
+    }
+    ggtt_flush();
+
+    /* Register sichern, Zeiger einschalten. Alle Zeiger-Register sind doppelt gepuffert: erst das Schreiben von
+     * CUR_BASE uebernimmt sie beim naechsten Bildwechsel. */
+    uint32_t s_ctl = rd(CUR_CTL(p)), s_base = rd(CUR_BASE(p)), s_pos = rd(CUR_POS(p)), s_buf = rd(CUR_BUF_CFG(p));
+    uint32_t s_wm0 = rd(CUR_WM(p, 0)), surf = base << 12;
+    int cx = (int)console_width_px() / 2, cy = (int)console_height_px() / 2, x = 300, y = 0;
+    uint32_t imr = underrun_begin(p);
+    wr(CUR_BUF_CFG(p), (end << 16) | start);
+    wr(CUR_WM(p, 0), (1u << 31) | (1u << 14) | 8); /* Stufe 0 an: 1 Zeile, 8 Bloecke (wie die Firmware fuer Ebene 1) */
+    wr(CUR_CTL(p), 0x27);                          /* 64x64, 32 Bit ARGB */
+    wr(CUR_POS(p), cur_pos(cx + x, cy + y));
+    wr(CUR_BASE(p), surf);
+    uint32_t f0 = rd(PIPE_FRMCOUNT(p));
+    int live = WAIT_UNTIL((rd(CUR_SURFLIVE(p)) & ~0xFFFu) == surf, 200);
+    kprintf("igdtest: Zeiger an (DDB %u-%u): %s nach %u Bild(ern)\n", start, end, live ? "angezeigt" : "NICHT angezeigt",
+            rd(PIPE_FRMCOUNT(p)) - f0);
+
+    /* 3 Sekunden im Kreis (Minskys Kreis-Algorithmus: nur ganze Zahlen) */
+    for (int step = 0; step < 150; step++) {
+        x -= y / 16;
+        y += x / 16;
+        wr(CUR_POS(p), cur_pos(cx + x, cy + y));
+        wr(CUR_BASE(p), surf); /* uebernehmen */
+        thread_sleep_ms(20);
+    }
+
+    /* Aus und alles zurueck */
+    wr(CUR_CTL(p), s_ctl);
+    wr(CUR_POS(p), s_pos);
+    wr(CUR_BASE(p), s_base);
+    thread_sleep_ms(50);
+    wr(CUR_WM(p, 0), s_wm0);
+    wr(CUR_BUF_CFG(p), s_buf);
+    wr(CUR_BASE(p), s_base);
+    thread_sleep_ms(50);
+    int underrun = underrun_end(p, imr);
+    for (uint32_t i = 0; i < pages; i++)
+        ggtt[base + i] = saved[i];
+    ggtt_flush();
+    kprintf("igdtest: Zeiger wieder aus, Register und GGTT zurueck; FIFO-Unterlauf waehrend des Tests: %s\n",
+            underrun ? "JA" : "nein");
+    rc = live && !underrun ? 0 : -7;
+    kprintf("igdtest: %s\n", rc == 0 ? "Hardware-Mauszeiger funktioniert" : "Mauszeiger mit Fehlern, bitte Log schicken");
+
+free_frames:
+    for (uint32_t i = 0; i < got; i++)
+        pmm_free_frame(frames[i]);
     return rc;
 }
