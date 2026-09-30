@@ -2,6 +2,7 @@
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/apic.h"
 #include "lib/kprintf.h"
+#include "lib/ksyms.h"
 #include "core/process.h"
 
 #define IDT_ENTRIES    256
@@ -127,6 +128,7 @@ void isr_handler(InterruptFrame *f)
         kprintf("\n");
         gdt_dump();
     }
+    backtrace_print(f->rip, f->rbp, 16);
     kprintf("System angehalten.\n");
 
     for (;;)

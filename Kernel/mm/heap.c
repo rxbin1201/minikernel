@@ -3,6 +3,7 @@
 #include "mm/paging.h"
 #include "mm/pmm.h"
 #include "lib/kprintf.h"
+#include "lib/ksyms.h"
 #include "lib/string.h"
 
 #define HEAP_BASE   0x0000010000000000ULL
@@ -238,9 +239,11 @@ int heap_check(void)
     for (Block *b = first; b; b = next_block(b)) {
         if (b->magic != BLOCK_MAGIC || b->prev != prev || b->size % 16) {
             kprintf("heap: Block beschaedigt bei %#lx", (uint64_t)b);
-            if (prev) /* meist hat der Besitzer des Blocks davor ueber sein Ende hinaus geschrieben */
-                kprintf(" (davor: %lu Bytes %s, angelegt von %#lx)", (unsigned long)prev->size,
-                        prev->free ? "frei" : "belegt", (unsigned long)prev->caller);
+            if (prev) { /* meist hat der Besitzer des Blocks davor ueber sein Ende hinaus geschrieben */
+                kprintf(" (davor: %lu Bytes %s, angelegt von ", (unsigned long)prev->size, prev->free ? "frei" : "belegt");
+                ksym_print(prev->caller);
+                kprintf(")");
+            }
             kprintf("\n");
             return 0;
         }

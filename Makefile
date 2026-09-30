@@ -37,8 +37,10 @@ KERNEL_OBJECT_FILES := $(patsubst Kernel/%.c, Build/kernel/%.o, $(KERNEL_C_FILES
                        $(patsubst Kernel/%.S, Build/kernel/%.o, $(KERNEL_S_FILES))
 
 # -fno-tree-loop-distribute-patterns: gcc soll keine Schleifen durch memset/memcpy-Aufrufe ersetzen (auch nicht in string.c)
-KERNEL_CFLAGS  = -O2 -g -Wall -Wextra -ffreestanding -fno-tree-loop-distribute-patterns -fno-stack-protector -fno-pic \
-                 -mno-red-zone -mno-sse -mno-mmx -MMD -MP -I Includes/ -I Kernel/ $(KERNEL_EXTRA_CFLAGS)
+# -fno-omit-frame-pointer: rbp-Kette fuer Backtraces bei Exceptions (lib/ksyms.c)
+KERNEL_CFLAGS  = -O2 -g -Wall -Wextra -ffreestanding -fno-tree-loop-distribute-patterns -fno-omit-frame-pointer \
+                 -fno-stack-protector -fno-pic -mno-red-zone -mno-sse -mno-mmx -MMD -MP -I Includes/ -I Kernel/ \
+                 $(KERNEL_EXTRA_CFLAGS)
 KERNEL_LDFLAGS = -nostdlib -static -z max-page-size=0x1000 -z noexecstack -T Kernel/kernel.ld
 
 Build/kernel/%.o: Kernel/%.c
@@ -51,9 +53,26 @@ Build/kernel/%.o: Kernel/%.S
 
 -include $(KERNEL_OBJECT_FILES:.o=.d)
 
+# Symboltabelle fuer Backtraces, in zwei Durchgaengen: erst mit leerer Tabelle linken, daraus die Tabelle erzeugen und
+# erneut linken. Sie liegt in .rodata hinter .text, die Funktionsadressen bleiben gleich; das wird nachgeprueft.
+Build/ksyms/empty.c: tools/mksyms.py
+	@mkdir -p $(dir $@)
+	python3 tools/mksyms.py --empty $@
+
+Build/ksyms/%.o: Build/ksyms/%.c
+	$(CC) $(KERNEL_CFLAGS) -c $< -o $@
+
+Build/ksyms/pass1.elf: $(KERNEL_OBJECT_FILES) Build/ksyms/empty.o Kernel/kernel.ld
+	$(LD) $(KERNEL_OBJECT_FILES) Build/ksyms/empty.o $(KERNEL_LDFLAGS) -o $@
+
+Build/ksyms/table.c: Build/ksyms/pass1.elf tools/mksyms.py
+	python3 tools/mksyms.py $< $@
+
 # Build/kernel.debug.elf behaelt die Debug-Infos (z.B. fuer gdb oder addr2line), Image/kernel.elf wird gebootet
-Build/kernel.debug.elf: $(KERNEL_OBJECT_FILES) Kernel/kernel.ld
-	$(LD) $(KERNEL_OBJECT_FILES) $(KERNEL_LDFLAGS) -o $@
+Build/kernel.debug.elf: $(KERNEL_OBJECT_FILES) Build/ksyms/table.o Kernel/kernel.ld
+	$(LD) $(KERNEL_OBJECT_FILES) Build/ksyms/table.o $(KERNEL_LDFLAGS) -o $@
+	@python3 tools/mksyms.py $@ Build/ksyms/check.c && cmp -s Build/ksyms/table.c Build/ksyms/check.c || \
+	    { echo "Symboltabelle passt nicht zu den Funktionsadressen"; rm -f $@; exit 1; }
 
 Image/kernel.elf: Build/kernel.debug.elf
 	@mkdir -p $(dir $@)

@@ -35,12 +35,32 @@ sonst in reiner Emulation. Unter WSL einmalig `sudo usermod -aG kvm $USER` und W
 | `STICK=12\|16\|exfat` | zusaetzlichen Test-Stick (FAT12/FAT16/exFAT) am USB anschliessen |
 | `TESTS=1` / `TESTS=disk,user` | Selbsttests beim Start (alle bzw. nur diese Gruppen); `KEEP=1` bleibt danach im System |
 | `CMDLINE="..."` | weitere Kernel-Kommandozeile, siehe unten |
+| `HEADLESS=1` | ohne Fenster, Ausgabe nur in `Build/Out.log` (z.B. `make test HEADLESS=1`) |
 | `QEMU_EXTRA="..."` | weitere QEMU-Argumente |
 
 Beispiele: `make run CMDLINE="mode=1600x900 kbd=de"`, `make test TESTS=foreign STICK=exfat`, `make run DISK=nvme`.
 
 Die Datenplatte `Image/disk.img` (FAT32, Label `MINIKERNEL`, im System unter `/disk`) bleibt bei `make clean` erhalten;
 `make cleandisk` legt sie neu an, `make fatcheck` prueft sie.
+
+## Fehlersuche
+
+- **Selbsttests:** `make test` (alle Gruppen) oder `make test TESTS=disk,user`; jede Gruppe laeuft auch einzeln.
+  Nach jeder Gruppe wird der Kernel-Heap geprueft.
+- **Backtraces:** Eine Exception im Kernel gibt die Aufrufkette mit Funktionsnamen aus (Framepointer-Kette,
+  Symboltabelle aus `tools/mksyms.py`), z.B.
+  ```
+  *** EXCEPTION 14: Page Fault ***
+    Aufrufkette:
+      0x10427d test_paging+0x17d
+      0x10a62c run_selftests+0x86c
+      0x12bf17 kmain+0x257
+  ```
+  Ist der Heap beschaedigt, nennt `heap_check` die Funktion, die den Block davor angelegt hat.
+- **gdb:** `make debug` startet QEMU angehalten mit gdb-Server (ohne KVM), `make gdb` im zweiten Terminal verbindet
+  sich, laedt die Symbole aus `Build/kernel.debug.elf` und setzt einen Breakpoint auf `kmain` (`tools/gdbinit`).
+  Braucht `sudo apt install gdb`.
+- **Adressen von Hand:** `addr2line -f -e Build/kernel.debug.elf 0x10427d`
 
 ## Kernel-Kommandozeile
 
