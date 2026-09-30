@@ -403,7 +403,8 @@ static void syscall_do(SyscallFrame *f)
             : f->rdi == 7 ? igd_mode_test()
             : f->rdi == 8 ? igd_dp_test()
             : f->rdi == 9 ? igd_dpmode_test()
-            : f->rdi == 10 ? igd_dptrain_test() : ERR_INVAL;
+            : f->rdi == 10 ? igd_dptrain_test()
+            : (f->rdi & 0xFF) == 11 ? igd_output_test((int)(f->rdi >> 8)) : ERR_INVAL;
         break;
     case SYS_PCIINFO: {
         PciInfo pi;

@@ -24,6 +24,7 @@ int      igd_underrun_end(int pipe, uint32_t imr);     /* 1 = Unterlauf seit beg
 int      igd_dpcd_read(int port, uint32_t addr, uint8_t *buf, int len); /* igd_dp.c: DPCD per AUX, len <= 16 */
 int      igd_dpcd_write(int port, uint32_t addr, const uint8_t *buf, int len); /* igd_dp.c: 0 = ok */
 int      igd_dp_edid(int port, uint8_t *edid);         /* igd_dp.c: EDID per AUX (256 Byte Platz); Bloecke, 0 = keine */
+void     igd_cursor_reapply(void);                     /* igd.c: Zeiger-Ebene nach einem Anschlusswechsel */
 void     igd_edid_dump(const uint8_t *edid, int blocks, uint32_t limit_khz, const char *note); /* igd_mode.c */
 
 /* Doppelpufferung (igd.c): A = Framebuffer der Firmware, B = zweiter Puffer im RAM */

@@ -682,6 +682,16 @@ static void display_init(const BootInfo *bi)
     igd_modes_boot();
 }
 
+/* Nach dem Umschalten des Anschlusses (igd_mode.c): Zeiger-Ebene wieder so setzen, wie der Treiber sie fuehrt */
+void igd_cursor_reapply(void)
+{
+    if (!hw_cursor)
+        return;
+    int p = igd_state.scanout_pipe;
+    igd_wr(CUR_CTL(p), cursor_on == 1 ? 0x27 : 0);
+    igd_wr(CUR_BASE(p), cursor_surf);
+}
+
 int igd_cursor_available(void)
 {
     return hw_cursor;

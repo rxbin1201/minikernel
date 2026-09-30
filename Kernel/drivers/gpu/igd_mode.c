@@ -1514,6 +1514,9 @@ int igd_dptrain_test(void)
 #define MAX_MODES 16
 static Timing   modes[MAX_MODES];     /* nach Flaeche, dann Bildrate absteigend */
 static int      nmodes, cur_idx = -1, boot_idx = -1;
+static uint32_t fb_max_w, fb_max_h;   /* Framebuffer der Firmware: groesser geht kein Modus */
+static DpLink   wmref;                /* Watermarks der Firmware und der Pixeltakt, fuer den sie gelten */
+static int      wmref_ok;
 static HwFixed  live;                 /* Pipe, Port, DPLL und die festen Registerwerte */
 static DpLink   dpl;                  /* bei DisplayPort: die Verbindung der Firmware */
 static int      is_dp;
@@ -1558,6 +1561,13 @@ static void modes_init(void)
 {
     int p = igd_state.scanout_pipe;
     uint32_t ddi = igd_rd(TRANS_DDI_FUNC_CTL(p)), c2 = igd_rd(DPLL_CTRL2);
+    nmodes = 0;
+    cur_idx = boot_idx = -1;
+    is_dp = 0;
+    if (!fb_max_w) {
+        fb_max_w = igd_scr_w;
+        fb_max_h = igd_scr_h;
+    }
     live.pipe = p;
     live.port = (int)((ddi >> 28) & 7);
     live.dpll = (c2 & (1u << (live.port * 3))) ? (int)((c2 >> (live.port * 3 + 1)) & 3) : -1;
@@ -1587,6 +1597,18 @@ static void modes_init(void)
         return;
     }
     cur_hw = boot_hw;
+    if (!wmref_ok) { /* einmal, beim Start: Watermarks der Firmware als Bezug fuer andere Pixeltakte */
+        wmref.f.pipe = p;
+        uint32_t pb = igd_rd(PLANE_BUF_CFG(p)), cb = igd_rd(CUR_BUF_CFG(p));
+        wmref.ddb = ((pb >> 16) & 0x3FF) - (pb & 0x3FF) + 1;
+        wmref.cddb = ((cb >> 16) & 0x3FF) - (cb & 0x3FF) + 1;
+        for (int lvl = 0; lvl < 8; lvl++) {
+            wmref.wm[lvl] = igd_rd(PLANE_WM(p, lvl));
+            wmref.cwm[lvl] = igd_rd(CUR_WM(p, lvl));
+        }
+        wmref.base_khz = khz;
+        wmref_ok = 1;
+    }
 
     Timing b = {.khz = khz};
     b.ha = (boot_hw.htotal & 0xFFFF) + 1;
@@ -1614,8 +1636,8 @@ static void modes_init(void)
             continue;
         for (uint32_t i = first; i + 18 <= end; i += 18) {
             Timing t;
-            if (dtd_parse(e + i, &t) && !t.interlaced && t.khz <= limit && t.ha <= igd_scr_w &&
-                t.va <= igd_scr_h && t.ha >= 640 && t.va >= 400)
+            if (dtd_parse(e + i, &t) && !t.interlaced && t.khz <= limit && t.ha <= fb_max_w &&
+                t.va <= fb_max_h && t.ha >= 640 && t.va >= 400)
                 add_mode(&t);
         }
     }
@@ -1731,8 +1753,11 @@ int igd_mode_set(uint32_t w, uint32_t h, uint32_t hz)
 }
 
 /* Beim Start (aus display_init): Modi einsammeln, dann ggf. "igdmode=BxH[@Hz]" aus der Kommandozeile setzen */
+static void out_init(void);
+
 void igd_modes_boot(void)
 {
+    out_init();
     modes_init();
     const char *want = cmdline_get("igdmode");
     if (!want || !nmodes)
@@ -1756,4 +1781,296 @@ void igd_modes_boot(void)
         kprintf("igd: igdmode=%s: %s (%d Modi bekannt)\n", want,
                 rc == IGD_MODE_NOMODE ? "diesen Modus bietet der Monitor nicht an (resolution zeigt die Liste)"
                                       : "Umschalten fehlgeschlagen", nmodes);
+}
+
+/* ---------- Anschluss von Grund auf ein- und ausschalten (ohne Vorarbeit der Firmware) ---------- */
+
+#define PWR_WELL_CTL_DRIVER   0x45404                   /* je Bereich: Bit 2i+1 anfordern, Bit 2i ist an */
+#define TRANS_MSA_MISC(t)     (0x60410 + PIPE_OFF(t))   /* DP: Angaben zum Bildformat fuer den Monitor */
+
+/* Pegel-Tabelle des Anschlusses: Eintrag 0-8 DisplayPort (Spannungshub/Vorverzerrung), 9 HDMI. Werte vom Test-PC
+ * (Coffee Lake-S, von der Firmware so programmiert); ohne Firmware-Vorarbeit stehen dort Nullen */
+static const uint32_t ddi_trans[10][2] = {
+    {0x00001017, 0xA0}, {0x00004013, 0x9B}, {0x00006011, 0x88}, {0x8000800F, 0xC0}, {0x00001017, 0x9B},
+    {0x00004013, 0x88}, {0x80006011, 0xC0}, {0x00001017, 0x97}, {0x80004013, 0xC0}, {0x80000018, 0xC0},
+};
+
+static uint32_t plane_ctl_on;   /* PLANE_CTL der Firmware (an, Format) */
+static uint32_t pipeconf_base;  /* PIPECONF der Firmware ohne An/Laeuft */
+
+static const char *port_letter(int port)
+{
+    static const char *n[] = {"A", "B", "C", "D", "E"};
+    return port >= 0 && port < 5 ? n[port] : "?";
+}
+
+/* Was haengt an port? 2 = DisplayPort (AUX antwortet), 1 = HDMI/DVI (EDID ueber DDC), 0 = nichts */
+static int port_detect(int port, uint8_t *cap)
+{
+    if (igd_dpcd_read(port, 0x000, cap, 16) == 16)
+        return 2;
+    uint8_t probe[8];
+    int pin = ddc_pin(port);
+    if (pin && gmbus_read(pin, 0x50, 0, probe, 8) == 0 && probe[0] == 0 && probe[1] == 0xFF)
+        return 1;
+    return 0;
+}
+
+/* Alles aus, was auf der Pipe laeuft: Ebenen, Pipe, Transcoder, Takt, Port (und DP-Linkschicht), DPLL */
+static void out_off(int p)
+{
+    uint32_t ddi = igd_rd(TRANS_DDI_FUNC_CTL(p)), c2 = igd_rd(DPLL_CTRL2);
+    int port = (int)((ddi >> 28) & 7), dp = ((ddi >> 24) & 7) == 2, on = (ddi >> 31) & 1;
+    int id = (c2 & (1u << (port * 3))) ? (int)((c2 >> (port * 3 + 1)) & 3) : -1;
+    igd_wr(PLANE_CTL(p), igd_rd(PLANE_CTL(p)) & ~(1u << 31));
+    igd_wr(PLANE_SURF(p), igd_rd(PLANE_SURF(p)));
+    igd_wr(CUR_CTL(p), 0);
+    igd_wr(CUR_BASE(p), igd_rd(CUR_BASE(p)));
+    wait_frame(p);
+    if (on && dp) {
+        igd_wr(DP_TP_CTL(port), (igd_rd(DP_TP_CTL(port)) & ~DP_TP_TRAIN_MASK) | DP_TP_TRAIN_IDLE);
+        delay_us(1000);
+    }
+    igd_wr(PIPECONF(p), igd_rd(PIPECONF(p)) & ~(1u << 31));
+    wait_bits(PIPECONF(p), 1u << 30, 0, 100);
+    igd_wr(TRANS_DDI_FUNC_CTL(p), ddi & ~((1u << 31) | (7u << 28)));
+    igd_wr(TRANS_CLK_SEL(p), 0);
+    if (!on)
+        return;
+    igd_wr(DDI_BUF_CTL(port), igd_rd(DDI_BUF_CTL(port)) & ~(1u << 31));
+    if (dp)
+        igd_wr(DP_TP_CTL(port), igd_rd(DP_TP_CTL(port)) & ~(DP_TP_CTL_ENABLE | DP_TP_TRAIN_MASK));
+    wait_bits(DDI_BUF_CTL(port), DDI_BUF_IS_IDLE, DDI_BUF_IS_IDLE, 2);
+    igd_wr(DPLL_CTRL2, igd_rd(DPLL_CTRL2) | 1u << (port + 15));
+    if (id >= 1) {
+        igd_wr(pll_ctl_reg(id), igd_rd(pll_ctl_reg(id)) & ~(1u << 31));
+        (void)igd_rd(pll_ctl_reg(id));
+    }
+}
+
+/* Den besten Modus fuer den Monitor an port: am liebsten die jetzige Aufloesung, sonst die groesste; dazu die hoechste
+ * Bildrate bis limit_khz; passt in den Framebuffer der Firmware. 0 = gefunden */
+static int out_pick(int port, int dp, uint32_t limit_khz, Timing *best)
+{
+    static uint8_t edid[256];
+    int blocks = dp ? igd_dp_edid(port, edid) : read_edid(port, edid, 0);
+    int found = 0;
+    for (int blk = 0; blk < blocks; blk++) {
+        const uint8_t *e = edid + 128 * blk;
+        uint32_t first = blk == 0 ? 54 : e[2], end = blk == 0 ? 126 : 127;
+        if (blk > 0 && (e[0] != 0x02 || first < 4))
+            continue;
+        for (uint32_t i = first; i + 18 <= end; i += 18) {
+            Timing t;
+            if (!dtd_parse(e + i, &t) || t.interlaced || t.khz > limit_khz || t.ha > fb_max_w || t.va > fb_max_h ||
+                t.ha < 640 || t.va < 400)
+                continue;
+            if (!found) {
+                *best = t;
+                found = 1;
+                continue;
+            }
+            int same_t = t.ha == igd_scr_w && t.va == igd_scr_h, same_b = best->ha == igd_scr_w && best->va == igd_scr_h;
+            uint64_t at = (uint64_t)t.ha * t.va, ab = (uint64_t)best->ha * best->va;
+            if (same_t != same_b ? same_t : at != ab ? at > ab : hz100(&t) > hz100(best))
+                *best = t;
+        }
+    }
+    return found ? 0 : -1;
+}
+
+/* Bild auf port legen: Anschluss ganz ohne Firmware einschalten (Strom, Pegel, DPLL, bei DP Link-Training), Modus aus
+ * der EDID des Monitors dort. 0 = Bild steht */
+static int out_on(int port)
+{
+    int p = igd_state.scanout_pipe;
+    uint8_t cap[16];
+    int kind = port_detect(port, cap);
+    if (!kind) {
+        kprintf("igdout: Port %s: kein Monitor\n", port_letter(port));
+        return -1;
+    }
+    int dp = kind == 2, lanes = 0;
+    uint8_t rate = 0;
+    uint32_t link_khz = 0, limit = GEN9_HDMI_MAX_KHZ;
+    if (dp) {
+        uint8_t ext[16];
+        if ((cap[0xE] & 0x80) && igd_dpcd_read(port, 0x2200, ext, 16) == 16) {
+            cap[1] = ext[1];
+            cap[2] = (uint8_t)((cap[2] & 0xE0) | (ext[2] & 0x1F));
+        }
+        lanes = cap[2] & 0x1F;
+        lanes = lanes >= 4 ? 4 : lanes >= 2 ? 2 : 1;
+        rate = cap[1] >= 0x14 ? 0x14 : cap[1] >= 0x0A ? 0x0A : 0x06;
+        link_khz = rate * 27000u;
+        DpLink tmp = {.link_khz = link_khz, .lanes = (uint32_t)lanes};
+        limit = dp_limit(&tmp);
+    }
+    Timing t;
+    if (out_pick(port, dp, limit, &t)) {
+        kprintf("igdout: Port %s: keine passende Aufloesung in den Monitordaten\n", port_letter(port));
+        return -2;
+    }
+    uint32_t hz = hz100(&t);
+    kprintf("igdout: Port %s (%s): %ux%u @ %u.%02u Hz, Pixeltakt %u kHz%s\n", port_letter(port), dp ? "DisplayPort" : "HDMI",
+            t.ha, t.va, hz / 100, hz % 100, t.khz, dp ? "" : "");
+    if (dp)
+        kprintf("igdout:   Verbindung: %d Lane(s) x %u MHz\n", lanes, link_khz / 1000);
+
+    out_off(p);
+
+    /* Strom fuer den Anschluss (DDI-IO-Bereich) und seine Pegel-Tabelle */
+    int well = port == 0 || port == 4 ? 1 : port + 1;
+    igd_wr(PWR_WELL_CTL_DRIVER, igd_rd(PWR_WELL_CTL_DRIVER) | 1u << (2 * well + 1));
+    if (wait_bits(PWR_WELL_CTL_DRIVER, 1u << (2 * well), 1u << (2 * well), 10))
+        kprintf("igdout:   Stromversorgung des Anschlusses kommt nicht (PWR_WELL_CTL %#x)\n", igd_rd(PWR_WELL_CTL_DRIVER));
+    for (int i = 0; i < 10; i++) {
+        igd_wr(DDI_BUF_TRANS_LO(port, i), ddi_trans[i][0]);
+        igd_wr(DDI_BUF_TRANS_HI(port, i), ddi_trans[i][1]);
+    }
+
+    /* DPLL1: HDMI = Pixeltakt, DP = Linkrate */
+    int id = 1;
+    uint32_t c1 = igd_rd(DPLL_CTRL1) & ~(0x3Fu << (id * 6));
+    if (dp) {
+        uint32_t code = link_khz == 540000 ? 0 : link_khz == 270000 ? 1 : 2;
+        c1 |= (1u | code << 1) << (id * 6);
+    } else {
+        uint32_t cfg1, cfg2;
+        if (skl_hdmi_dpll(t.khz, &cfg1, &cfg2)) {
+            kprintf("igdout:   keine DPLL-Einstellung fuer %u kHz\n", t.khz);
+            return -3;
+        }
+        igd_wr(DPLL_CFGCR1(id), cfg1);
+        igd_wr(DPLL_CFGCR2(id), cfg2);
+        c1 |= (1u | 1u << 5) << (id * 6);
+    }
+    igd_wr(DPLL_CTRL1, c1);
+    (void)igd_rd(DPLL_CTRL1);
+    igd_wr(pll_ctl_reg(id), igd_rd(pll_ctl_reg(id)) | 1u << 31);
+    if (wait_bits(DPLL_STATUS, 1u << (id * 8), 1u << (id * 8), 5)) {
+        kprintf("igdout:   DPLL%d rastet nicht ein (DPLL_STATUS %#x)\n", id, igd_rd(DPLL_STATUS));
+        return -4;
+    }
+    uint32_t c2 = igd_rd(DPLL_CTRL2);
+    c2 &= ~((1u << (port + 15)) | (3u << (port * 3 + 1)));
+    c2 |= (uint32_t)id << (port * 3 + 1) | 1u << (port * 3);
+    igd_wr(DPLL_CTRL2, c2);
+
+    if (dp) {
+        DpTrain tr = {.port = port, .lanes = lanes, .tps3 = (cap[2] & 0x40) != 0,
+                      .buf_ctl = (uint32_t)(lanes - 1) << 1, .cr_us = 100,
+                      .eq_us = (cap[0xE] & 0x7F) ? (cap[0xE] & 0x7Fu) * 4000u : 400};
+        int rc = dp_train(&tr, rate, 0);
+        if (rc) {
+            dp_link_off(port, 0);
+            delay_us(10000);
+            rc = dp_train(&tr, rate, 0);
+        }
+        if (rc) {
+            kprintf("igdout:   Link-Training fehlgeschlagen\n");
+            return -5;
+        }
+    }
+
+    /* Transcoder und Pipe */
+    HwMode m = {0}, ref = {.ddi_func = 0};
+    fill_timing(&t, &ref, igd_surf_a, igd_scr_stride, &m);
+    igd_wr(TRANS_CLK_SEL(p), (uint32_t)(port + 1) << 29);
+    igd_wr(HTOTAL(p), m.htotal);
+    igd_wr(HBLANK(p), m.hblank);
+    igd_wr(HSYNC(p), m.hsync);
+    igd_wr(VTOTAL(p), m.vtotal);
+    igd_wr(VBLANK(p), m.vblank);
+    igd_wr(VSYNC(p), m.vsync);
+    igd_wr(VSYNCSHIFT(p), 0);
+    igd_wr(PIPESRC(p), m.pipesrc);
+    uint32_t func = 1u << 31 | (uint32_t)port << 28 | (t.hpos ? 1u << 16 : 0) | (t.vpos ? 1u << 17 : 0);
+    if (dp) {
+        dp_mn(t.khz, link_khz, (uint32_t)lanes, &m);
+        igd_wr(PIPE_DATA_M1(p), m.data_m);
+        igd_wr(PIPE_DATA_N1(p), m.data_n);
+        igd_wr(PIPE_LINK_M1(p), m.link_m);
+        igd_wr(PIPE_LINK_N1(p), m.link_n);
+        igd_wr(TRANS_MSA_MISC(p), 0x21); /* 8 Bit je Farbe, synchroner Takt */
+        func |= 2u << 24 | (uint32_t)(lanes - 1) << 1;
+    }
+    igd_wr(TRANS_DDI_FUNC_CTL(p), func);
+    if (wmref_ok)
+        dp_watermarks(&wmref, t.khz);
+    igd_wr(PLANE_STRIDE(p), m.plane_stride);
+    igd_wr(PLANE_SIZE(p), m.plane_size);
+    igd_wr(PLANE_CTL(p), plane_ctl_on);
+    igd_wr(PLANE_SURF(p), m.plane_surf);
+    igd_wr(PIPECONF(p), pipeconf_base | 1u << 31);
+    int rc = 0;
+    if (wait_bits(PIPECONF(p), 1u << 30, 1u << 30, 100)) {
+        kprintf("igdout:   Pipe laeuft nicht an (PIPECONF %#x)\n", igd_rd(PIPECONF(p)));
+        rc = -6;
+    }
+    if (dp)
+        igd_wr(DP_TP_CTL(port), DP_TP_CTL_ENABLE | DP_TP_CTL_ENH_FRAME | DP_TP_TRAIN_NORMAL);
+    else
+        igd_wr(DDI_BUF_CTL(port), 1u << 31);
+    delay_us(1000);
+
+    igd_scr_w = t.ha;
+    igd_scr_h = t.va;
+    console_resize(t.ha, t.va);
+    igd_cursor_reapply();
+    modes_init(); /* Modusliste fuer den neuen Anschluss */
+    return rc;
+}
+
+/* Beim Start (igd_modes_boot): Bezugswerte der Firmware merken */
+static void out_init(void)
+{
+    int p = igd_state.scanout_pipe;
+    plane_ctl_on = igd_rd(PLANE_CTL(p)) | 1u << 31;
+    pipeconf_base = igd_rd(PIPECONF(p)) & ~(3u << 30);
+}
+
+/* igdtest output [b|c|d]: ohne Port die Anschluesse anzeigen; mit Port das Bild dorthin legen, 12 s, zurueck */
+int igd_output_test(int port)
+{
+    int p = igd_state.scanout_pipe;
+    if (!igd_state.gen9 || p < 0 || !plane_ctl_on) {
+        kprintf("igdout: keine passende Intel-GPU\n");
+        return -1;
+    }
+    uint32_t ddi = igd_rd(TRANS_DDI_FUNC_CTL(p));
+    int now = (ddi >> 31) ? (int)((ddi >> 28) & 7) : -1;
+    for (int q = 1; q <= 3; q++) {
+        uint8_t cap[16];
+        int k = port_detect(q, cap);
+        kprintf("igdout: Port %s: %s%s\n", port_letter(q), k == 2 ? "DisplayPort-Monitor" : k == 1 ? "HDMI-Monitor" : "nichts",
+                q == now ? " (zeigt das Bild)" : "");
+    }
+    if (port < 1 || port > 3)
+        return 0;
+    if (port == now) {
+        kprintf("igdout: Port %s zeigt schon das Bild\n", port_letter(port));
+        return 0;
+    }
+    if (console_gfx_active())
+        return -2;
+    kprintf("igdout: Bild auf Port %s ...\n", port_letter(port));
+    uint32_t imr = igd_underrun_begin(p);
+    int rc = out_on(port);
+    uint32_t meas = measure_hz100(p);
+    kprintf("igdout: %s, gemessen %u.%02u Hz, %s\n", rc == 0 ? "Bild steht" : "FEHLER", meas / 100, meas % 100,
+            igd_underrun_end(p, imr) ? "FIFO-Unterlauf" : "kein Unterlauf");
+    thread_sleep_ms(10000);
+    if (now >= 0) {
+        kprintf("igdout: zurueck auf Port %s (von Grund auf) ...\n", port_letter(now));
+        imr = igd_underrun_begin(p);
+        int rc2 = out_on(now);
+        meas = measure_hz100(p);
+        kprintf("igdout: %s, gemessen %u.%02u Hz, %s\n", rc2 == 0 ? "Bild steht" : "FEHLER", meas / 100, meas % 100,
+                igd_underrun_end(p, imr) ? "FIFO-Unterlauf" : "kein Unterlauf");
+        if (rc == 0)
+            rc = rc2;
+    }
+    console_repaint();
+    return rc;
 }

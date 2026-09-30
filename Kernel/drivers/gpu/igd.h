@@ -56,6 +56,9 @@ int igd_dpmode_test(void);
 /* DisplayPort, Teil 3 (igdtest dptrain): Verbindung abschalten und selbst neu einmessen (Link-Training), Bild wieder an */
 int igd_dptrain_test(void);
 
+/* Anschluesse (igdtest output [b|c|d]): anzeigen; mit Port das Bild von Grund auf dorthin legen, 12 s, zurueck */
+int igd_output_test(int port);
+
 /* Fest eingebaut: Modi des Monitors (EDID, per HDMI moeglich, hoechstens so gross wie der Framebuffer der Firmware)
  * im Betrieb umschalten; die Konsole passt sich an. hz in 1/100 Hz (0 = hoechste Bildrate bzw. beim Setzen egal);
  * w = 0 setzt den Modus der Firmware. */
