@@ -32,6 +32,7 @@ sonst in reiner Emulation. Unter WSL einmalig `sudo usermod -aG kvm $USER` und W
 | `DISK=virtio\|nvme\|ahci\|usb` | Controller der Datenplatte (Standard `virtio`) |
 | `DISK_LAYOUT=none\|mbr\|gpt` | Partitionierung beim Neuanlegen der Datenplatte |
 | `NET=e1000\|e1000e\|none` | Netzwerkkarte im QEMU-User-Netz (Gast 10.0.2.15, Router 10.0.2.2) |
+| `SOUND=none\|wav\|pa\|off` | Soundkarte (Intel HD Audio): Ton ins Leere, nach `Build/sound.wav`, ueber PulseAudio (unter WSLg die Windows-Lautsprecher) oder ohne Karte |
 | `STICK=12\|16\|exfat` | zusaetzlichen Test-Stick (FAT12/FAT16/exFAT) am USB anschliessen |
 | `TESTS=1` / `TESTS=disk,user` | Selbsttests beim Start (alle bzw. nur diese Gruppen); `KEEP=1` bleibt danach im System |
 | `CMDLINE="..."` | weitere Kernel-Kommandozeile, siehe unten |
@@ -77,6 +78,19 @@ zeigt, wie viele Bild-Updates es seit dem Start gab und was sie gekostet haben, 
 ganze Bilder. `igdtest edid`, `igdtest scale` und `igdtest mode` pruefen Monitordaten, Skalierer und
 Moduswechsel (HDMI), `igdtest dp` und `igdtest dpmode` dasselbe per DisplayPort. QEMU emuliert keine Intel-GPU: getestet wird
 auf echter Hardware (bisher i5-8400T, UHD 630, 3440x1440 ueber HDMI).
+
+## Ton (Intel High Definition Audio)
+
+`Kernel/drivers/sound/hda.c` sucht einen HDA-Controller (PCI-Klasse 04.03), setzt ihn zurueck und fragt die Codecs
+ueber CORB/RIRB ab. Von jedem analogen Ausgang (Kopfhoerer, Line-Out, Lautsprecher) sucht er einen Weg zu einem DAC,
+schaltet ihn durch und stellt die Verstaerker ein; alle diese Ausgaenge spielen denselben Stream. Die Daten liest der
+Controller per DMA aus einem Ringpuffer (128 KiB); `SYS_AUDIO` schreibt hinein und wartet, wenn er voll ist. Ein
+Programm zur Zeit hat die Ausgabe, beim Beenden wird sie freigegeben.
+
+- `play datei.wav` spielt WAV-Dateien: PCM mit 8/16/24/32 Bit oder 32-Bit-Gleitkomma, Mono oder Stereo, jede
+  Abtastrate (kann der Codec sie nicht, rechnet `play` auf 48 kHz um). Beispiel: `play /share/klang.wav`
+- `play -t [Hz]` spielt einen Testton (links, rechts, beide), `play -v 0-100` setzt die Lautstaerke
+- In QEMU: `make run SOUND=pa` (hoerbar) oder `SOUND=wav` (Aufnahme in `Build/sound.wav`)
 
 ## Fehlersuche
 

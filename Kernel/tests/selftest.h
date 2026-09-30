@@ -33,6 +33,7 @@ void test_console_speed(void);
 void test_unicode(void);
 void test_scrollback(void);
 void test_video(BootInfo *info);
+void test_sound(void);
 void test_mouse(void);
 void test_clipboard(void);
 void test_keymap(void);

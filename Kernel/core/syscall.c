@@ -8,6 +8,7 @@
 #include "arch/x86_64/smp.h"
 #include "lib/klog.h"
 #include "drivers/gpu/igd.h"
+#include "drivers/sound/hda.h"
 #include "drivers/keyboard.h"
 #include "lib/kprintf.h"
 #include "arch/x86_64/power.h"
@@ -312,12 +313,6 @@ static int syscall_unlocked(SyscallFrame *f)
         }
         break;
     }
-    case SYS_SETMODE: {
-        int r = igd_mode_set((uint32_t)f->rdi, (uint32_t)f->rsi, (uint32_t)f->rdx);
-        ret = r == 0 ? 0 : r == IGD_MODE_NODRIVER ? ERR_NOSYS : r == IGD_MODE_NOMODE ? ERR_NOENT
-            : r == IGD_MODE_BUSY ? ERR_AGAIN : ERR_IO;
-        break;
-    }
     case SYS_KLOG: { /* das Log hat seinen eigenen Lock */
         uint64_t max = f->rdx > 65536 ? 65536 : f->rdx;
         if (!process_user_range_ok(p, f->rdi, 8, 1) || !process_user_range_ok(p, f->rsi, max, 1))
@@ -395,6 +390,31 @@ static void syscall_do(SyscallFrame *f)
     case SYS_KILL:     ret = process_kill_pid((uint32_t)f->rdi); break;
     case SYS_PROCINFO: ret = sys_procinfo(f->rdi, f->rsi); break;
     case SYS_USBINFO:  ret = sys_usbinfo(f->rdi, f->rsi); break;
+    case SYS_AUDIO: {
+        Process *p = process_current();
+        uint32_t pid = process_pid(p);
+        int64_t r;
+        switch (f->rdi) {
+        case 0: r = hda_open(pid, (uint32_t)f->rsi, (uint32_t)f->rdx); break;
+        case 1:
+            r = process_user_range_ok(p, f->rsi, f->rdx, 0) ? hda_write(pid, (const void *)f->rsi, f->rdx) : ERR_FAULT;
+            break;
+        case 2: r = hda_drain(pid); break;
+        case 3: hda_close(pid); r = 0; break;
+        case 4: r = hda_volume((int)(int64_t)f->rsi); break;
+        case 5: r = (int64_t)hda_played(pid); break;
+        default: r = ERR_INVAL; break;
+        }
+        ret = r == HDA_ERR_NODEV ? ERR_NOSYS : r == HDA_ERR_BUSY ? ERR_AGAIN : r == HDA_ERR_FORMAT ? ERR_INVAL
+            : r == HDA_ERR_NOTOPEN ? ERR_BADF : r;
+        break;
+    }
+    case SYS_SETMODE: {
+        int r = igd_mode_set((uint32_t)f->rdi, (uint32_t)f->rsi, (uint32_t)f->rdx);
+        ret = r == 0 ? 0 : r == IGD_MODE_NODRIVER ? ERR_NOSYS : r == IGD_MODE_NOMODE ? ERR_NOENT
+            : r == IGD_MODE_BUSY ? ERR_AGAIN : ERR_IO;
+        break;
+    }
     case SYS_GPU:
         ret = f->rdi == 1 ? igd_flip_test() : f->rdi == 2 ? igd_cursor_test() : f->rdi == 3 ? igd_blit_test()
             : f->rdi == 4 ? igd_info_report()

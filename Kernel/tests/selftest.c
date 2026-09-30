@@ -61,6 +61,7 @@ void run_selftests(BootInfo *info)
     RUN("keymap", test_keymap());
     RUN("multiclick", test_multiclick());
     RUN("video", test_video(info));
+    RUN("sound", test_sound());
     RUN("rtc", test_rtc());
     RUN("kprintf", test_kprintf());
     RUN("paging", test_paging());

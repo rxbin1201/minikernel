@@ -72,8 +72,8 @@ void test_vfs(BootInfo *info)
         kprintf(" %s", vfs_basename(e->path));
     kprintf("\n");
     check("readdir(/bin) listet die Programme", count >= 5);
-    check("readdir(/) enthaelt bin, etc und README.txt",
-          vfs_readdir("/", 2) != 0 && vfs_readdir("/", 3) == 0);
+    check("readdir(/) enthaelt bin, etc, share und README.txt",
+          vfs_readdir("/", 3) != 0 && vfs_readdir("/", 4) == 0 && vfs_lookup("/share/klang.wav"));
 }
 
 static uint8_t pat(uint32_t i, uint8_t seed)

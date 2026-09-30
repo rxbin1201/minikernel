@@ -14,6 +14,7 @@
 #include "fs/vfs.h"
 #include "drivers/mouse.h"
 #include "console/console.h"
+#include "drivers/sound/hda.h"
 
 #define MAX_PROC          64
 #define MAX_FD            32
@@ -531,6 +532,7 @@ static void finish_process(Process *p, int code, int faulted)
     close_all_fds(p);
     mouse_owner_exit(p->pid);
     console_gfx_release(p->pid); /* hatte das Programm den Bildschirm, bekommt ihn die Konsole zurueck */
+    hda_close(p->pid);           /* spielte es Ton: sofort aus */
     uint64_t f = irq_save();
     p->exit_code = code;
     p->faulted = faulted;

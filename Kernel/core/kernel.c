@@ -29,6 +29,7 @@
 #include "drivers/rtc.h"
 #include "drivers/video.h"
 #include "drivers/gpu/igd.h"
+#include "drivers/sound/hda.h"
 #include "tests/selftest.h"
 
 /* ---------- Datentraeger ---------- */
@@ -140,6 +141,7 @@ void kmain(BootInfo *info)
     rtc_init();
     init_storage(info);
     igd_init(info); /* Intel-Grafik: vorerst nur erkennen und auslesen */
+    hda_init();     /* Ton: Intel High Definition Audio */
     net_init(); /* Netzwerkkarten; DHCP laeuft im Hintergrund */
     syscall_init();
 

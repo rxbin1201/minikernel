@@ -141,6 +141,7 @@ TESTS ?=
 KEEP ?=
 CMDLINE ?=
 NET ?= e1000
+SOUND ?= none
 STICK ?=
 SMP ?= 4
 QEMU_EXTRA ?=
@@ -177,6 +178,10 @@ QEMU_DISK_usb    = -device qemu-xhci,id=xhci -device usb-storage,bus=xhci.0,driv
 
 QEMU_ACCEL := $(if $(filter 1,$(KVM)),-enable-kvm -cpu host)
 QEMU_NET   := $(if $(filter none,$(NET)),,-netdev user,id=net0 -device $(NET),netdev=net0,romfile=)
+# Ton: Intel HD Audio mit einem Codec (Line-Out). SOUND=none spielt ins Leere (laeuft aber in Echtzeit), SOUND=wav
+# schreibt nach Build/sound.wav, SOUND=pa spielt ueber PulseAudio (WSLg: Windows-Lautsprecher), SOUND=off ohne Karte
+QEMU_SOUND  = $(if $(filter off,$(SOUND)),,-audiodev $(if $(filter wav,$(SOUND)),wav$(,)id=snd0$(,)path=Build/sound.wav,$(SOUND)$(,)id=snd0) \
+              -device intel-hda -device hda-output$(,)audiodev=snd0$(if $(HDA_TIMER),$(,)use-timer=$(HDA_TIMER)))
 # HEADLESS=1: ohne Fenster (Ausgabe nur in $(LOG)), z.B. fuer Tests im Hintergrund oder in CI
 QEMU_DISPLAY := $(if $(filter 1,$(HEADLESS)),-display none)
 # Mit Selbsttests nicht neu starten: ein Absturz (Triple Fault) wuerde sonst still einen neuen Lauf beginnen
@@ -191,7 +196,7 @@ run efi: Build/esp.img Image/disk.img $(if $(STICK),Build/stick-$(STICK).img)
 	qemu-system-x86_64 -bios $(OVMF) $(QEMU_ACCEL) -smp $(SMP) -m 512 -rtc base=localtime -serial file:$(LOG) $(QEMU_DISPLAY) \
 	    -drive file=Build/esp.img,format=raw,index=0,media=disk \
 	    -drive file=Image/disk.img,format=raw,if=none,id=hd0 $(QEMU_DISK_$(DISK)) \
-	    $(QEMU_NET) $(QEMU_STICK) $(QEMU_GDB) $(QEMU_REBOOT) $(QEMU_EXTRA)
+	    $(QEMU_NET) $(QEMU_SOUND) $(QEMU_STICK) $(QEMU_GDB) $(QEMU_REBOOT) $(QEMU_EXTRA)
 
 # Debuggen mit gdb: 'make debug' startet QEMU angehalten mit gdb-Server auf Port 1234 (ohne KVM, damit normale
 # Breakpoints gehen), 'make gdb' in einem zweiten Terminal verbindet sich (tools/gdbinit: Symbole, Breakpoint kmain).
@@ -285,6 +290,7 @@ help:
 	@echo "  DISK=virtio|nvme|ahci|usb   Controller der Datenplatte (Standard virtio)"
 	@echo "  DISK_LAYOUT=none|mbr|gpt    Partitionierung beim Neuanlegen der Datenplatte"
 	@echo "  NET=e1000|e1000e|none       Netzwerkkarte (QEMU-User-Netz, Gast 10.0.2.15)"
+	@echo "  SOUND=none|wav|pa|off       Ton: ins Leere, nach Build/sound.wav, ueber PulseAudio, ohne Soundkarte"
 	@echo "  SMP=4                       Anzahl CPUs in QEMU (Standard 4)"
 	@echo "  STICK=12|16|exfat           zusaetzlichen Test-Stick anschliessen (tools/mkstick.py)"
 	@echo "  TESTS=1 | TESTS=disk,user   Selbsttests beim Start; KEEP=1 bleibt danach im System"

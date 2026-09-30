@@ -69,12 +69,14 @@ typedef long long          s64;
 #define SYS_KLOG      61
 #define SYS_GPU       62
 #define SYS_SETMODE   63
+#define SYS_AUDIO     64
 #define ERR_NOENT     (-2)
 #define ERR_IO        (-5)
 #define ERR_EXIST     (-17)
 #define ERR_INVAL     (-22)
 #define ERR_AGAIN     (-11)
 #define ERR_INTR      (-4)
+#define ERR_NOSYS     (-38)
 #define ERR_NETUNREACH  (-101)
 #define ERR_TIMEDOUT    (-110)
 #define ERR_HOSTUNREACH (-113)
@@ -249,6 +251,7 @@ static inline s64 sys_spawn(const char *path, const char *cmdline)      { return
 static inline s64 sys_wait(int pid, int *code)                { return syscall3(SYS_WAIT, pid, (u64)code, 0); }
 static inline s64 sys_wait_nohang(int pid, int *code)         { return syscall3(SYS_WAIT, pid, (u64)code, 1); } /* ERR_AGAIN: laeuft noch */
 static inline s64 sys_videoinfo(u64 index, VideoInfo *vi)  { return syscall3(SYS_VIDEOINFO, index, (u64)vi, 0); }
+static inline s64 sys_audio(u64 op, u64 a, u64 b)          { return syscall3(SYS_AUDIO, op, a, b); } /* siehe play.c */
 static inline s64 sys_setmode(u64 w, u64 h, u64 hz100)     { return syscall3(SYS_SETMODE, w, h, hz100); } /* sofort umschalten (Intel-Treiber) */
 static inline s64 sys_keymap(const char *set, char out[16]) { return syscall3(SYS_KEYMAP, (u64)set, (u64)out, 0); } /* set = 0: nur abfragen */
 static inline s64 sys_gfx(int op, const void *arg)          { return syscall3(SYS_GFX, op, (u64)arg, 0); } /* 0 = uebernehmen, 1 = GfxBlit, 2 = freigeben */
