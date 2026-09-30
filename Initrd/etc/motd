@@ -1,0 +1,3 @@
+Willkommen im Mini-Kernel!
+Dieses System laeuft von einer RAM-Disk (tar) und hat eine Shell im User-Mode.
+Tipp: "help" zeigt die Befehle.

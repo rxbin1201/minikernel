@@ -1,0 +1,8 @@
+# Build-Ergebnisse
+/Build/
+/Image/
+Out.log
+
+# Python
+__pycache__/
+*.pyc

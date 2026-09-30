@@ -1,0 +1,3 @@
+# Wird beim Start der interaktiven Shell ausgefuehrt
+PATH=/bin:/disk/bin:.
+HOME=/
