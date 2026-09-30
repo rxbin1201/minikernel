@@ -588,20 +588,79 @@ static struct {
     uint64_t part_n, part_px, part_us;                         /* Teil-Updates in den angezeigten Puffer */
 } bstat;
 
+/* Pfeil wie bei macOS: schwarz, weisser Rand, weicher Schatten, kantengeglaettet (4x4 Abtastpunkte je Pixel).
+ * Nur Ganzzahlen (der Kernel rechnet ohne FPU). Eckpunkte in 1/16 Pixel bei Groesse 1; die Spitze liegt bei (2, 2). */
+static const int32_t arrow_poly[7][2] = {
+    {32, 32}, {32, 288}, {96, 229}, {138, 326}, {176, 310}, {136, 214}, {216, 214},
+};
+static uint32_t cursor_hot; /* Spitze in Pixeln (fuer die Position) */
+
+static int arrow_inside(int64_t x, int64_t y, int64_t f) /* x, y und Eckpunkte*f in 1/64 Pixel */
+{
+    int in = 0;
+    for (int i = 0, j = 6; i < 7; j = i++) {
+        int64_t xi = arrow_poly[i][0] * f, yi = arrow_poly[i][1] * f, xj = arrow_poly[j][0] * f, yj = arrow_poly[j][1] * f;
+        if ((yi > y) != (yj > y) && x < xi + (xj - xi) * (y - yi) / (yj - yi))
+            in = !in;
+    }
+    return in;
+}
+
+static int64_t arrow_dist2(int64_t x, int64_t y, int64_t f) /* Abstand zum Rand, zum Quadrat */
+{
+    int64_t best = INT64_MAX;
+    for (int i = 0, j = 6; i < 7; j = i++) {
+        int64_t ax = arrow_poly[j][0] * f, ay = arrow_poly[j][1] * f, bx = arrow_poly[i][0] * f, by = arrow_poly[i][1] * f;
+        int64_t dx = bx - ax, dy = by - ay, len = dx * dx + dy * dy, t = (x - ax) * dx + (y - ay) * dy;
+        int64_t px = ax, py = ay;
+        if (t >= len) { px = bx; py = by; }
+        else if (t > 0) { px = ax + dx * t / len; py = ay + dy * t / len; }
+        int64_t d = (x - px) * (x - px) + (y - py) * (y - py);
+        if (d < best)
+            best = d;
+    }
+    return best;
+}
+
 static void draw_cursor_image(uint64_t frames[4])
 {
     uint32_t sc = console_scale();
     if (sc < 1)
         sc = 1;
-    if (sc > 3) /* 12x19 Punkte, 64x64 Pixel Platz */
+    if (sc > 3)
         sc = 3;
+    int64_t f = 2 + (int64_t)sc * 2;    /* 1x, 1,5x, 2x in Vierteln: 16tel * f = 1/64 Pixel */
+    int64_t unit = 64;                  /* 1 Pixel (bei Groesse 1) in 1/64, skaliert unten */
+    int64_t border = unit * 3 / 2 * f / 4, sh_dy = unit * 3 / 2 * f / 4, sh_r = unit * 3 * f / 4;
+    cursor_hot = (uint32_t)(2 * f / 4);
     for (uint32_t y = 0; y < 64; y++)
         for (uint32_t x = 0; x < 64; x++) {
-            uint32_t px = 0;
-            if (y / sc < 19 && x / sc < 12) {
-                char c = arrow[y / sc][x / sc];
-                px = c == 'X' ? 0xFF000000u : c == '.' ? 0xFFFFFFFFu : 0;
-            }
+            uint32_t a = 0, wsum = 0;
+            for (int sy = 0; sy < 4; sy++)
+                for (int sx = 0; sx < 4; sx++) {
+                    int64_t X = (int64_t)x * 64 + sx * 16 + 8, Y = (int64_t)y * 64 + sy * 16 + 8;
+                    if (arrow_inside(X, Y, f)) {
+                        a += 255;
+                        continue;
+                    }
+                    int64_t d = arrow_dist2(X, Y, f);
+                    if (d <= border * border) {
+                        a += 255;
+                        wsum += 255;
+                        continue;
+                    }
+                    /* Schatten: Pfeil etwas nach unten verschoben, nach aussen auslaufend */
+                    int64_t ds = arrow_inside(X, Y - sh_dy, f) ? 0 : arrow_dist2(X, Y - sh_dy, f);
+                    if (ds < sh_r * sh_r) {
+                        int64_t k = 0; /* Wurzel ganzzahlig */
+                        while ((k + 1) * (k + 1) <= ds)
+                            k++;
+                        a += (uint32_t)(90 * (sh_r - k) / sh_r);
+                    }
+                }
+            a /= 16;
+            wsum /= 16;
+            uint32_t px = (a << 24) | (wsum << 16) | (wsum << 8) | wsum; /* vormultipliziert */
             uint64_t off = (uint64_t)y * 256 + (uint64_t)x * 4;
             *(uint32_t *)(frames[off >> 12] + (off & 4095)) = px;
         }
@@ -707,7 +766,7 @@ void igd_cursor_move(int x, int y, int visible)
         igd_wr(CUR_CTL(p), visible ? 0x27 : 0);
         cursor_on = visible;
     }
-    igd_wr(CUR_POS(p), cur_pos(x, y));
+    igd_wr(CUR_POS(p), cur_pos(x - (int)cursor_hot, y - (int)cursor_hot));
     igd_wr(CUR_BASE(p), cursor_surf); /* uebernimmt Position/Sichtbarkeit beim naechsten Bildwechsel */
 }
 
