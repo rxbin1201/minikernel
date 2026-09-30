@@ -12,7 +12,8 @@ KERNEL_S_FILES := $(wildcard Kernel/*.S)
 KERNEL_OBJECT_FILES := $(patsubst Kernel/%.c, Build/kernel/%.o, $(KERNEL_C_FILES)) \
                        $(patsubst Kernel/%.S, Build/kernel/%.o, $(KERNEL_S_FILES))
 
-KERNEL_CFLAGS=-Wall -Wextra -ffreestanding -fno-stack-protector -fno-pic -mno-red-zone -mno-sse -mno-mmx -MMD -MP -I Includes/ -I Kernel/ $(KERNEL_EXTRA_CFLAGS)
+# -fno-tree-loop-distribute-patterns: gcc soll keine Schleifen durch memset/memcpy-Aufrufe ersetzen (auch nicht in string.c)
+KERNEL_CFLAGS=-O2 -g -Wall -Wextra -ffreestanding -fno-tree-loop-distribute-patterns -fno-stack-protector -fno-pic -mno-red-zone -mno-sse -mno-mmx -MMD -MP -I Includes/ -I Kernel/ $(KERNEL_EXTRA_CFLAGS)
 KERNEL_LDFLAGS=-nostdlib -static -z max-page-size=0x1000 -z noexecstack -T Kernel/kernel.ld
 
 # User-Programm: statisch, bei USER_BASE gelinkt; -fpie erzeugt RIP-relativen Code (Adresse liegt ueber 2 GiB)
