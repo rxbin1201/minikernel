@@ -1060,9 +1060,10 @@ static void dp_watermarks(const DpLink *l, uint32_t khz)
 }
 
 /* Anzeige auf den Modus m umstellen, die DP-Verbindung bleibt stehen */
-static int dp_switch(const DpLink *l, const HwMode *m, uint32_t khz)
+/* Ebenen, Pipe und Transcoder aus; die Linkschicht sendet Leerlauf (die Verbindung bleibt stehen) */
+static void dp_pipe_off(const DpLink *l)
 {
-    int p = l->f.pipe, rc = 0;
+    int p = l->f.pipe;
     igd_wr(PLANE_CTL(p), l->f.plane_ctl & ~(1u << 31));
     igd_wr(PLANE_SURF(p), igd_rd(PLANE_SURF(p)));
     igd_wr(CUR_CTL(p), 0);
@@ -1074,7 +1075,12 @@ static int dp_switch(const DpLink *l, const HwMode *m, uint32_t khz)
     if (wait_bits(PIPECONF(p), 1u << 30, 0, 100))
         kprintf("igdmode:   Pipe geht nicht aus (PIPECONF %#x)\n", igd_rd(PIPECONF(p)));
     igd_wr(TRANS_DDI_FUNC_CTL(p), igd_rd(TRANS_DDI_FUNC_CTL(p)) & ~((1u << 31) | (7u << 28)));
+}
 
+/* Zeitablauf, M/N, Watermarks und Ebene fuer m, dann Transcoder und Pipe an und normale Daten senden */
+static int dp_pipe_on(const DpLink *l, const HwMode *m, uint32_t khz)
+{
+    int p = l->f.pipe, rc = 0;
     igd_wr(HTOTAL(p), m->htotal);
     igd_wr(HBLANK(p), m->hblank);
     igd_wr(HSYNC(p), m->hsync);
@@ -1100,6 +1106,12 @@ static int dp_switch(const DpLink *l, const HwMode *m, uint32_t khz)
     }
     igd_wr(DP_TP_CTL(l->f.port), (l->tp_ctl & ~DP_TP_TRAIN_MASK) | DP_TP_TRAIN_NORMAL);
     return rc;
+}
+
+static int dp_switch(const DpLink *l, const HwMode *m, uint32_t khz)
+{
+    dp_pipe_off(l);
+    return dp_pipe_on(l, m, khz);
 }
 
 /* Laufende DP-Verbindung der Pipe einlesen: Port, Lanes, Linktakt, Watermarks; orig = Modus jetzt. 0 = ok */
@@ -1276,6 +1288,225 @@ int igd_dpmode_test(void)
     kprintf("igdmode: %s (%d von %d Modi gezeigt%s)\n", rc == 0 ? "DP-Moduswechsel funktioniert" : "DP-Moduswechsel fehlgeschlagen",
             shown, nc, bad ? ", mit Stoerungen" : "");
     return rc;
+}
+
+/* ---------- DisplayPort: Link-Training ---------- */
+
+/* Die Verbindung einmessen (DP 1.2, wie i915 intel_dp_link_training.c):
+ * 1. Taktrueckgewinnung: Muster TPS1, der Monitor rastet je Lane auf den Takt ein (CR_DONE). Er darf dabei einen
+ *    hoeheren Spannungshub / mehr Vorverzerrung verlangen (DPCD 0x206/0x207); die Grafik stellt sie am Port ein
+ *    (DDI_BUF_CTL waehlt einen Eintrag der Pegel-Tabelle DDI_BUF_TRANS) und meldet sie dem Monitor (0x103-0x106).
+ * 2. Entzerrung: Muster TPS2 bzw. TPS3, bis jede Lane entzerrt und symbolsynchron ist und die Lanes zueinander
+ *    ausgerichtet sind.
+ * Danach sendet die Linkschicht Leerlauf, bis die Pipe laeuft. */
+
+#define DDI_BUF_TRANS_SEL(n)  ((uint32_t)(n) << 24)
+#define DDI_BUF_IS_IDLE       (1u << 7)
+#define DDI_BUF_TRANS_LO(port, i) (0x64E00 + 0x60u * (uint32_t)(port) + 8u * (uint32_t)(i))
+#define DDI_BUF_TRANS_HI(port, i) (DDI_BUF_TRANS_LO(port, i) + 4)
+#define DP_TP_CTL_ENABLE      (1u << 31)
+#define DP_TP_CTL_ENH_FRAME   (1u << 18)
+#define DP_TP_TRAIN_PAT1      (0u << 8)
+#define DP_TP_TRAIN_PAT2      (1u << 8)
+#define DP_TP_TRAIN_PAT3      (4u << 8)
+
+/* Gen9 (9 Eintraege): Spannungshub vs 0-2, Vorverzerrung pe; Index in DDI_BUF_TRANS (i915 index_to_dp_signal_levels) */
+static int dp_level_index(int vs, int pe)
+{
+    static const int8_t idx[3][4] = {{0, 1, 2, 3}, {4, 5, 6, -1}, {7, 8, -1, -1}};
+    return vs >= 0 && vs < 3 && pe >= 0 && pe < 4 ? idx[vs][pe] : -1;
+}
+
+static int dp_max_pe(int vs)
+{
+    return vs == 0 ? 3 : vs == 1 ? 2 : 1;
+}
+
+typedef struct {
+    int      port, lanes, tps3;
+    uint32_t buf_ctl;       /* DDI_BUF_CTL ohne Pegel-Auswahl */
+    uint32_t cr_us, eq_us;  /* Wartezeit vor dem Lesen des Status */
+    int      vs, pe;        /* aktuelle Pegel (alle Lanes gleich) */
+} DpTrain;
+
+static int dp_set_levels(DpTrain *t, uint8_t pattern)
+{
+    int idx = dp_level_index(t->vs, t->pe);
+    if (idx < 0)
+        return -1;
+    igd_wr(DDI_BUF_CTL(t->port), t->buf_ctl | DDI_BUF_TRANS_SEL(idx) | (1u << 31));
+    uint8_t d[5] = {pattern};
+    for (int i = 0; i < t->lanes; i++)
+        d[1 + i] = (uint8_t)(t->vs | (t->vs == 2 ? 4 : 0) | t->pe << 3 | (t->pe == dp_max_pe(t->vs) ? 0x20 : 0));
+    return igd_dpcd_write(t->port, 0x102, d, 1 + t->lanes); /* Muster und Pegel in einem Rutsch */
+}
+
+/* Hoechste vom Monitor verlangte Pegel ueber alle Lanes */
+static void dp_requested(const DpTrain *t, const uint8_t *st, int *vs, int *pe)
+{
+    *vs = *pe = 0;
+    for (int lane = 0; lane < t->lanes; lane++) {
+        uint8_t a = (uint8_t)(st[4 + lane / 2] >> (4 * (lane % 2)));
+        if ((a & 3) > *vs)
+            *vs = a & 3;
+        if (((a >> 2) & 3) > *pe)
+            *pe = (a >> 2) & 3;
+    }
+    if (*vs > 2)
+        *vs = 2;
+    if (*pe > dp_max_pe(*vs))
+        *pe = dp_max_pe(*vs);
+}
+
+static int lanes_have(const DpTrain *t, const uint8_t *st, uint8_t bits)
+{
+    for (int lane = 0; lane < t->lanes; lane++)
+        if (((st[lane / 2] >> (4 * (lane % 2))) & bits) != bits)
+            return 0;
+    return 1;
+}
+
+/* Linkschicht und Port einschalten und einmessen (rate_code: DPCD-Linkrate, z.B. 0x14). 0 = Verbindung steht */
+static int dp_train(DpTrain *t, uint8_t rate_code, uint32_t tp_ctl_base)
+{
+    uint8_t st[6];
+    uint8_t d0 = 1;
+    igd_dpcd_write(t->port, 0x600, &d0, 1); /* Monitor-Empfaenger an (D0) */
+    delay_us(1000);
+    uint8_t bw[2] = {rate_code, (uint8_t)(t->lanes | 0x80)}; /* Linkrate, Lanes + Enhanced Framing */
+    if (igd_dpcd_write(t->port, 0x100, bw, 2)) {
+        kprintf("igdmode:   DPCD 0x100 nicht schreibbar\n");
+        return -1;
+    }
+    igd_wr(DP_TP_CTL(t->port), tp_ctl_base | DP_TP_CTL_ENABLE | DP_TP_CTL_ENH_FRAME | DP_TP_TRAIN_PAT1);
+    t->vs = t->pe = 0;
+    igd_wr(DDI_BUF_CTL(t->port), t->buf_ctl | DDI_BUF_TRANS_SEL(0) | (1u << 31));
+    delay_us(600);
+
+    /* 1. Taktrueckgewinnung */
+    int cr = 0, same = 0, last_vs = -1, loops = 0;
+    if (dp_set_levels(t, 0x21) != 0) /* TPS1, Verwuerfelung aus */
+        return -1;
+    for (loops = 0; loops < 20 && !cr; loops++) {
+        delay_us(t->cr_us);
+        if (igd_dpcd_read(t->port, 0x202, st, 6) != 6)
+            return -1;
+        if (lanes_have(t, st, 1)) {
+            cr = 1;
+            break;
+        }
+        int vs, pe;
+        dp_requested(t, st, &vs, &pe);
+        same = vs == last_vs ? same + 1 : 0;
+        last_vs = vs;
+        if (same >= 5)
+            break;
+        t->vs = vs;
+        t->pe = pe;
+        dp_set_levels(t, 0x21);
+    }
+    kprintf("igdmode:   Taktrueckgewinnung %s nach %d Runde(n), Pegel vs%d pe%d, Status %02x %02x\n",
+            cr ? "ok" : "FEHLGESCHLAGEN", loops + 1, t->vs, t->pe, st[0], st[1]);
+    if (!cr)
+        return -2;
+
+    /* 2. Entzerrung */
+    uint8_t pat = t->tps3 ? 3 : 2;
+    igd_wr(DP_TP_CTL(t->port), tp_ctl_base | DP_TP_CTL_ENABLE | DP_TP_CTL_ENH_FRAME |
+                                   (t->tps3 ? DP_TP_TRAIN_PAT3 : DP_TP_TRAIN_PAT2));
+    dp_set_levels(t, (uint8_t)(pat | 0x20));
+    int eq = 0;
+    for (loops = 0; loops < 6 && !eq; loops++) {
+        delay_us(t->eq_us);
+        if (igd_dpcd_read(t->port, 0x202, st, 6) != 6)
+            return -1;
+        if (!lanes_have(t, st, 1))
+            break; /* Takt verloren */
+        if (lanes_have(t, st, 7) && (st[2] & 1)) {
+            eq = 1;
+            break;
+        }
+        dp_requested(t, st, &t->vs, &t->pe);
+        dp_set_levels(t, (uint8_t)(pat | 0x20));
+    }
+    kprintf("igdmode:   Entzerrung (TPS%u) %s nach %d Runde(n), Pegel vs%d pe%d, Status %02x %02x %02x\n", pat,
+            eq ? "ok" : "FEHLGESCHLAGEN", loops + 1, t->vs, t->pe, st[0], st[1], st[2]);
+
+    uint8_t off = 0;
+    igd_dpcd_write(t->port, 0x102, &off, 1); /* Training beim Monitor beenden */
+    igd_wr(DP_TP_CTL(t->port), tp_ctl_base | DP_TP_CTL_ENABLE | DP_TP_CTL_ENH_FRAME | DP_TP_TRAIN_IDLE);
+    return eq ? 0 : -3;
+}
+
+/* Port und Linkschicht aus (i915 intel_disable_ddi_buf) */
+static void dp_link_off(int port, uint32_t tp_ctl_base)
+{
+    igd_wr(DDI_BUF_CTL(port), igd_rd(DDI_BUF_CTL(port)) & ~(1u << 31));
+    igd_wr(DP_TP_CTL(port), tp_ctl_base | DP_TP_TRAIN_PAT1);
+    wait_bits(DDI_BUF_CTL(port), DDI_BUF_IS_IDLE, DDI_BUF_IS_IDLE, 2);
+}
+
+int igd_dptrain_test(void)
+{
+    int pre = igd_preflight("DisplayPort Teil 3 - Link-Training");
+    if (pre)
+        return pre;
+    DpLink l;
+    HwMode cur;
+    if (dp_link_init(&l, &cur, 1))
+        return -4;
+    int p = l.f.pipe, port = l.f.port;
+    uint8_t cap[16];
+    if (igd_dpcd_read(port, 0x000, cap, 16) != 16) {
+        kprintf("igdmode: DPCD nicht lesbar\n");
+        return -4;
+    }
+    uint8_t tps3 = cap[2] & 0x40, interval = cap[0xE] & 0x7F;
+    uint32_t buf0 = igd_rd(DDI_BUF_CTL(port));
+    kprintf("igdmode: Port %s: DDI_BUF_CTL %#x (Pegel-Eintrag %u), DP_TP_CTL %#x, Training-Abstand %u, TPS3 %s\n",
+            port_name(port), buf0, (buf0 >> 24) & 0xF, l.tp_ctl, interval, tps3 ? "ja" : "nein");
+    for (int i = 0; i < 10; i++)
+        kprintf("igdmode:   DDI_BUF_TRANS[%d] = %#x %#x\n", i, igd_rd(DDI_BUF_TRANS_LO(port, i)),
+                igd_rd(DDI_BUF_TRANS_HI(port, i)));
+
+    uint32_t khz_now = l.base_khz; /* Pixeltakt jetzt; die gelesenen Watermarks gelten dafuer */
+    DpTrain t = {.port = port, .lanes = (int)l.lanes, .tps3 = tps3 != 0,
+                 .buf_ctl = buf0 & ~(DDI_BUF_TRANS_SEL(0xF) | (1u << 31)),
+                 .cr_us = 100, .eq_us = interval ? interval * 4000u : 400};
+    uint32_t tp_base = l.tp_ctl & ~(DP_TP_CTL_ENABLE | DP_TP_CTL_ENH_FRAME | DP_TP_TRAIN_MASK);
+    uint8_t rate = (uint8_t)(l.link_khz / 27000); /* DPCD-Linkrate in 0,27 GBit/s: 540 MHz -> 0x14 */
+
+    kprintf("igdmode: Verbindung aus (der Monitor zeigt eventuell kurz 'kein Signal') ...\n");
+    uint32_t imr = igd_underrun_begin(p);
+    dp_pipe_off(&l);
+    dp_link_off(port, tp_base);
+    thread_sleep_ms(1000);
+    char st[96];
+    dp_link_ok(&l, st, sizeof(st));
+    kprintf("igdmode: Verbindung ist aus: %s\n", st);
+
+    uint64_t t0 = time_us();
+    int rc = dp_train(&t, rate, tp_base);
+    uint64_t us = time_us() - t0;
+    if (rc) {
+        kprintf("igdmode: Training fehlgeschlagen (%d), zweiter Versuch ...\n", rc);
+        dp_link_off(port, tp_base);
+        thread_sleep_ms(100);
+        rc = dp_train(&t, rate, tp_base);
+    }
+    kprintf("igdmode: Link-Training %s in %lu us\n", rc == 0 ? "erfolgreich" : "FEHLGESCHLAGEN", (unsigned long)us);
+    int on = dp_pipe_on(&l, &cur, khz_now);
+    igd_wr(CUR_CTL(p), l.f.cur_ctl);
+    igd_wr(CUR_BASE(p), igd_rd(CUR_BASE(p)));
+    thread_sleep_ms(300);
+    int ok = dp_link_ok(&l, st, sizeof(st));
+    uint32_t meas = measure_hz100(p);
+    int under = igd_underrun_end(p, imr);
+    kprintf("igdmode: Bild wieder an%s: gemessen %u.%02u Hz, %s, DDI_BUF_CTL %#x, %s\n", on ? " MIT FEHLER" : "",
+            meas / 100, meas % 100, st, igd_rd(DDI_BUF_CTL(port)), under ? "FIFO-Unterlauf (beim Einschalten moeglich)" : "kein Unterlauf");
+    console_repaint();
+    kprintf("igdmode: %s\n", rc == 0 && ok && !on ? "Link-Training funktioniert" : "Link-Training fehlgeschlagen");
+    return rc == 0 && ok && !on ? 0 : -12;
 }
 
 /* ---------- Fest eingebaut: Modi des Monitors im Betrieb umschalten ---------- */

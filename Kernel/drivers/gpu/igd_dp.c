@@ -223,6 +223,22 @@ static int probe_port(int port)
     return 1;
 }
 
+/* DPCD schreiben (len <= 16); 0 = ok */
+static int dpcd_write(int port, uint32_t addr, const uint8_t *buf, int len)
+{
+    uint8_t tx[20] = {(uint8_t)(AUX_NATIVE_WRITE << 4 | ((addr >> 16) & 0xF)), (uint8_t)(addr >> 8), (uint8_t)addr,
+                      (uint8_t)(len - 1)};
+    memcpy(tx + 4, buf, (size_t)len);
+    uint8_t rx[20];
+    int n = aux_xfer(port, tx, 4 + len, rx, 20, 0);
+    return n >= 1 ? 0 : (n < 0 ? n : -2);
+}
+
+int igd_dpcd_write(int port, uint32_t addr, const uint8_t *buf, int len)
+{
+    return dpcd_write(port, addr, buf, len);
+}
+
 int igd_dpcd_read(int port, uint32_t addr, uint8_t *buf, int len)
 {
     return dpcd_read(port, addr, buf, len);
