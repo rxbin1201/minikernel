@@ -2,7 +2,7 @@
 #define FS_H
 
 #include <stdint.h>
-#include "fs/fat32.h"
+#include "fs/fat/fat32.h"
 #include "core/syscall.h" /* MountInfo */
 #include "fs/vfs.h"
 
