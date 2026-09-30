@@ -1522,6 +1522,7 @@ void igd_modes_boot(void)
     }
     int rc = w && h ? igd_mode_set(w, h, hz) : IGD_MODE_NOMODE;
     if (rc)
-        kprintf("igd: igdmode=%s: %s\n", want, rc == IGD_MODE_NOMODE ? "diesen Modus bietet der Monitor nicht an (resolution zeigt die Liste)"
-                                                                    : "Umschalten fehlgeschlagen");
+        kprintf("igd: igdmode=%s: %s (%d Modi bekannt)\n", want,
+                rc == IGD_MODE_NOMODE ? "diesen Modus bietet der Monitor nicht an (resolution zeigt die Liste)"
+                                      : "Umschalten fehlgeschlagen", nmodes);
 }

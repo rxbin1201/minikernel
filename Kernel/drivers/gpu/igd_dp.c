@@ -91,7 +91,7 @@ static int aux_once(int port, const uint8_t *tx, int txn, uint8_t *rx, int rxmax
 static int aux_xfer(int port, const uint8_t *tx, int txn, uint8_t *rx, int rxmax, int i2c)
 {
     int timeouts = 0;
-    for (int tries = 0; tries < 32; tries++) {
+    for (int tries = 0; tries < 100; tries++) { /* DEFER bis ca. 50 ms (DP-Norm: der Empfaenger darf vertroesten) */
         int n = aux_once(port, tx, txn, rx, rxmax);
         if (n == -1) {
             if (++timeouts >= 3)
@@ -228,9 +228,33 @@ int igd_dpcd_read(int port, uint32_t addr, uint8_t *buf, int len)
     return dpcd_read(port, addr, buf, len);
 }
 
+static int edid_sum_ok(const uint8_t *b)
+{
+    uint8_t s = 0;
+    for (int i = 0; i < 128; i++)
+        s = (uint8_t)(s + b[i]);
+    return s == 0;
+}
+
+/* EDID vollstaendig (Basis + erster Erweiterungsblock, Pruefsummen); sonst bis zu fuenfmal neu lesen. Direkt nach
+ * dem Start ist der Monitor manchmal noch mit der Verbindung beschaeftigt und antwortet unvollstaendig. */
 int igd_dp_edid(int port, uint8_t *edid)
 {
-    return edid_read_aux(port, edid);
+    int blocks = 0;
+    for (int tries = 1; tries <= 5; tries++) {
+        blocks = edid_read_aux(port, edid);
+        int want = blocks && edid[126] ? 2 : 1;
+        int ok = blocks >= want && edid_sum_ok(edid) && (want < 2 || edid_sum_ok(edid + 128));
+        if (ok) {
+            if (tries > 1)
+                kprintf("igddp: EDID erst im %d. Versuch vollstaendig\n", tries);
+            return blocks;
+        }
+        kprintf("igddp: EDID-Versuch %d unvollstaendig (%d Block/Bloecke, Pruefsummen %s)\n", tries, blocks,
+                blocks && edid_sum_ok(edid) ? "Basis ok" : "falsch");
+        delay_us(20000);
+    }
+    return blocks && edid_sum_ok(edid) ? 1 : 0; /* wenigstens der Basisblock */
 }
 
 int igd_dp_test(void)
