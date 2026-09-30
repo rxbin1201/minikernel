@@ -286,6 +286,8 @@ static void paint(uint32_t col, uint32_t row, uint32_t cp, uint32_t fgc, uint32_
 
 static void draw_glyph(uint32_t col, uint32_t row, uint32_t cp)
 {
+    if (col >= cols || row >= rows)
+        return; /* ausserhalb des Textfelds: paint() wuerde hinter Framebuffer und Abbild schreiben */
     if (colors_dirty)
         update_color_idx();
     if (view_off)
@@ -478,8 +480,10 @@ void console_set_scale(uint32_t s)
 {
     if (!fb || s == scale)
         return;
+    uint64_t f = irq_save();
     set_layout(s);
     console_clear();
+    irq_restore(f);
 }
 
 uint32_t console_scale(void)
@@ -491,10 +495,12 @@ void console_clear(void)
 {
     if (!fb)
         return;
+    uint64_t f = irq_save();
     view_off = 0;
     sel_active = sel_dragging = 0;
     clear_rows(0, rows);
     cx = cy = 0;
+    irq_restore(f);
 }
 
 void console_set_color(uint32_t new_fg, uint32_t new_bg)
@@ -897,11 +903,21 @@ static void esc_feed(char c)
     }
 }
 
+static void putc_locked(char c);
+
+/* Mit gesperrten Interrupts: sonst kann ein anderer Thread (z.B. eine kprintf-Meldung des Netz-Threads) mitten in
+ * einem Zeichen scrollen, und dieses Zeichen landet an einer veralteten Position hinter dem Bildschirm. */
 void console_putc(char c)
 {
     if (!fb)
         return;
+    uint64_t f = irq_save();
+    putc_locked(c);
+    irq_restore(f);
+}
 
+static void putc_locked(char c)
+{
     if (esc_state) {
         esc_feed(c);
         return;

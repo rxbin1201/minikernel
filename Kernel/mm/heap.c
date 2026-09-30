@@ -17,7 +17,8 @@ typedef struct Block {
     struct Block *prev;
     uint32_t      magic;
     uint32_t      free;
-} __attribute__((aligned(16))) Block; /* sizeof = 32, Nutzdaten damit 16-Byte ausgerichtet */
+    uint64_t      caller; /* Ruecksprungadresse von kmalloc & Co.: wer den Block angelegt hat (Diagnose) */
+} __attribute__((aligned(16))) Block; /* sizeof = 48, Nutzdaten damit 16-Byte ausgerichtet */
 
 static Block   *first;
 static Block   *last;
@@ -81,6 +82,7 @@ static int heap_grow(uint64_t req)
         b->prev  = last;
         b->magic = BLOCK_MAGIC;
         b->free  = 1;
+        b->caller = 0;
         if (!first)
             first = b;
         last = b;
@@ -89,7 +91,7 @@ static int heap_grow(uint64_t req)
     return 1;
 }
 
-static void *kmalloc_locked(size_t size)
+static void *kmalloc_locked(size_t size, uint64_t caller)
 {
     if (size == 0 || size > HEAP_LIMIT)
         return 0;
@@ -108,6 +110,7 @@ static void *kmalloc_locked(size_t size)
                 rest->prev  = b;
                 rest->magic = BLOCK_MAGIC;
                 rest->free  = 1;
+                rest->caller = 0;
                 if (nb)
                     nb->prev = rest;
                 else
@@ -115,6 +118,7 @@ static void *kmalloc_locked(size_t size)
                 b->size = size;
             }
             b->free = 0;
+            b->caller = caller;
             used += b->size;
             return b + 1;
         }
@@ -172,12 +176,19 @@ static void kfree_locked(void *ptr)
 }
 
 /* Die oeffentlichen Funktionen schuetzen den Heap vor Reentranz aus Interrupts/Thread-Wechseln (1 CPU). */
-void *kmalloc(size_t size)
+#define CALLER() ((uint64_t)__builtin_return_address(0))
+
+static void *kmalloc_from(size_t size, uint64_t caller)
 {
     uint64_t f = irq_save();
-    void *p = kmalloc_locked(size);
+    void *p = kmalloc_locked(size, caller);
     irq_restore(f);
     return p;
+}
+
+void *kmalloc(size_t size)
+{
+    return kmalloc_from(size, CALLER());
 }
 
 void kfree(void *ptr)
@@ -191,7 +202,7 @@ void *kcalloc(size_t count, size_t size)
 {
     if (size && count > HEAP_LIMIT / size)
         return 0;
-    void *p = kmalloc(count * size);
+    void *p = kmalloc_from(count * size, CALLER());
     if (p)
         memset(p, 0, count * size);
     return p;
@@ -200,7 +211,7 @@ void *kcalloc(size_t count, size_t size)
 void *krealloc(void *ptr, size_t size)
 {
     if (!ptr)
-        return kmalloc(size);
+        return kmalloc_from(size, CALLER());
     if (size == 0) {
         kfree(ptr);
         return 0;
@@ -209,7 +220,7 @@ void *krealloc(void *ptr, size_t size)
     if (b->magic == BLOCK_MAGIC && ((size + 15) & ~(size_t)15) <= b->size)
         return ptr; /* passt schon, kein Verkleinern */
 
-    void *n = kmalloc(size);
+    void *n = kmalloc_from(size, CALLER());
     if (!n)
         return 0; /* altes Stueck bleibt gueltig */
     memcpy(n, ptr, b->size < size ? b->size : size);
@@ -226,7 +237,11 @@ int heap_check(void)
     Block *prev = 0;
     for (Block *b = first; b; b = next_block(b)) {
         if (b->magic != BLOCK_MAGIC || b->prev != prev || b->size % 16) {
-            kprintf("heap: Block beschaedigt bei %#lx\n", (uint64_t)b);
+            kprintf("heap: Block beschaedigt bei %#lx", (uint64_t)b);
+            if (prev) /* meist hat der Besitzer des Blocks davor ueber sein Ende hinaus geschrieben */
+                kprintf(" (davor: %lu Bytes %s, angelegt von %#lx)", (unsigned long)prev->size,
+                        prev->free ? "frei" : "belegt", (unsigned long)prev->caller);
+            kprintf("\n");
             return 0;
         }
         if (prev && prev->free && b->free) {

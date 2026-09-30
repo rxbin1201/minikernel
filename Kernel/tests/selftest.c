@@ -2,6 +2,7 @@
 
 #include "lib/kprintf.h"
 #include "lib/string.h"
+#include "mm/heap.h"
 #include "arch/x86_64/apic.h"
 #include "core/cmdline.h"
 #include "drivers/keymap.h"
@@ -33,8 +34,14 @@ static int test_selected(const char *name)
             uint64_t t0_ = time_ms();                                                       \
             call;                                                                           \
             kprintf("  (%s: %lu ms)\n", name, (unsigned long)(time_ms() - t0_));          \
+            if (!heap_broken && !heap_check()) { /* zeigt, in welcher Gruppe der Heap kaputt ging */ \
+                heap_broken = 1;                                                            \
+                check("Kernel-Heap nach der Gruppe " name " intakt", 0);                    \
+            }                                                                               \
         }                                                                                   \
     } while (0)
+
+static int heap_broken;
 
 void run_selftests(BootInfo *info)
 {
