@@ -44,6 +44,9 @@ int igd_edid_test(void);
 /* Stufe 4, Teil 2 (igdtest scale): Testbilder in kleinerer Aufloesung, vom Skalierer der Pipe hochgerechnet; zurueck */
 int igd_scale_test(void);
 
+/* Stufe 4, Teil 3 (igdtest mode): die per HDMI moeglichen Modi aus der EDID je einige Sekunden setzen, dann zurueck */
+int igd_mode_test(void);
+
 /* Fest eingebaut (ohne "noigd" in der Kommandozeile): Hardware-Mauszeiger und Doppelpufferung */
 int  igd_cursor_available(void);
 void igd_cursor_move(int x, int y, int visible); /* Spitze des Pfeils bei (x, y) */

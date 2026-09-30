@@ -1,5 +1,6 @@
 /* Intel-Grafik Gen9, Stufe 4: Bildschirmmodi. Teil 1 (igdtest edid): nur lesen. Teil 2 (igdtest scale): kleinere
- * Aufloesung, die der Skalierer der Pipe auf den Bildschirm hochrechnet; Takt und Zeitablauf bleiben.
+ * Aufloesung, die der Skalierer der Pipe auf den Bildschirm hochrechnet; Takt und Zeitablauf bleiben. Teil 3
+ * (igdtest mode): echter Moduswechsel am HDMI-Anschluss (Pipe/Port aus, DPLL neu, Zeitablauf, wieder an).
  *
  *
  * - Monitordaten (EDID) ueber den DDC-Bus des Anschlusses. Die Grafik hat dafuer einen eigenen I2C-Controller im
@@ -39,6 +40,11 @@
 #define PLANE_SIZE(p)         (0x70190 + PIPE_OFF(p))
 #define PLANE_SURF(p)         (0x7019C + PIPE_OFF(p))
 #define PLANE_SURFLIVE(p)     (0x701AC + PIPE_OFF(p))
+#define PIPECONF(p)           (0x70008 + PIPE_OFF(p))   /* Bit 31 an, Bit 30 laeuft */
+#define PLANE_CTL(p)          (0x70180 + PIPE_OFF(p))
+#define VSYNCSHIFT(t)         (0x60028 + PIPE_OFF(t))
+#define TRANS_CLK_SEL(t)      (0x46140 + 4u * (uint32_t)(t)) /* Takt des Transcoders: (Port + 1) << 29, 0 = aus */
+#define DDI_BUF_CTL(port)     (0x64000 + 0x100u * (uint32_t)(port))
 #define CUR_CTL(p)            (0x70080 + PIPE_OFF(p))
 #define CUR_BASE(p)           (0x70084 + PIPE_OFF(p))
 
@@ -151,25 +157,51 @@ static int edid_checksum(const uint8_t *b)
     return s == 0;
 }
 
-/* Detailed Timing Descriptor (18 Byte): Ergebnis Pixeltakt in kHz, 0 = kein Zeitablauf */
+typedef struct {
+    uint32_t khz;                   /* Pixeltakt */
+    uint32_t ha, hso, hsw, ht;      /* sichtbar, Sync-Abstand, Sync-Breite, gesamt */
+    uint32_t va, vso, vsw, vt;
+    int      hpos, vpos, interlaced; /* Sync-Polaritaet positiv */
+} Timing;
+
+/* Detailed Timing Descriptor (18 Byte) zerlegen; 0 = kein Zeitablauf (Beschreibungsblock) */
+static int dtd_parse(const uint8_t *d, Timing *t)
+{
+    t->khz = (uint32_t)(d[0] | d[1] << 8) * 10;
+    if (!t->khz)
+        return 0;
+    t->ha = d[2] | (uint32_t)(d[4] & 0xF0) << 4;
+    t->ht = t->ha + (d[3] | (uint32_t)(d[4] & 0x0F) << 8);
+    t->va = d[5] | (uint32_t)(d[7] & 0xF0) << 4;
+    t->vt = t->va + (d[6] | (uint32_t)(d[7] & 0x0F) << 8);
+    t->hso = d[8] | (uint32_t)(d[11] & 0xC0) << 2;
+    t->hsw = d[9] | (uint32_t)(d[11] & 0x30) << 4;
+    t->vso = (d[10] >> 4) | (uint32_t)(d[11] & 0x0C) << 2;
+    t->vsw = (d[10] & 0xF) | (uint32_t)(d[11] & 0x03) << 4;
+    t->interlaced = d[17] >> 7;
+    int sep = ((d[17] >> 3) & 3) == 3; /* digital getrennt; sonst (selten) wie VESA ueblich: H+ V+ */
+    t->hpos = sep ? (d[17] >> 1) & 1 : 1;
+    t->vpos = sep ? (d[17] >> 2) & 1 : 1;
+    return 1;
+}
+
+static uint32_t hz100(const Timing *t)
+{
+    return (uint32_t)((uint64_t)t->khz * 100000 / ((uint64_t)t->ht * t->vt));
+}
+
+/* Ergebnis: Pixeltakt in kHz, 0 = kein Zeitablauf */
 static uint32_t dtd_print(const uint8_t *d, const char *what)
 {
-    uint32_t clk = (uint32_t)(d[0] | d[1] << 8) * 10;
-    if (!clk)
+    Timing t;
+    if (!dtd_parse(d, &t))
         return 0;
-    uint32_t ha = d[2] | (uint32_t)(d[4] & 0xF0) << 4, hb = d[3] | (uint32_t)(d[4] & 0x0F) << 8;
-    uint32_t va = d[5] | (uint32_t)(d[7] & 0xF0) << 4, vb = d[6] | (uint32_t)(d[7] & 0x0F) << 8;
-    uint32_t hso = d[8] | (uint32_t)(d[11] & 0xC0) << 2, hsw = d[9] | (uint32_t)(d[11] & 0x30) << 4;
-    uint32_t vso = (d[10] >> 4) | (uint32_t)(d[11] & 0x0C) << 2, vsw = (d[10] & 0xF) | (uint32_t)(d[11] & 0x03) << 4;
-    uint32_t ht = ha + hb, vt = va + vb;
-    uint64_t mhz100 = (uint64_t)clk * 100000 / ((uint64_t)ht * vt); /* Bildrate * 100 */
-    int interlaced = d[17] >> 7, digital_sep = ((d[17] >> 3) & 3) == 3;
-    kprintf("igdmode:   %s %ux%u%s @ %lu.%02lu Hz, Pixeltakt %u.%02u MHz, gesamt %ux%u, HSync %u+%u, VSync %u+%u%s%s%s\n",
-            what, ha, va, interlaced ? "i" : "", (unsigned long)(mhz100 / 100), (unsigned long)(mhz100 % 100),
-            clk / 1000, clk % 1000 / 10, ht, vt, hso, hsw, vso, vsw,
-            digital_sep ? ((d[17] & 2) ? ", H+" : ", H-") : "", digital_sep ? ((d[17] & 4) ? " V+" : " V-") : "",
-            clk > GEN9_HDMI_MAX_KHZ ? "  [ueber 300 MHz: per HDMI auf Gen9 nicht moeglich]" : "");
-    return clk;
+    uint32_t hz = hz100(&t);
+    kprintf("igdmode:   %s %ux%u%s @ %u.%02u Hz, Pixeltakt %u.%02u MHz, gesamt %ux%u, HSync %u+%u, VSync %u+%u, %s %s%s\n",
+            what, t.ha, t.va, t.interlaced ? "i" : "", hz / 100, hz % 100, t.khz / 1000, t.khz % 1000 / 10, t.ht, t.vt,
+            t.hso, t.hsw, t.vso, t.vsw, t.hpos ? "H+" : "H-", t.vpos ? "V+" : "V-",
+            t.khz > GEN9_HDMI_MAX_KHZ ? "  [ueber 300 MHz: per HDMI auf Gen9 nicht moeglich]" : "");
+    return t.khz;
 }
 
 static void edid_base(const uint8_t *e)
@@ -371,6 +403,40 @@ static void dump_current(int pipe, int *port_out)
 
 /* ---------- igdtest edid ---------- */
 
+/* EDID des Monitors an port nach edid (256 Byte); Ergebnis: gueltige Bloecke (0 = keine Monitordaten) */
+static int read_edid(int port, uint8_t *edid, int verbose)
+{
+    int want = ddc_pin(port), pin = 0;
+    int order[7] = {want, 1, 2, 3, 4, 5, 6};
+    for (int i = 0; i < 7 && !pin; i++) {
+        int p = order[i];
+        if (p == 0 || (i > 0 && p == want))
+            continue;
+        int rc = gmbus_read(p, 0x50, 0, edid, 128);
+        int ok = rc == 0 && edid[0] == 0 && edid[1] == 0xFF && edid[7] == 0 && edid_checksum(edid);
+        if (verbose || ok)
+            kprintf("igdmode: DDC Pin-Paar %d%s%s: %s\n", p, p == want ? ", gehoert zu Port " : "",
+                    p == want ? port_name(port) : "",
+                    ok ? "EDID gelesen" : rc == -1 ? "keine Antwort" : rc == -2 ? "Zeitueberschreitung" : "keine gueltige EDID");
+        if (ok)
+            pin = p;
+    }
+    if (!pin) {
+        kprintf("igdmode: keine Monitordaten gefunden\n");
+        return 0;
+    }
+    uint32_t ext = edid[126];
+    if (!ext)
+        return 1;
+    if (ext > 1)
+        kprintf("igdmode: %u weitere Erweiterungsbloecke (nicht gelesen)\n", ext - 1);
+    if (gmbus_read(pin, 0x50, 128, edid + 128, 128) != 0 || !edid_checksum(edid + 128)) {
+        kprintf("igdmode: Erweiterungsblock nicht lesbar oder Pruefsumme falsch\n");
+        return 1;
+    }
+    return 2;
+}
+
 int igd_edid_test(void)
 {
     int pipe = igd_state.scanout_pipe;
@@ -382,40 +448,15 @@ int igd_edid_test(void)
     dump_current(pipe, &port);
 
     static uint8_t edid[256];
-    int want = ddc_pin(port), pin = 0;
-    int order[7] = {want, 1, 2, 3, 4, 5, 6};
-    for (int i = 0; i < 7 && !pin; i++) {
-        int p = order[i];
-        if (p == 0 || (i > 0 && p == want))
-            continue;
-        int rc = gmbus_read(p, 0x50, 0, edid, 128);
-        int ok = rc == 0 && edid[0] == 0 && edid[1] == 0xFF && edid[7] == 0;
-        kprintf("igdmode: DDC Pin-Paar %d%s%s: %s\n", p, p == want ? ", gehoert zu Port " : "",
-                p == want ? port_name(port) : "",
-                ok ? (edid_checksum(edid) ? "EDID gelesen" : "EDID gelesen (Pruefsumme falsch!)")
-                   : rc == -1 ? "keine Antwort" : rc == -2 ? "Zeitueberschreitung" : "keine EDID");
-        if (ok)
-            pin = p;
-    }
-    if (!pin) {
-        kprintf("igdmode: keine Monitordaten gefunden\n");
+    int blocks = read_edid(port, edid, 1);
+    if (!blocks)
         return -2;
-    }
-    edid_base(edid);
     uint32_t ext = edid[126];
-    if (ext) {
-        if (gmbus_read(pin, 0x50, 128, edid + 128, 128) != 0) {
-            kprintf("igdmode: Erweiterungsblock nicht lesbar\n");
-        } else if (!edid_checksum(edid + 128)) {
-            kprintf("igdmode: Erweiterungsblock: Pruefsumme falsch\n");
-        } else if (edid[128] == 0x02) {
-            edid_cta(edid + 128);
-        } else {
-            kprintf("igdmode: Erweiterungsblock Typ %#x (nicht ausgewertet)\n", edid[128]);
-        }
-        if (ext > 1)
-            kprintf("igdmode: %u weitere Bloecke (nicht gelesen)\n", ext - 1);
-    }
+    edid_base(edid);
+    if (blocks > 1 && edid[128] == 0x02)
+        edid_cta(edid + 128);
+    else if (blocks > 1)
+        kprintf("igdmode: Erweiterungsblock Typ %#x (nicht ausgewertet)\n", edid[128]);
     kprintf("igdmode: Rohdaten:");
     for (uint32_t i = 0; i < 128u * (ext ? 2 : 1); i++)
         kprintf("%s%02x", i % 32 ? "" : "\nigdmode:   ", edid[i]);
@@ -571,5 +612,323 @@ int igd_scale_test(void)
         rc = -8;
     kprintf("igdmode: %s\n", rc == 0 ? (under ? "Skalierer funktioniert, aber mit Unterlauf" : "Skalierer funktioniert")
                                      : "Skalierer-Test fehlgeschlagen");
+    return rc;
+}
+
+/* ---------- igdtest mode: echter Moduswechsel (HDMI) ---------- */
+
+/* DPLL fuer HDMI (Gen9, nach i915 skl_ddi_hdmi_pll_dividers): AFE-Takt = 5 x Pixeltakt. Der DCO schwingt bei
+ * 8400/9000/9600 MHz (hoechstens 1 % darueber, 6 % darunter); gesucht ist der Teiler P0*P1*P2 mit der kleinsten
+ * Abweichung, gerade Teiler bevorzugt. Ergebnis: 0 = ok, CFGCR1/CFGCR2 fertig zum Schreiben. */
+static int skl_hdmi_dpll(uint32_t khz, uint32_t *cfgcr1, uint32_t *cfgcr2)
+{
+    static const uint32_t even[] = {4, 6, 8, 10, 12, 14, 16, 18, 20, 24, 28, 30, 32, 36, 40, 42, 44, 48, 52, 54, 56, 60,
+                                    64, 66, 68, 70, 72, 76, 78, 80, 84, 88, 90, 92, 96, 98};
+    static const uint32_t odd[] = {3, 5, 7, 9, 15, 21, 35};
+    static const uint64_t central[] = {8400000000ULL, 9000000000ULL, 9600000000ULL};
+    uint64_t afe = (uint64_t)khz * 1000 * 5;
+    uint32_t best_p = 0;
+    uint64_t best_dev = ~0ULL, best_central = 0;
+    for (int pass = 0; pass < 2 && !best_p; pass++) {
+        const uint32_t *list = pass == 0 ? even : odd;
+        int n = pass == 0 ? (int)(sizeof(even) / sizeof(even[0])) : (int)(sizeof(odd) / sizeof(odd[0]));
+        for (int i = 0; i < n; i++)
+            for (int c = 0; c < 3; c++) {
+                uint64_t dco = afe * list[i];
+                uint64_t diff = dco > central[c] ? dco - central[c] : central[c] - dco;
+                uint64_t dev = diff * 10000 / central[c]; /* in 0,01 % */
+                if (dco >= central[c] ? dev >= 100 : dev >= 600)
+                    continue;
+                if (dev < best_dev) {
+                    best_dev = dev;
+                    best_p = list[i];
+                    best_central = central[c];
+                }
+            }
+    }
+    if (!best_p)
+        return -1;
+
+    uint32_t p = best_p, p0 = 0, p1 = 0, p2 = 0;
+    if (p % 2 == 0) {
+        uint32_t half = p / 2;
+        if (half == 1 || half == 2 || half == 3 || half == 5)
+            p0 = 2, p1 = 1, p2 = half;
+        else if (half % 2 == 0)
+            p0 = 2, p1 = half / 2, p2 = 2;
+        else if (half % 3 == 0)
+            p0 = 3, p1 = half / 3, p2 = 2;
+        else if (half % 7 == 0)
+            p0 = 7, p1 = half / 7, p2 = 2;
+    } else if (p == 3 || p == 9) {
+        p0 = 3, p1 = 1, p2 = p / 3;
+    } else if (p == 5) { /* P0 kennt nur 1, 2, 3, 7: die 5 uebernimmt K */
+        p0 = 1, p1 = 1, p2 = 5;
+    } else if (p == 7) {
+        p0 = 7, p1 = 1, p2 = 1;
+    } else if (p == 15) {
+        p0 = 3, p1 = 1, p2 = 5;
+    } else if (p == 21) {
+        p0 = 7, p1 = 1, p2 = 3;
+    } else if (p == 35) {
+        p0 = 7, p1 = 1, p2 = 5;
+    }
+    if (!p0)
+        return -1;
+    uint32_t pdiv = p0 == 1 ? 0 : p0 == 2 ? 1 : p0 == 3 ? 2 : 4;
+    uint32_t kdiv = p2 == 5 ? 0 : p2 == 2 ? 1 : p2 == 3 ? 2 : 3;
+    uint32_t cf = best_central == 9600000000ULL ? 0 : best_central == 9000000000ULL ? 1 : 3;
+    uint64_t dco = afe * p0 * p1 * p2;
+    uint64_t integer = dco / 24000000ULL;
+    uint64_t fraction = (dco / 24 - integer * 1000000ULL) * 0x8000 / 1000000ULL; /* dco / 24 MHz, Nachkommateil */
+    *cfgcr1 = (1u << 31) | (uint32_t)(fraction & 0x7FFF) << 9 | (uint32_t)(integer & 0x1FF);
+    *cfgcr2 = (p1 != 1 ? (p1 & 0xFF) << 8 | 1u << 7 : 0) | kdiv << 5 | pdiv << 2 | cf; /* Q nur mit Q-Modus */
+    return 0;
+}
+
+/* Alles, was ein Modus in den Registern ausmacht (Pipe p, Transcoder p, Port, DPLL) */
+typedef struct {
+    uint32_t htotal, hblank, hsync, vtotal, vblank, vsync, vsyncshift, pipesrc;
+    uint32_t ddi_func, cfgcr1, cfgcr2;
+    uint32_t plane_stride, plane_size, plane_surf;
+} HwMode;
+
+typedef struct {
+    int      pipe, port, dpll;
+    uint32_t pipeconf, plane_ctl, cur_ctl, clk_sel, buf_ctl;
+} HwFixed;
+
+static uint32_t pll_ctl_reg(int id)
+{
+    return id == 1 ? LCPLL2_CTL : WRPLL_CTL(id - 2);
+}
+
+static void mode_read(const HwFixed *f, HwMode *m)
+{
+    int p = f->pipe;
+    m->htotal = igd_rd(HTOTAL(p));
+    m->hblank = igd_rd(HBLANK(p));
+    m->hsync = igd_rd(HSYNC(p));
+    m->vtotal = igd_rd(VTOTAL(p));
+    m->vblank = igd_rd(VBLANK(p));
+    m->vsync = igd_rd(VSYNC(p));
+    m->vsyncshift = igd_rd(VSYNCSHIFT(p));
+    m->pipesrc = igd_rd(PIPESRC(p));
+    m->ddi_func = igd_rd(TRANS_DDI_FUNC_CTL(p));
+    m->cfgcr1 = igd_rd(DPLL_CFGCR1(f->dpll));
+    m->cfgcr2 = igd_rd(DPLL_CFGCR2(f->dpll));
+    m->plane_stride = igd_rd(PLANE_STRIDE(p));
+    m->plane_size = igd_rd(PLANE_SIZE(p));
+    m->plane_surf = igd_rd(PLANE_SURF(p)) & ~0xFFFu;
+}
+
+/* Modus aus einem Zeitablauf; Ebene: Bild w x h aus surf, Zeile stride Byte */
+static int mode_from_timing(const Timing *t, const HwMode *cur, uint32_t surf, uint32_t stride, HwMode *m)
+{
+    if (skl_hdmi_dpll(t->khz, &m->cfgcr1, &m->cfgcr2))
+        return -1;
+    m->htotal = (t->ht - 1) << 16 | (t->ha - 1);
+    m->hblank = (t->ht - 1) << 16 | (t->ha - 1);
+    m->hsync = (t->ha + t->hso + t->hsw - 1) << 16 | (t->ha + t->hso - 1);
+    m->vtotal = (t->vt - 1) << 16 | (t->va - 1);
+    m->vblank = (t->vt - 1) << 16 | (t->va - 1);
+    m->vsync = (t->va + t->vso + t->vsw - 1) << 16 | (t->va + t->vso - 1);
+    m->vsyncshift = 0;
+    m->pipesrc = (t->ha - 1) << 16 | (t->va - 1);
+    m->ddi_func = (cur->ddi_func & ~(3u << 16)) | (t->hpos ? 1u << 16 : 0) | (t->vpos ? 1u << 17 : 0);
+    m->plane_stride = stride / 64;
+    m->plane_size = (t->va - 1) << 16 | (t->ha - 1);
+    m->plane_surf = surf;
+    return 0;
+}
+
+static int wait_bits(uint32_t reg, uint32_t mask, uint32_t want, int ms)
+{
+    uint64_t end = time_us() + (uint64_t)ms * 1000;
+    while ((igd_rd(reg) & mask) != want)
+        if (time_us() > end)
+            return -1;
+    return 0;
+}
+
+/* Anzeige aus, in der Reihenfolge von i915 (hsw_crtc_disable): Ebenen, Pipe, Transcoder, Takt, Port, DPLL */
+static void mode_off(const HwFixed *f)
+{
+    int p = f->pipe;
+    igd_wr(PLANE_CTL(p), f->plane_ctl & ~(1u << 31));
+    igd_wr(PLANE_SURF(p), igd_rd(PLANE_SURF(p)));
+    igd_wr(CUR_CTL(p), 0);
+    igd_wr(CUR_BASE(p), igd_rd(CUR_BASE(p)));
+    wait_frame(p);
+    igd_wr(PIPECONF(p), f->pipeconf & ~(1u << 31));
+    if (wait_bits(PIPECONF(p), 1u << 30, 0, 100))
+        kprintf("igdmode:   Pipe geht nicht aus (PIPECONF %#x)\n", igd_rd(PIPECONF(p)));
+    igd_wr(TRANS_DDI_FUNC_CTL(p), igd_rd(TRANS_DDI_FUNC_CTL(p)) & ~((1u << 31) | (7u << 28)));
+    igd_wr(TRANS_CLK_SEL(p), 0);
+    igd_wr(DDI_BUF_CTL(f->port), f->buf_ctl & ~(1u << 31));
+    thread_sleep_ms(1);
+    igd_wr(DPLL_CTRL2, igd_rd(DPLL_CTRL2) | 1u << (f->port + 15)); /* Takt zum Port aus */
+    igd_wr(pll_ctl_reg(f->dpll), igd_rd(pll_ctl_reg(f->dpll)) & ~(1u << 31));
+    (void)igd_rd(pll_ctl_reg(f->dpll));
+}
+
+/* Anzeige mit Modus m wieder an (hsw_crtc_enable): DPLL, Takt zum Port und Transcoder, Zeitablauf, Transcoder, Ebene,
+ * Pipe, Port. 0 = Pipe laeuft */
+static int mode_on(const HwFixed *f, const HwMode *m)
+{
+    int p = f->pipe, rc = 0;
+    igd_wr(DPLL_CFGCR1(f->dpll), m->cfgcr1);
+    igd_wr(DPLL_CFGCR2(f->dpll), m->cfgcr2);
+    (void)igd_rd(DPLL_CFGCR2(f->dpll));
+    igd_wr(pll_ctl_reg(f->dpll), igd_rd(pll_ctl_reg(f->dpll)) | 1u << 31);
+    if (wait_bits(DPLL_STATUS, 1u << (f->dpll * 8), 1u << (f->dpll * 8), 5)) {
+        kprintf("igdmode:   DPLL%d rastet nicht ein (DPLL_STATUS %#x)\n", f->dpll, igd_rd(DPLL_STATUS));
+        rc = -1;
+    }
+    igd_wr(DPLL_CTRL2, igd_rd(DPLL_CTRL2) & ~(1u << (f->port + 15)));
+    igd_wr(TRANS_CLK_SEL(p), f->clk_sel);
+    igd_wr(HTOTAL(p), m->htotal);
+    igd_wr(HBLANK(p), m->hblank);
+    igd_wr(HSYNC(p), m->hsync);
+    igd_wr(VTOTAL(p), m->vtotal);
+    igd_wr(VBLANK(p), m->vblank);
+    igd_wr(VSYNC(p), m->vsync);
+    igd_wr(VSYNCSHIFT(p), m->vsyncshift);
+    igd_wr(PIPESRC(p), m->pipesrc);
+    igd_wr(TRANS_DDI_FUNC_CTL(p), m->ddi_func);
+    igd_wr(PLANE_STRIDE(p), m->plane_stride);
+    igd_wr(PLANE_SIZE(p), m->plane_size);
+    igd_wr(PLANE_CTL(p), f->plane_ctl);
+    igd_wr(PLANE_SURF(p), m->plane_surf);
+    igd_wr(PIPECONF(p), f->pipeconf | 1u << 31);
+    if (wait_bits(PIPECONF(p), 1u << 30, 1u << 30, 100)) {
+        kprintf("igdmode:   Pipe laeuft nicht an (PIPECONF %#x)\n", igd_rd(PIPECONF(p)));
+        rc = -2;
+    }
+    igd_wr(DDI_BUF_CTL(f->port), f->buf_ctl | 1u << 31);
+    thread_sleep_ms(1);
+    return rc;
+}
+
+/* Gemessene Bildrate * 100 (Bilder ueber 2 s) */
+static uint32_t measure_hz100(int p)
+{
+    uint32_t f0 = igd_rd(PIPE_FRMCOUNT(p));
+    uint64_t t0 = time_us();
+    thread_sleep_ms(2000);
+    uint32_t n = igd_rd(PIPE_FRMCOUNT(p)) - f0;
+    uint64_t us = time_us() - t0;
+    return (uint32_t)((uint64_t)n * 100000000ULL / (us ? us : 1));
+}
+
+int igd_mode_test(void)
+{
+    int pre = igd_preflight("Stufe 4, Teil 3 - Moduswechsel");
+    if (pre)
+        return pre;
+    HwFixed f = {.pipe = igd_state.scanout_pipe};
+    int p = f.pipe;
+    uint32_t ddi = igd_rd(TRANS_DDI_FUNC_CTL(p)), c2 = igd_rd(DPLL_CTRL2);
+    f.port = (int)((ddi >> 28) & 7);
+    f.dpll = (c2 & (1u << (f.port * 3))) ? (int)((c2 >> (f.port * 3 + 1)) & 3) : -1;
+    if (!(ddi & (1u << 31)) || ((ddi >> 24) & 7) != 0 || f.dpll < 1 ||
+        !((igd_rd(DPLL_CTRL1) >> (f.dpll * 6 + 5)) & 1)) {
+        kprintf("igdmode: nur fuer HDMI an DPLL1-3 (TRANS_DDI_FUNC_CTL %#x, DPLL_CTRL2 %#x), Abbruch\n", ddi, c2);
+        return -4;
+    }
+    if (!igd_flip_ready) {
+        kprintf("igdmode: keine Doppelpufferung (zweiter Puffer fehlt), Abbruch\n");
+        return -4;
+    }
+    if (igd_rd(PS_CTRL(p, 0)) & PS_SCALER_EN) {
+        kprintf("igdmode: Skalierer ist an, Abbruch\n");
+        return -4;
+    }
+    f.pipeconf = igd_rd(PIPECONF(p));
+    f.plane_ctl = igd_rd(PLANE_CTL(p));
+    f.cur_ctl = igd_rd(CUR_CTL(p));
+    f.clk_sel = igd_rd(TRANS_CLK_SEL(p));
+    f.buf_ctl = igd_rd(DDI_BUF_CTL(f.port));
+    HwMode orig;
+    mode_read(&f, &orig);
+    kprintf("igdmode: vorher: PIPECONF %#x PLANE_CTL %#x TRANS_CLK_SEL %#x DDI_BUF_CTL %#x DPLL%d CFGCR1 %#x CFGCR2 %#x\n",
+            f.pipeconf, f.plane_ctl, f.clk_sel, f.buf_ctl, f.dpll, orig.cfgcr1, orig.cfgcr2);
+
+    /* Kandidaten: Zeitablaeufe aus der EDID, die per HDMI gehen, in den zweiten Puffer passen und nicht der jetzige
+     * Modus sind (hoechstens drei) */
+    static uint8_t edid[256];
+    int blocks = read_edid(f.port, edid, 0);
+    if (!blocks)
+        return -2;
+    Timing cand[3];
+    int nc = 0;
+    uint32_t cur_ht = (orig.htotal >> 16) + 1, cur_ha = (orig.htotal & 0xFFFF) + 1;
+    uint32_t cur_vt = (orig.vtotal >> 16) + 1, cur_va = (orig.vtotal & 0xFFFF) + 1;
+    for (int b = 0; b < blocks && nc < 3; b++) {
+        const uint8_t *e = edid + 128 * b;
+        uint32_t first = b == 0 ? 54 : e[2], end = b == 0 ? 126 : 127; /* DTDs: 18 Byte, vor Pruefsumme */
+        if (b > 0 && (e[0] != 0x02 || first < 4))
+            continue;
+        for (uint32_t i = first; i + 18 <= end && nc < 3; i += 18) {
+            Timing t;
+            if (!dtd_parse(e + i, &t))
+                continue;
+            int same = t.ha == cur_ha && t.va == cur_va && t.ht == cur_ht && t.vt == cur_vt;
+            uint32_t stride = (t.ha * 4 + 63) & ~63u;
+            if (t.interlaced || t.khz > GEN9_HDMI_MAX_KHZ || same ||
+                (uint64_t)stride * t.va > (uint64_t)igd_scr_stride * igd_scr_h)
+                continue;
+            cand[nc++] = t;
+        }
+    }
+    if (!nc) {
+        kprintf("igdmode: kein anderer Modus des Monitors geht per HDMI (alle ueber 300 MHz oder schon aktiv)\n");
+        return -9;
+    }
+
+    uint32_t imr = igd_underrun_begin(p);
+    int rc = 0, shown = 0;
+    static const uint32_t tints[] = {0x102040, 0x204010, 0x401020};
+    for (int i = 0; i < nc && rc == 0; i++) {
+        Timing *t = &cand[i];
+        uint32_t stride = (t->ha * 4 + 63) & ~63u, hz = hz100(t);
+        HwMode m;
+        if (mode_from_timing(t, &orig, igd_surf_b, stride, &m)) {
+            kprintf("igdmode: %ux%u @ %u.%02u Hz: keine DPLL-Einstellung gefunden, uebersprungen\n", t->ha, t->va,
+                    hz / 100, hz % 100);
+            continue;
+        }
+        kprintf("igdmode: Modus %ux%u @ %u.%02u Hz, Pixeltakt %u kHz, gesamt %ux%u: DPLL CFGCR1 %#x CFGCR2 %#x\n", t->ha,
+                t->va, hz / 100, hz % 100, t->khz, t->ht, t->vt, m.cfgcr1, m.cfgcr2);
+        mode_off(&f);
+        test_image(igd_buf_b, stride, t->ha, t->va, tints[i % 3]);
+        if (mode_on(&f, &m)) {
+            rc = -10;
+            break;
+        }
+        shown++;
+        uint32_t meas = measure_hz100(p);
+        kprintf("igdmode:   laeuft: gemessen %u.%02u Hz, DPLL_STATUS %#x, PIPECONF %#x\n", meas / 100, meas % 100,
+                igd_rd(DPLL_STATUS), igd_rd(PIPECONF(p)));
+        thread_sleep_ms(6000);
+    }
+
+    /* zurueck zum Modus der Firmware (genau die vorher gelesenen Register) */
+    mode_off(&f);
+    int back = mode_on(&f, &orig);
+    uint32_t meas = measure_hz100(p);
+    igd_wr(CUR_CTL(p), f.cur_ctl);
+    igd_wr(CUR_BASE(p), igd_rd(CUR_BASE(p)));
+    int under = igd_underrun_end(p, imr);
+    kprintf("igdmode: zurueck%s: %ux%u, gemessen %u.%02u Hz, CFGCR1 %#x CFGCR2 %#x, PLANE_SURFLIVE %#x\n",
+            back ? " MIT FEHLER" : "", (igd_rd(PIPESRC(p)) >> 16) + 1, (igd_rd(PIPESRC(p)) & 0xFFFF) + 1, meas / 100,
+            meas % 100, igd_rd(DPLL_CFGCR1(f.dpll)), igd_rd(DPLL_CFGCR2(f.dpll)), igd_rd(PLANE_SURFLIVE(p)));
+    kprintf("igdmode: FIFO-Unterlauf: %s (beim Ein-/Ausschalten der Pipe ist einer moeglich und harmlos)\n",
+            under ? "ja" : "nein");
+    console_repaint();
+    if (rc == 0 && back)
+        rc = -11;
+    kprintf("igdmode: %s (%d von %d Modi gezeigt)\n", rc == 0 ? "Moduswechsel funktioniert" : "Moduswechsel fehlgeschlagen",
+            shown, nc);
     return rc;
 }
