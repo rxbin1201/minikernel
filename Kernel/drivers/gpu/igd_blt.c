@@ -39,6 +39,11 @@
 #define FORCEWAKE_BLITTER     0xA188
 #define FORCEWAKE_ACK_RENDER  0x0D84
 #define FORCEWAKE_ACK_BLITTER 0x130044
+#define FORCEWAKE_MEDIA       0xA270
+#define FORCEWAKE_ACK_MEDIA   0x0D88
+#define RP_STATE_CAP          0x145998                 /* Taktbereich: RP0 (max) 7:0, RP1 15:8, RPn (min) 23:16, je 50 MHz */
+#define RPSTAT1               0xA01C                   /* aktueller Takt (CAGF) in Bits 31:23, Einheit 50/3 MHz */
+#define RPNSWREQ              0xA008                   /* gewuenschter Takt in Bits 31:23, Einheit 50/3 MHz */
 #define GDRST                 0x941C                   /* Reset einzelner Engines */
 #define GRDOM_BLT             (1u << 3)
 #define MASKED_ON(b)          (((b) << 16) | (b))       /* "maskierte" Register: obere 16 Bit waehlen die Bits aus */
@@ -72,11 +77,14 @@ static int forcewake_get(void)
 {
     igd_wr(FORCEWAKE_RENDER, MASKED_ON(1));
     igd_wr(FORCEWAKE_BLITTER, MASKED_ON(1));
-    return WAIT_UNTIL((igd_rd(FORCEWAKE_ACK_RENDER) & 1) && (igd_rd(FORCEWAKE_ACK_BLITTER) & 1), 50);
+    igd_wr(FORCEWAKE_MEDIA, MASKED_ON(1));
+    return WAIT_UNTIL((igd_rd(FORCEWAKE_ACK_RENDER) & 1) && (igd_rd(FORCEWAKE_ACK_BLITTER) & 1) &&
+                      (igd_rd(FORCEWAKE_ACK_MEDIA) & 1), 50);
 }
 
 static void forcewake_put(void)
 {
+    igd_wr(FORCEWAKE_MEDIA, MASKED_OFF(1));
     igd_wr(FORCEWAKE_BLITTER, MASKED_OFF(1));
     igd_wr(FORCEWAKE_RENDER, MASKED_OFF(1));
 }
@@ -215,6 +223,37 @@ static int run(const char *what, int timeout_ms)
     return -1;
 }
 
+/* ---------- GPU-Takt ---------- */
+
+static uint32_t cur_mhz(void)
+{
+    return ((igd_rd(RPSTAT1) >> 23) & 0x1FF) * 50 / 3;
+}
+
+/* Misst Fuellen und Kopieren ganzer Bilder im verdeckten Puffer B (Kopie: aus A); Ergebnis in MB/s */
+static int bench(const char *label)
+{
+    uint64_t bytes = (uint64_t)igd_scr_stride * igd_scr_h * 10;
+    uint64_t t0 = time_us();
+    begin(10 * 7);
+    for (int i = 0; i < 10; i++)
+        emit_fill(igd_surf_b, igd_scr_stride, 0, 0, (int)igd_scr_w, (int)igd_scr_h, 0x00102030u * (uint32_t)i);
+    if (run("10 Bilder fuellen", 3000) != 0)
+        return -1;
+    uint64_t fill_us = time_us() - t0;
+    t0 = time_us();
+    begin(10 * 10);
+    for (int i = 0; i < 10; i++)
+        emit_copy(igd_surf_b, igd_scr_stride, 0, 0, igd_surf_a, igd_scr_stride, 0, 0, (int)igd_scr_w, (int)igd_scr_h);
+    if (run("10 Bilder kopieren", 3000) != 0)
+        return -1;
+    uint64_t copy_us = time_us() - t0;
+    kprintf("igdblt: %s (GPU-Takt %u MHz): fuellen %lu MB/s (%lu ms je Bild), kopieren %lu MB/s (%lu ms je Bild)\n",
+            label, cur_mhz(), (unsigned long)(bytes / (fill_us ? fill_us : 1)), (unsigned long)(fill_us / 10000),
+            (unsigned long)(bytes / (copy_us ? copy_us : 1)), (unsigned long)(copy_us / 10000));
+    return 0;
+}
+
 /* ---------- Test (igdtest blit) ---------- */
 
 #define TEST_W     512
@@ -322,30 +361,41 @@ int igd_blit_test(void)
         goto out_ring;
     }
 
-    /* 3. Geschwindigkeit: 10 ganze Bilder fuellen, GPU gegen CPU, im verdeckten Puffer B */
+    /* 3. Geschwindigkeit bei dem Takt, den die Firmware hinterlassen hat, dann beim hoechsten; zum Vergleich die CPU */
     if (igd_flip_ready) {
+        uint32_t cap = igd_rd(RP_STATE_CAP), req0 = igd_rd(RPNSWREQ);
+        uint32_t rp0 = cap & 0xFF, rp1 = (cap >> 8) & 0xFF, rpn = (cap >> 16) & 0xFF;
+        kprintf("igdblt: GPU-Takt: moeglich %u-%u MHz (effizient %u MHz), jetzt %u MHz, angefordert %u MHz (RPNSWREQ %#x)\n",
+                rpn * 50, rp0 * 50, rp1 * 50, cur_mhz(), ((req0 >> 23) & 0x1FF) * 50 / 3, req0);
+        if (bench("wie vorgefunden") != 0) {
+            rc = -14;
+            goto out_ring;
+        }
+        if (rp0) {
+            igd_wr(RPNSWREQ, (rp0 * 3) << 23); /* Einheit 50/3 MHz */
+            thread_sleep_ms(20);
+            kprintf("igdblt: hoechsten Takt angefordert: jetzt %u MHz\n", cur_mhz());
+            int b = bench("hoechster Takt");
+            igd_wr(RPNSWREQ, req0);
+            if (b != 0) {
+                rc = -14;
+                goto out_ring;
+            }
+        }
         uint64_t bytes = (uint64_t)igd_scr_stride * igd_scr_h * 10;
         uint64_t t0 = time_us();
-        begin(10 * 7);
-        for (int i = 0; i < 10; i++)
-            emit_fill(igd_surf_b, igd_scr_stride, 0, 0, (int)igd_scr_w, (int)igd_scr_h, 0x00102030u * (uint32_t)i);
-        int ok = run("10 ganze Bilder fuellen (GPU)", 2000) == 0;
-        uint64_t gpu_us = time_us() - t0;
-        t0 = time_us();
         for (int i = 0; i < 10; i++) {
             uint32_t *b = (uint32_t *)igd_buf_b, c = 0x00102030u * (uint32_t)i;
             for (uint64_t k = 0; k < (uint64_t)igd_scr_stride / 4 * igd_scr_h; k++)
                 b[k] = c;
         }
         uint64_t cpu_us = time_us() - t0;
-        if (ok)
-            kprintf("igdblt: 10 x %ux%u fuellen: GPU %lu ms (%lu MB/s), CPU %lu ms (%lu MB/s)\n", igd_scr_w, igd_scr_h,
-                    (unsigned long)(gpu_us / 1000), (unsigned long)(bytes / (gpu_us ? gpu_us : 1)),
-                    (unsigned long)(cpu_us / 1000), (unsigned long)(bytes / (cpu_us ? cpu_us : 1)));
-        if (!ok) {
-            rc = -14;
-            goto out_ring;
-        }
+        t0 = time_us();
+        console_repaint(); /* das, was die Konsole beim Scrollen macht: ganzes Abbild in den Framebuffer */
+        uint64_t rep_us = time_us() - t0;
+        kprintf("igdblt: CPU: fuellen %lu MB/s (RAM), Konsole ganzes Abbild -> Framebuffer %lu ms (%lu MB/s)\n",
+                (unsigned long)(bytes / (cpu_us ? cpu_us : 1)), (unsigned long)(rep_us / 1000),
+                (unsigned long)(bytes / 10 / (rep_us ? rep_us : 1)));
     }
 
     /* 4. Sichtbar im angezeigten Framebuffer A: farbige Rechtecke, dann fuenfmal nach oben scrollen */
