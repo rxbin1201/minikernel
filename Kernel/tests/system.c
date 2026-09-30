@@ -9,6 +9,7 @@
 #include "drivers/keyboard.h"
 #include "core/sched.h"
 #include "core/process.h"
+#include "arch/x86_64/smp.h"
 #include "drivers/rtc.h"
 #include "tests/selftest.h"
 
@@ -259,4 +260,44 @@ void test_rtc(void)
     dos_now(&dd, &tt);
     uint64_t back = dos_to_unix(dd, tt);
     check("DOS-Zeitstempel: hin und zurueck (auf 2 s genau)", back != 0 && back + 4 >= rtc_now() && back <= rtc_now() + 1);
+}
+
+/* Mehrere CPUs: alle gestarteten CPUs laufen, und User-Programme rechnen wirklich gleichzeitig. Dazu laufen einige
+ * /bin/burn nebeneinander; die Timer-Ticks im User-Mode je CPU zeigen, wo gerechnet wurde. */
+void test_smp(void)
+{
+    title("Mehrere CPUs (SMP)");
+    unsigned n = smp_cpu_count();
+    int online = 1;
+    for (unsigned i = 0; i < n; i++)
+        if (!smp_cpu(i)->online)
+            online = 0;
+    kprintf("  %u CPU(s)\n", n);
+    check("Alle gestarteten CPUs laufen", online);
+    if (n < 2) {
+        kprintf("  (nur eine CPU, Test der Parallelitaet uebersprungen)\n");
+        return;
+    }
+
+    unsigned k = n < 4 ? n : 4, busy = 0;
+    uint64_t before[SMP_MAX_CPUS], sum = 0;
+    for (unsigned i = 0; i < n; i++)
+        before[i] = smp_cpu(i)->ticks_user;
+    int pids[4], started = 1;
+    for (unsigned i = 0; i < k; i++)
+        if ((pids[i] = process_spawn("/bin/burn", "burn 1500", 0)) <= 0)
+            started = 0;
+    for (unsigned i = 0; i < k; i++)
+        if (pids[i] > 0)
+            process_wait(pids[i], 0, 0, 0, 10000);
+    for (unsigned i = 0; i < n; i++) {
+        uint64_t d = smp_cpu(i)->ticks_user - before[i];
+        sum += d;
+        if (d >= 50) /* mindestens eine halbe Sekunde im User-Mode */
+            busy++;
+    }
+    kprintf("  (%u x burn 1500 ms: %lu User-Ticks, %u CPU(s) mit mindestens 50)\n", k, (unsigned long)sum, busy);
+    check("burn-Prozesse gestartet", started);
+    check("User-Programme laufen auf mehreren CPUs gleichzeitig", busy >= 2);
+    check("Rechenzeit mehr als eine CPU schaffen koennte", sum > 200); /* eine CPU: hoechstens 150 Ticks in 1,5 s */
 }

@@ -333,6 +333,19 @@ static void syscall_do(SyscallFrame *f)
     case SYS_KILL:     ret = process_kill_pid((uint32_t)f->rdi); break;
     case SYS_PROCINFO: ret = sys_procinfo(f->rdi, f->rsi); break;
     case SYS_USBINFO:  ret = sys_usbinfo(f->rdi, f->rsi); break;
+    case SYS_CPUINFO: {
+        Cpu *c = smp_cpu((unsigned)f->rdi);
+        if (!process_user_range_ok(process_current(), f->rsi, sizeof(CpuInfo), 1))
+            ret = ERR_FAULT;
+        else if (!c)
+            ret = ERR_NOENT;
+        else {
+            CpuInfo ci = {c->index, c->apic_id, c->ticks_user, c->ticks_kernel, c->ticks_idle};
+            memcpy((void *)f->rsi, &ci, sizeof(ci));
+            ret = 0;
+        }
+        break;
+    }
     case SYS_PCIINFO: {
         PciInfo pi;
         if (!process_user_range_ok(process_current(), f->rsi, sizeof(pi), 1))

@@ -43,6 +43,7 @@ void test_heap(void);
 void test_interrupts(void);
 void test_sched(void);
 void test_rtc(void);
+void test_smp(void);
 void test_usb(void);
 void test_vfs(BootInfo *info);
 void test_disk(void);

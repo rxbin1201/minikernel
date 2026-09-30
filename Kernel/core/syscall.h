@@ -65,6 +65,7 @@
 #define SYS_RESOLVE   57 /* (name, u8 out[max][4], max) -> Anzahl der IPv4-Adressen oder Fehler (DNS) */
 #define SYS_NTP       58 /* (server oder 0, NtpResult*, uhr_stellen) -> 0 oder Fehler */
 #define SYS_SOCKPORT  59 /* (fd) -> lokaler Port des Sockets */
+#define SYS_CPUINFO   60 /* (index, CpuInfo*) -> 0 oder ERR_NOENT am Ende */
 
 /* Argument fuer SYS_SENDTO/SYS_RECVFROM (gleiches Layout in Userland/user.h) */
 typedef struct {
@@ -117,6 +118,12 @@ typedef struct {
     uint32_t pitch;
     int32_t  x, y, w, h;
 } GfxBlit;
+
+/* Eintrag fuer SYS_CPUINFO (gleiches Layout in Userland/include/user.h): Timer-Ticks (je 10 ms) nach Zustand */
+typedef struct {
+    uint32_t index, apic_id;
+    uint64_t ticks_user, ticks_kernel, ticks_idle;
+} CpuInfo;
 
 /* Eintrag fuer SYS_MOUSE (gleiches Layout in Userland/user.h); x, y in Pixeln, buttons: Bit 0 links, 1 rechts, 2 Mitte */
 typedef struct {

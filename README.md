@@ -43,6 +43,14 @@ Beispiele: `make run CMDLINE="mode=1600x900 kbd=de"`, `make test TESTS=foreign S
 Die Datenplatte `Image/disk.img` (FAT32, Label `MINIKERNEL`, im System unter `/disk`) bleibt bei `make clean` erhalten;
 `make cleandisk` legt sie neu an, `make fatcheck` prueft sie.
 
+## Mehrere CPUs (SMP)
+
+Der Kernel startet alle CPUs aus der ACPI-MADT (QEMU: `make run SMP=N`, Standard 4). Threads und Prozesse kommen aus
+einer gemeinsamen Run-Queue und laufen auf jeder CPU. Kernel-Code ist durch einen Big Kernel Lock geschuetzt
+(immer nur eine CPU im Kernel), User-Programme rechnen echt parallel. Details: `Kernel/arch/x86_64/smp.h`.
+
+In der Shell: `burn 5000 & burn 5000 & cpus` zeigt zwei ausgelastete CPUs.
+
 ## Fehlersuche
 
 - **Selbsttests:** `make test` (alle Gruppen) oder `make test TESTS=disk,user`; jede Gruppe laeuft auch einzeln.
@@ -75,6 +83,7 @@ Der Bootloader liest `\cmdline.txt` von der EFI-Systempartition (bei QEMU aus `C
 | `init=/bin/...` | erstes Programm statt `/bin/sh` |
 | `ip=192.168.1.50/24,192.168.1.1[,dns]` | feste Adresse fuer eth0 statt DHCP; `nodhcp`, `nonet`, `nontp` schalten ab |
 | `fsro` | fremde Volumes nur lesbar einbinden |
+| `nosmp`, `cpus=N` | nur die Boot-CPU bzw. hoechstens N CPUs benutzen |
 | `selftest`, `selftest=gruppe,...`, `keep` | Selbsttests (siehe `Kernel/tests/selftest.c`) |
 
 Im laufenden System schreibt `resolution` Grafikmodus und Schriftgroesse in die `cmdline.txt` der Boot-Partition.
@@ -96,7 +105,8 @@ Sources/main.c        UEFI-Bootloader: laedt kernel.elf, initrd.tar, cmdline.txt
 Includes/boot_info.h  Uebergabe Bootloader -> Kernel
 
 Kernel/
-  arch/x86_64/        Einstieg (entry.S), GDT/IDT, Interrupts, APIC/IOAPIC, ACPI, Ausschalten, Syscall-Einstieg
+  arch/x86_64/        Einstieg (entry.S), GDT/IDT, Interrupts, APIC/IOAPIC, ACPI, Ausschalten, Syscall-Einstieg,
+                      SMP (smp.c, trampoline.S)
   mm/                 physischer Speicher, Paging, Heap, Kernel-Stacks
   core/               kmain (kernel.c), Prozesse, Scheduler, Syscalls, TTY, Kommandozeile
   console/            Textkonsole im Framebuffer, Schriften

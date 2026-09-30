@@ -69,6 +69,7 @@ void run_selftests(BootInfo *info)
     RUN("interrupts", test_interrupts());
     RUN("console_speed", test_console_speed());
     RUN("sched", test_sched());
+    RUN("smp", test_smp());
     RUN("vfs", test_vfs(info));
     RUN("disk", test_disk());
     RUN("usb", test_usb());
