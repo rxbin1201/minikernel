@@ -321,7 +321,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         goto halt;
     }
 
-    /* Optionale Kommandozeile fuer den Kernel (siehe Kernel/cmdline.h); "mode=" wird gleich hier ausgewertet */
+    /* Optionale Kommandozeile fuer den Kernel (siehe Kernel/core/cmdline.h); "mode=" wird gleich hier ausgewertet */
     VOID *cmd = NULL;
     UINT64 cmd_size = 0;
     if (!EFI_ERROR(load_module(ImageHandle, L"\\cmdline.txt", &cmd, &cmd_size)) && cmd) {

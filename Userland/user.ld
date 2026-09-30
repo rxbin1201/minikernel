@@ -2,7 +2,7 @@ ENTRY(_start)
 
 SECTIONS
 {
-    . = 0x7F8000000000; /* USER_BASE (siehe Kernel/paging.h) */
+    . = 0x7F8000000000; /* USER_BASE (siehe Kernel/mm/paging.h) */
 
     .text   : { *(.text .text.*) }
     . = ALIGN(4096);

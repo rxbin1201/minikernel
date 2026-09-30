@@ -61,7 +61,7 @@ def main():
         fs.dirent(b"KERNEL  ELF", 0x20, kernel_cl, len(kernel_data)),
         fs.dirent(b"INITRD  TAR", 0x20, initrd_cl, len(initrd_data)),
     ]
-    if cmdline:  # optionale Kernel-Kommandozeile (\\cmdline.txt, siehe Kernel/cmdline.h)
+    if cmdline:  # optionale Kernel-Kommandozeile (\\cmdline.txt, siehe Kernel/core/cmdline.h)
         root.append(fs.dirent(b"CMDLINE TXT", 0x20, cmd_cl, len(cmd_data)))
     fs.finish(root)
     write_gpt(fs, disk_sectors, part_sectors, EFI_SYSTEM_GUID, "EFI System")
