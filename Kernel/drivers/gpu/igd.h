@@ -31,6 +31,10 @@ int igd_flip_test(void);
 /* Stufe 2, nur auf Befehl (igdtest cursor): Hardware-Mauszeiger einschalten, 3 s im Kreis bewegen, wieder aus */
 int igd_cursor_test(void);
 
+/* Stufe 3, nur auf Befehl (igdtest blit): Blitter-Engine starten, fuellen/kopieren pruefen, Geschwindigkeit messen,
+ * sichtbare Rechtecke und Scrollen; danach alles zurueck (igd_blt.c) */
+int igd_blit_test(void);
+
 /* Fest eingebaut (ohne "noigd" in der Kommandozeile): Hardware-Mauszeiger und Doppelpufferung */
 int  igd_cursor_available(void);
 void igd_cursor_move(int x, int y, int visible); /* Spitze des Pfeils bei (x, y) */

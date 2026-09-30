@@ -62,5 +62,6 @@ int      console_gfx_owner(uint32_t pid);
 void     console_gfx_blit(const uint32_t *src, uint32_t src_pitch, int x, int y, int w, int h); /* wird alle 10 ms vom Konsolen-Thread aufgerufen */
 uint32_t console_debug_fb_pixel(uint32_t x, uint32_t y); /* liest den Framebuffer (langsam, nur Tests) */
 uint32_t console_read_pixel(uint32_t x, uint32_t y);
+void     console_repaint(void); /* Framebuffer komplett aus dem Abbild neu schreiben */
 
 #endif

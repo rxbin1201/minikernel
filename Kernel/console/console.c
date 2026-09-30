@@ -185,6 +185,17 @@ void console_gfx_blit(const uint32_t *src, uint32_t src_pitch, int x, int y, int
     }
 }
 
+/* Framebuffer komplett aus dem Abbild neu schreiben (z.B. nachdem ein Treiber-Test direkt hineingezeichnet hat) */
+void console_repaint(void)
+{
+    if (!fb || !shadow || gfx_mode)
+        return;
+    uint64_t f = irq_save();
+    memmove((void *)fb, shadow, (uint64_t)height_px * pitch * sizeof(uint32_t));
+    cursor_show();
+    irq_restore(f);
+}
+
 void console_set_tick(void (*hook)(void))
 {
     tick_hook = hook;

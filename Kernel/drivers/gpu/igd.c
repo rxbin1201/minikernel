@@ -1,6 +1,7 @@
 /* Intel-Grafik Gen9 (siehe igd.h), Stufe 1: erkennen und den Zustand der Anzeige auslesen. Nur lesende Zugriffe. */
 
 #include "drivers/gpu/igd.h"
+#include "drivers/gpu/igd_internal.h"
 #include "arch/x86_64/apic.h"
 #include "drivers/pci.h"
 #include "lib/kprintf.h"
@@ -52,25 +53,25 @@
 #define PTE_VALID             1ULL
 #define PTE_ADDR              0x7FFFFFF000ULL           /* Bits 38:12 */
 
-static IgdInfo info = {.scanout_pipe = -1};
-static volatile uint8_t  *regs;
-static volatile uint64_t *ggtt;       /* globale Grafik-Seitentabelle (GGTT) */
-static uint32_t           ggtt_entries;
-static uint64_t           stolen_base, stolen_size;
+IgdInfo igd_state = {.scanout_pipe = -1};
+volatile uint8_t  *igd_regs;
+volatile uint64_t *igd_ggtt;       /* globale Grafik-Seitentabelle (GGTT) */
+uint32_t           igd_ggtt_entries;
+uint64_t           igd_stolen_base, igd_stolen_size;
 
-static uint32_t rd(uint32_t off)
+uint32_t igd_rd(uint32_t off)
 {
-    return *(volatile uint32_t *)(regs + off);
+    return *(volatile uint32_t *)(igd_regs + off);
 }
 
-static void wr(uint32_t off, uint32_t v)
+void igd_wr(uint32_t off, uint32_t v)
 {
-    *(volatile uint32_t *)(regs + off) = v;
+    *(volatile uint32_t *)(igd_regs + off) = v;
 }
 
 const IgdInfo *igd_info(void)
 {
-    return &info;
+    return &igd_state;
 }
 
 /* ---------- Erkennen ---------- */
@@ -137,42 +138,42 @@ static const char *ddi_mode(uint32_t ctl)
 
 static void dump_pipe(int p, const BootInfo *bi)
 {
-    uint32_t conf = rd(PIPECONF(p));
+    uint32_t conf = igd_rd(PIPECONF(p));
     if (!(conf & (1u << 31))) {
         kprintf("igd:   Pipe %c: aus\n", 'A' + p);
         return;
     }
-    uint32_t src = rd(PIPESRC(p)), ht = rd(HTOTAL(p)), vt = rd(VTOTAL(p));
+    uint32_t src = igd_rd(PIPESRC(p)), ht = igd_rd(HTOTAL(p)), vt = igd_rd(VTOTAL(p));
     uint32_t w = ((src >> 16) & 0x1FFF) + 1, h = (src & 0x1FFF) + 1;
-    uint32_t f0 = rd(PIPE_FRMCOUNT(p));
+    uint32_t f0 = igd_rd(PIPE_FRMCOUNT(p));
     uint64_t t0 = time_ms();
     WAIT_UNTIL(time_ms() - t0 >= 250, 300);
-    uint32_t frames = rd(PIPE_FRMCOUNT(p)) - f0;
+    uint32_t frames = igd_rd(PIPE_FRMCOUNT(p)) - f0;
     kprintf("igd:   Pipe %c: an (%s), Quelle %ux%u, Timing %ux%u sichtbar von %ux%u, %u Bilder in 250 ms (~%u Hz)\n",
             'A' + p, (conf & (1u << 30)) ? "laeuft" : "startet", w, h, (ht & 0x1FFF) + 1, (vt & 0x1FFF) + 1,
             ((ht >> 16) & 0x1FFF) + 1, ((vt >> 16) & 0x1FFF) + 1, frames, frames * 4);
 
-    uint32_t ctl = rd(PLANE_CTL(p)), stride = rd(PLANE_STRIDE(p)), size = rd(PLANE_SIZE(p));
-    uint32_t surf = rd(PLANE_SURF(p)), off = rd(PLANE_OFFSET(p)), pos = rd(PLANE_POS(p));
+    uint32_t ctl = igd_rd(PLANE_CTL(p)), stride = igd_rd(PLANE_STRIDE(p)), size = igd_rd(PLANE_SIZE(p));
+    uint32_t surf = igd_rd(PLANE_SURF(p)), off = igd_rd(PLANE_OFFSET(p)), pos = igd_rd(PLANE_POS(p));
     kprintf("igd:     Ebene 1: %s, %s, %s, Zeile %u Byte, Groesse %ux%u, Position %u,%u, Surface %#x, Offset %u,%u\n",
             (ctl & (1u << 31)) ? "an" : "aus", plane_format(ctl), plane_tiling(ctl), (stride & 0x3FF) * 64,
             (size & 0xFFF) + 1, ((size >> 16) & 0xFFF) + 1, pos & 0xFFF, (pos >> 16) & 0xFFF, surf & ~0xFFFu,
             off & 0x1FFF, (off >> 16) & 0xFFF);
 
-    uint32_t cur = rd(CUR_CTL(p));
+    uint32_t cur = igd_rd(CUR_CTL(p));
     kprintf("igd:     Mauszeiger-Ebene: %s (CUR_CTL %#x, CUR_BASE %#x, CUR_POS %#x)\n", (cur & 0x27) ? "an" : "aus",
-            cur, rd(CUR_BASE(p)), rd(CUR_POS(p)));
+            cur, igd_rd(CUR_BASE(p)), igd_rd(CUR_POS(p)));
 
-    uint32_t ddi = rd(TRANS_DDI_FUNC_CTL(p));
+    uint32_t ddi = igd_rd(TRANS_DDI_FUNC_CTL(p));
     if (ddi & (1u << 31))
         kprintf("igd:     Transcoder %c -> Port %c (%s), TRANS_DDI_FUNC_CTL %#x\n", 'A' + p, 'A' + ((ddi >> 28) & 7),
                 ddi_mode(ddi), ddi);
 
     /* Zeigt diese Ebene den GOP-Framebuffer? Die CPU sieht Grafikspeicher ueber das Aperture-Fenster (BAR2): die
      * Surface-Adresse ist dort der Abstand zum Anfang. */
-    if ((ctl & (1u << 31)) && info.aperture && bi->fb.base == info.aperture + (surf & ~0xFFFu)) {
-        info.scanout_pipe = p;
-        info.scanout_surf = surf & ~0xFFFu;
+    if ((ctl & (1u << 31)) && igd_state.aperture && bi->fb.base == igd_state.aperture + (surf & ~0xFFFu)) {
+        igd_state.scanout_pipe = p;
+        igd_state.scanout_surf = surf & ~0xFFFu;
         kprintf("igd:     -> zeigt den GOP-Framebuffer (%#lx = Aperture + Surface)\n", (unsigned long)bi->fb.base);
     }
 }
@@ -187,51 +188,51 @@ void igd_init(const BootInfo *bi)
         i++;
     if (d.vendor != 0x8086 || pci_find_class(0x03, 0x00, -1, i, &d) != 0)
         return;
-    info.present = 1;
-    info.device = d.device;
-    info.name = "Intel-Grafik (unbekanntes Modell)";
+    igd_state.present = 1;
+    igd_state.device = d.device;
+    igd_state.name = "Intel-Grafik (unbekanntes Modell)";
     for (unsigned k = 0; k < sizeof(known) / sizeof(known[0]); k++)
         if (known[k].id == d.device)
-            info.name = known[k].name;
-    info.gen9 = gen9_family(d.device);
-    info.mmio = pci_bar_mem(&d, 0);
-    info.aperture = pci_bar_mem(&d, 2);
-    info.mmio_size = 16u << 20; /* Gen9: 16 MiB, Register in den ersten 2 MiB, globale GTT ab 8 MiB */
+            igd_state.name = known[k].name;
+    igd_state.gen9 = gen9_family(d.device);
+    igd_state.mmio = pci_bar_mem(&d, 0);
+    igd_state.aperture = pci_bar_mem(&d, 2);
+    igd_state.mmio_size = 16u << 20; /* Gen9: 16 MiB, Register in den ersten 2 MiB, globale GTT ab 8 MiB */
     kprintf("igd: %02x:%02x.%u 8086:%04x %s, Register @ %#lx, Aperture @ %#lx, PCI-Rev %u\n", d.bus, d.dev, d.fn,
-            d.device, info.name, (unsigned long)info.mmio, (unsigned long)info.aperture, d.revision);
-    if (!info.gen9) {
+            d.device, igd_state.name, (unsigned long)igd_state.mmio, (unsigned long)igd_state.aperture, d.revision);
+    if (!igd_state.gen9) {
         kprintf("igd: keine Gen9-GPU, Register werden nicht gelesen\n");
         return;
     }
-    if (!info.mmio || paging_map_mmio(info.mmio, 2u << 20) != 0) {
+    if (!igd_state.mmio || paging_map_mmio(igd_state.mmio, 2u << 20) != 0) {
         kprintf("igd: Register nicht einblendbar\n");
         return;
     }
-    regs = (volatile uint8_t *)info.mmio;
+    igd_regs = (volatile uint8_t *)igd_state.mmio;
     pci_set_driver(&d, "igd");
 
     /* Stolen Memory: von der Firmware fuer die Grafik reservierter Hauptspeicher (PCI 0x5C: Basis, 0x50: Groesse) */
     uint32_t bdsm = pci_read32(&d, 0x5C) & ~0xFFFFFu, gmch = pci_read32(&d, 0x50);
     uint32_t gms = (gmch >> 8) & 0xFF;
     kprintf("igd: Stolen Memory @ %#x, %u MiB (GMCH_CTRL %#x)\n", bdsm, gms < 0xF0 ? gms * 32 : 4 * (gms - 0xF0 + 1), gmch);
-    stolen_base = bdsm;
-    stolen_size = (uint64_t)(gms < 0xF0 ? gms * 32 : 4 * (gms - 0xF0 + 1)) << 20;
+    igd_stolen_base = bdsm;
+    igd_stolen_size = (uint64_t)(gms < 0xF0 ? gms * 32 : 4 * (gms - 0xF0 + 1)) << 20;
 
     /* GGTT: Groesse aus GMCH_CTRL Bits 7:6 (1 = 2 MiB, 2 = 4 MiB, 3 = 8 MiB Eintraege), liegt in BAR0 ab 8 MiB */
     uint32_t ggms = (gmch >> 6) & 3;
     uint32_t ggtt_bytes = ggms ? (1u << ggms) << 20 : 0;
-    if (ggtt_bytes && paging_map_mmio(info.mmio + GGTT_OFFSET, ggtt_bytes) == 0) {
-        ggtt = (volatile uint64_t *)(info.mmio + GGTT_OFFSET);
-        ggtt_entries = ggtt_bytes / 8;
+    if (ggtt_bytes && paging_map_mmio(igd_state.mmio + GGTT_OFFSET, ggtt_bytes) == 0) {
+        igd_ggtt = (volatile uint64_t *)(igd_state.mmio + GGTT_OFFSET);
+        igd_ggtt_entries = ggtt_bytes / 8;
         kprintf("igd: GGTT %u MiB (%u Eintraege, %u MiB Grafik-Adressraum), Eintrag 0 = %#lx\n", ggtt_bytes >> 20,
-                ggtt_entries, ggtt_entries / 256, (unsigned long)ggtt[0]);
+                igd_ggtt_entries, igd_ggtt_entries / 256, (unsigned long)igd_ggtt[0]);
     }
 
-    uint32_t pw = rd(PWR_WELL_CTL_BIOS) | rd(PWR_WELL_CTL_DRIVER);
+    uint32_t pw = igd_rd(PWR_WELL_CTL_BIOS) | igd_rd(PWR_WELL_CTL_DRIVER);
     kprintf("igd: Leistungsbereiche: PW1 %s, PW2 %s (BIOS %#x, Treiber %#x)\n", (pw & PW1_STATE) ? "an" : "aus",
-            (pw & PW2_STATE) ? "an" : "aus", rd(PWR_WELL_CTL_BIOS), rd(PWR_WELL_CTL_DRIVER));
+            (pw & PW2_STATE) ? "an" : "aus", igd_rd(PWR_WELL_CTL_BIOS), igd_rd(PWR_WELL_CTL_DRIVER));
     for (int port = 0; port < 5; port++) {
-        uint32_t buf = rd(DDI_BUF_CTL(port));
+        uint32_t buf = igd_rd(DDI_BUF_CTL(port));
         if (buf & (1u << 31))
             kprintf("igd: Port %c aktiv (DDI_BUF_CTL %#x)\n", 'A' + port, buf);
     }
@@ -242,7 +243,7 @@ void igd_init(const BootInfo *bi)
         }
         dump_pipe(p, bi);
     }
-    if (info.scanout_pipe < 0) {
+    if (igd_state.scanout_pipe < 0) {
         kprintf("igd: keine Pipe zeigt den GOP-Framebuffer (%#lx) - bitte dieses Log schicken\n",
                 (unsigned long)bi->fb.base);
         return;
@@ -252,58 +253,58 @@ void igd_init(const BootInfo *bi)
 
 /* ---------- Stufe 2: Page-Flipping (nur auf Befehl: igdtest) ---------- */
 
-static void clflush_range(uint64_t addr, uint64_t len)
+void igd_clflush(uint64_t addr, uint64_t len)
 {
     for (uint64_t a = addr & ~63ULL; a < addr + len; a += 64)
         __asm__ __volatile__("clflush (%0)" : : "r"(a) : "memory");
     __asm__ __volatile__("mfence" : : : "memory");
 }
 
-static void ggtt_flush(void)
+void igd_ggtt_flush(void)
 {
-    wr(GFX_FLSH_CNTL, 1);
-    (void)rd(GFX_FLSH_CNTL);
+    igd_wr(GFX_FLSH_CNTL, 1);
+    (void)igd_rd(GFX_FLSH_CNTL);
 }
 
 /* Wartet, bis die Ebene surf tatsaechlich anzeigt; Ergebnis: Bilder bis dahin, -1 = Zeitueberschreitung */
 static int wait_live(int p, uint32_t surf)
 {
-    uint32_t f0 = rd(PIPE_FRMCOUNT(p));
-    if (!WAIT_UNTIL((rd(PLANE_SURFLIVE(p)) & ~0xFFFu) == surf, 200))
+    uint32_t f0 = igd_rd(PIPE_FRMCOUNT(p));
+    if (!WAIT_UNTIL((igd_rd(PLANE_SURFLIVE(p)) & ~0xFFFu) == surf, 200))
         return -1;
-    return (int)(rd(PIPE_FRMCOUNT(p)) - f0);
+    return (int)(igd_rd(PIPE_FRMCOUNT(p)) - f0);
 }
 
 /* FIFO-Unterlauf der Pipe (der Display-Engine gingen die Daten aus: Flackern/Stoerstreifen) festhalten lassen. Nur
  * die Maske wird geoeffnet, IER bleibt, wie es ist: es entsteht kein Interrupt, das Ereignis steht nur im IIR. */
-static uint32_t underrun_begin(int p)
+uint32_t igd_underrun_begin(int p)
 {
-    uint32_t imr = rd(DE_PIPE_IMR(p));
-    wr(DE_PIPE_IIR(p), PIPE_FIFO_UNDERRUN);
-    wr(DE_PIPE_IMR(p), imr & ~PIPE_FIFO_UNDERRUN);
+    uint32_t imr = igd_rd(DE_PIPE_IMR(p));
+    igd_wr(DE_PIPE_IIR(p), PIPE_FIFO_UNDERRUN);
+    igd_wr(DE_PIPE_IMR(p), imr & ~PIPE_FIFO_UNDERRUN);
     return imr;
 }
 
-static int underrun_end(int p, uint32_t imr)
+int igd_underrun_end(int p, uint32_t imr)
 {
-    int seen = (rd(DE_PIPE_IIR(p)) & PIPE_FIFO_UNDERRUN) != 0;
-    wr(DE_PIPE_IIR(p), PIPE_FIFO_UNDERRUN);
-    wr(DE_PIPE_IMR(p), imr);
+    int seen = (igd_rd(DE_PIPE_IIR(p)) & PIPE_FIFO_UNDERRUN) != 0;
+    igd_wr(DE_PIPE_IIR(p), PIPE_FIFO_UNDERRUN);
+    igd_wr(DE_PIPE_IMR(p), imr);
     return seen;
 }
 
 /* Prueft, ob der GGTT-Bereich [base, base + pages) frei ist, und sichert seine Eintraege nach saved. Die Firmware
  * traegt nur ein, was sie braucht (den Framebuffer im Stolen Memory); der Rest der GGTT ist ungeloeschter
  * Speicherinhalt, den niemand liest. Frei heisst deshalb: kein Eintrag zeigt gueltig ins Stolen Memory. */
-static int ggtt_claim(uint32_t base, uint32_t pages, uint64_t *saved)
+int igd_ggtt_claim(uint32_t base, uint32_t pages, uint64_t *saved)
 {
-    if (base + pages > ggtt_entries) {
+    if (base + pages > igd_ggtt_entries) {
         kprintf("igdtest: GGTT zu klein\n");
         return -4;
     }
     for (uint32_t i = 0; i < pages; i++) {
-        uint64_t e = ggtt[base + i];
-        if ((e & PTE_VALID) && (e & PTE_ADDR) >= stolen_base && (e & PTE_ADDR) < stolen_base + stolen_size) {
+        uint64_t e = igd_ggtt[base + i];
+        if ((e & PTE_VALID) && (e & PTE_ADDR) >= igd_stolen_base && (e & PTE_ADDR) < igd_stolen_base + igd_stolen_size) {
             kprintf("igdtest: GGTT-Eintrag %#x zeigt ins Stolen Memory (%#lx): wird benutzt, Abbruch\n", base + i,
                     (unsigned long)e);
             return -5;
@@ -314,25 +315,25 @@ static int ggtt_claim(uint32_t base, uint32_t pages, uint64_t *saved)
 }
 
 /* Gemeinsame Vorpruefung: Gen9, Framebuffer erkannt, GGTT-Eintrag der angezeigten Surface im Stolen Memory */
-static int preflight(const char *what)
+int igd_preflight(const char *what)
 {
-    int p = info.scanout_pipe;
-    if (!info.gen9 || !regs || !ggtt || p < 0) {
+    int p = igd_state.scanout_pipe;
+    if (!igd_state.gen9 || !igd_regs || !igd_ggtt || p < 0) {
         kprintf("igdtest: keine passende Intel-GPU / kein erkannter Framebuffer\n");
         return -1;
     }
     kprintf("igdtest: %s auf Pipe %c\n", what, 'A' + p);
-    uint32_t surf = rd(PLANE_SURF(p)) & ~0xFFFu;
-    uint64_t pte = ggtt[surf >> 12];
+    uint32_t surf = igd_rd(PLANE_SURF(p)) & ~0xFFFu;
+    uint64_t pte = igd_ggtt[surf >> 12];
     kprintf("igdtest: GGTT[%#x] = %#lx, Stolen Memory @ %#lx\n", surf >> 12, (unsigned long)pte,
-            (unsigned long)stolen_base);
-    if (!(pte & PTE_VALID) || (pte & PTE_ADDR) < stolen_base || (pte & PTE_ADDR) >= stolen_base + stolen_size) {
+            (unsigned long)igd_stolen_base);
+    if (!(pte & PTE_VALID) || (pte & PTE_ADDR) < igd_stolen_base || (pte & PTE_ADDR) >= igd_stolen_base + igd_stolen_size) {
         kprintf("igdtest: GGTT-Eintrag passt nicht zum Stolen Memory, Abbruch (nichts veraendert)\n");
         return -3;
     }
-    uint32_t imr = underrun_begin(p); /* laeuft die Anzeige schon vorher sauber? */
+    uint32_t imr = igd_underrun_begin(p); /* laeuft die Anzeige schon vorher sauber? */
     thread_sleep_ms(200);
-    kprintf("igdtest: vorher (200 ms): %s\n", underrun_end(p, imr) ? "FIFO-Unterlauf! (schon vor dem Test)" :
+    kprintf("igdtest: vorher (200 ms): %s\n", igd_underrun_end(p, imr) ? "FIFO-Unterlauf! (schon vor dem Test)" :
                                                                     "kein FIFO-Unterlauf");
     return 0;
 }
@@ -340,11 +341,11 @@ static int preflight(const char *what)
 /* Nur lesen: Aufteilung des Display-Puffers und Watermarks (Voraussetzung fuer den Hardware-Mauszeiger) */
 static void dump_ddb(int p)
 {
-    uint32_t pb = rd(PLANE_BUF_CFG(p)), cb = rd(CUR_BUF_CFG(p));
-    kprintf("igd: DDB: DBUF_CTL %#x, Ebene 1 Bloecke %u-%u, Mauszeiger Bloecke %u-%u\n", rd(DBUF_CTL), pb & 0x3FF,
+    uint32_t pb = igd_rd(PLANE_BUF_CFG(p)), cb = igd_rd(CUR_BUF_CFG(p));
+    kprintf("igd: DDB: DBUF_CTL %#x, Ebene 1 Bloecke %u-%u, Mauszeiger Bloecke %u-%u\n", igd_rd(DBUF_CTL), pb & 0x3FF,
             (pb >> 16) & 0x3FF, cb & 0x3FF, (cb >> 16) & 0x3FF);
     for (int lvl = 0; lvl < 8; lvl++) {
-        uint32_t pw = rd(PLANE_WM(p, lvl)), cw = rd(CUR_WM(p, lvl));
+        uint32_t pw = igd_rd(PLANE_WM(p, lvl)), cw = igd_rd(CUR_WM(p, lvl));
         kprintf("igd:   WM%d: Ebene 1 %s %u Zeilen %u Bloecke | Mauszeiger %s %u Zeilen %u Bloecke\n", lvl,
                 (pw >> 31) ? "an " : "aus", (pw >> 14) & 0x1F, pw & 0x3FF, (cw >> 31) ? "an " : "aus",
                 (cw >> 14) & 0x1F, cw & 0x3FF);
@@ -353,15 +354,15 @@ static void dump_ddb(int p)
 
 int igd_flip_test(void)
 {
-    int p = info.scanout_pipe;
-    int pre = preflight("Stufe 2 - Page-Flipping");
+    int p = igd_state.scanout_pipe;
+    int pre = igd_preflight("Stufe 2 - Page-Flipping");
     if (pre)
         return pre;
     dump_ddb(p);
 
-    uint32_t ctl = rd(PLANE_CTL(p)), size = rd(PLANE_SIZE(p));
-    uint32_t w = (size & 0xFFF) + 1, h = ((size >> 16) & 0xFFF) + 1, stride = (rd(PLANE_STRIDE(p)) & 0x3FF) * 64;
-    uint32_t old_surf = rd(PLANE_SURF(p)) & ~0xFFFu;
+    uint32_t ctl = igd_rd(PLANE_CTL(p)), size = igd_rd(PLANE_SIZE(p));
+    uint32_t w = (size & 0xFFF) + 1, h = ((size >> 16) & 0xFFF) + 1, stride = (igd_rd(PLANE_STRIDE(p)) & 0x3FF) * 64;
+    uint32_t old_surf = igd_rd(PLANE_SURF(p)) & ~0xFFFu;
     if ((ctl & (7u << 10)) || ((ctl >> 24) & 0xF) != 4 || stride < w * 4) {
         kprintf("igdtest: Ebene ist nicht linear/32 Bit, Abbruch\n");
         return -2;
@@ -369,12 +370,12 @@ int igd_flip_test(void)
 
     /* 2. Freier GGTT-Bereich ab der Haelfte des Adressraums; alte Eintraege sichern */
     uint64_t bytes = (uint64_t)stride * h;
-    uint32_t pages = (uint32_t)((bytes + 4095) / 4096), base = ggtt_entries / 2;
+    uint32_t pages = (uint32_t)((bytes + 4095) / 4096), base = igd_ggtt_entries / 2;
     uint64_t *frames = kmalloc(sizeof(uint64_t) * pages * 2); /* [0, pages): Seiten, [pages, 2 pages): alte GGTT */
     if (!frames)
         return -6;
     uint64_t *saved = frames + pages;
-    int claim = ggtt_claim(base, pages, saved);
+    int claim = igd_ggtt_claim(base, pages, saved);
     if (claim) {
         kfree(frames);
         return claim;
@@ -399,16 +400,16 @@ int igd_flip_test(void)
             *(uint32_t *)(frames[off >> 12] + (off & 4095)) = px ^ 0x00FFFFFF;
         }
     for (uint32_t i = 0; i < pages; i++) /* die Display-Engine liest am CPU-Cache vorbei */
-        clflush_range(frames[i], 4096);
+        igd_clflush(frames[i], 4096);
 
     /* 4. GGTT-Eintraege setzen, dann umschalten */
     for (uint32_t i = 0; i < pages; i++)
-        ggtt[base + i] = frames[i] | PTE_VALID;
-    ggtt_flush();
+        igd_ggtt[base + i] = frames[i] | PTE_VALID;
+    igd_ggtt_flush();
     uint32_t new_surf = base << 12;
-    uint32_t imr = underrun_begin(p);
+    uint32_t imr = igd_underrun_begin(p);
     uint64_t t0 = time_ms();
-    wr(PLANE_SURF(p), new_surf);
+    igd_wr(PLANE_SURF(p), new_surf);
     int f1 = wait_live(p, new_surf);
     kprintf("igdtest: Flip auf %#x: %s nach %d Bild(ern), %lu ms\n", new_surf, f1 >= 0 ? "angezeigt" : "NICHT angezeigt",
             f1, (unsigned long)(time_ms() - t0));
@@ -418,7 +419,7 @@ int igd_flip_test(void)
     int worst = 0, fails = 0;
     for (int i = 0; i < 10; i++) {
         uint32_t s = (i & 1) ? new_surf : old_surf;
-        wr(PLANE_SURF(p), s);
+        igd_wr(PLANE_SURF(p), s);
         int f = wait_live(p, s);
         if (f < 0)
             fails++;
@@ -429,12 +430,12 @@ int igd_flip_test(void)
     kprintf("igdtest: 10 Wechsel: %d ohne Anzeige, laengstens %d Bild(er) bis sichtbar\n", fails, worst);
 
     /* 6. Zurueck zum Original, GGTT wiederherstellen */
-    wr(PLANE_SURF(p), old_surf);
+    igd_wr(PLANE_SURF(p), old_surf);
     int f2 = wait_live(p, old_surf);
     for (uint32_t i = 0; i < pages; i++)
-        ggtt[base + i] = saved[i];
-    ggtt_flush();
-    int underrun = underrun_end(p, imr);
+        igd_ggtt[base + i] = saved[i];
+    igd_ggtt_flush();
+    int underrun = igd_underrun_end(p, imr);
     kprintf("igdtest: zurueck auf das Original: %s; FIFO-Unterlauf waehrend des Tests: %s\n",
             f2 >= 0 ? "ok" : "NICHT bestaetigt", underrun ? "JA" : "nein");
     rc = f1 >= 0 && fails == 0 && f2 >= 0 && !underrun ? 0 : -7;
@@ -466,14 +467,14 @@ static uint32_t cur_pos(int x, int y)
 
 int igd_cursor_test(void)
 {
-    int p = info.scanout_pipe;
-    int pre = preflight("Stufe 2 - Hardware-Mauszeiger");
+    int p = igd_state.scanout_pipe;
+    int pre = igd_preflight("Stufe 2 - Hardware-Mauszeiger");
     if (pre)
         return pre;
     dump_ddb(p);
 
     /* Platz im Display-Puffer: direkt hinter der Bildebene 32 Bloecke (so viel gibt Linux dem Zeiger bei einer Pipe) */
-    uint32_t plane_end = (rd(PLANE_BUF_CFG(p)) >> 16) & 0x3FF;
+    uint32_t plane_end = (igd_rd(PLANE_BUF_CFG(p)) >> 16) & 0x3FF;
     uint32_t start = plane_end + 1, end = start + 31;
     if (end >= DDB_BLOCKS) {
         kprintf("igdtest: kein Platz im Display-Puffer hinter der Bildebene (%u), Abbruch\n", plane_end);
@@ -481,9 +482,9 @@ int igd_cursor_test(void)
     }
 
     /* 64x64 ARGB = 16 KiB = 4 Seiten, in der GGTT oberhalb des Flip-Bereichs */
-    uint32_t base = ggtt_entries / 2 + 0x20000, pages = 4;
+    uint32_t base = igd_ggtt_entries / 2 + 0x20000, pages = 4;
     uint64_t frames[4], saved[4];
-    int claim = ggtt_claim(base, pages, saved);
+    int claim = igd_ggtt_claim(base, pages, saved);
     if (claim)
         return claim;
     uint32_t got = 0;
@@ -506,49 +507,49 @@ int igd_cursor_test(void)
             *(uint32_t *)(frames[off >> 12] + (off & 4095)) = px;
         }
     for (uint32_t i = 0; i < pages; i++) {
-        clflush_range(frames[i], 4096);
-        ggtt[base + i] = frames[i] | PTE_VALID;
+        igd_clflush(frames[i], 4096);
+        igd_ggtt[base + i] = frames[i] | PTE_VALID;
     }
-    ggtt_flush();
+    igd_ggtt_flush();
 
     /* Register sichern, Zeiger einschalten. Alle Zeiger-Register sind doppelt gepuffert: erst das Schreiben von
      * CUR_BASE uebernimmt sie beim naechsten Bildwechsel. */
-    uint32_t s_ctl = rd(CUR_CTL(p)), s_base = rd(CUR_BASE(p)), s_pos = rd(CUR_POS(p)), s_buf = rd(CUR_BUF_CFG(p));
-    uint32_t s_wm0 = rd(CUR_WM(p, 0)), surf = base << 12;
+    uint32_t s_ctl = igd_rd(CUR_CTL(p)), s_base = igd_rd(CUR_BASE(p)), s_pos = igd_rd(CUR_POS(p)), s_buf = igd_rd(CUR_BUF_CFG(p));
+    uint32_t s_wm0 = igd_rd(CUR_WM(p, 0)), surf = base << 12;
     int cx = (int)console_width_px() / 2, cy = (int)console_height_px() / 2, x = 300, y = 0;
-    uint32_t imr = underrun_begin(p);
-    wr(CUR_BUF_CFG(p), (end << 16) | start);
-    wr(CUR_WM(p, 0), (1u << 31) | (1u << 14) | 8); /* Stufe 0 an: 1 Zeile, 8 Bloecke (wie die Firmware fuer Ebene 1) */
-    wr(CUR_CTL(p), 0x27);                          /* 64x64, 32 Bit ARGB */
-    wr(CUR_POS(p), cur_pos(cx + x, cy + y));
-    wr(CUR_BASE(p), surf);
-    uint32_t f0 = rd(PIPE_FRMCOUNT(p));
-    int live = WAIT_UNTIL((rd(CUR_SURFLIVE(p)) & ~0xFFFu) == surf, 200);
+    uint32_t imr = igd_underrun_begin(p);
+    igd_wr(CUR_BUF_CFG(p), (end << 16) | start);
+    igd_wr(CUR_WM(p, 0), (1u << 31) | (1u << 14) | 8); /* Stufe 0 an: 1 Zeile, 8 Bloecke (wie die Firmware fuer Ebene 1) */
+    igd_wr(CUR_CTL(p), 0x27);                          /* 64x64, 32 Bit ARGB */
+    igd_wr(CUR_POS(p), cur_pos(cx + x, cy + y));
+    igd_wr(CUR_BASE(p), surf);
+    uint32_t f0 = igd_rd(PIPE_FRMCOUNT(p));
+    int live = WAIT_UNTIL((igd_rd(CUR_SURFLIVE(p)) & ~0xFFFu) == surf, 200);
     kprintf("igdtest: Zeiger an (DDB %u-%u): %s nach %u Bild(ern)\n", start, end, live ? "angezeigt" : "NICHT angezeigt",
-            rd(PIPE_FRMCOUNT(p)) - f0);
+            igd_rd(PIPE_FRMCOUNT(p)) - f0);
 
     /* 3 Sekunden im Kreis (Minskys Kreis-Algorithmus: nur ganze Zahlen) */
     for (int step = 0; step < 150; step++) {
         x -= y / 16;
         y += x / 16;
-        wr(CUR_POS(p), cur_pos(cx + x, cy + y));
-        wr(CUR_BASE(p), surf); /* uebernehmen */
+        igd_wr(CUR_POS(p), cur_pos(cx + x, cy + y));
+        igd_wr(CUR_BASE(p), surf); /* uebernehmen */
         thread_sleep_ms(20);
     }
 
     /* Aus und alles zurueck */
-    wr(CUR_CTL(p), s_ctl);
-    wr(CUR_POS(p), s_pos);
-    wr(CUR_BASE(p), s_base);
+    igd_wr(CUR_CTL(p), s_ctl);
+    igd_wr(CUR_POS(p), s_pos);
+    igd_wr(CUR_BASE(p), s_base);
     thread_sleep_ms(50);
-    wr(CUR_WM(p, 0), s_wm0);
-    wr(CUR_BUF_CFG(p), s_buf);
-    wr(CUR_BASE(p), s_base);
+    igd_wr(CUR_WM(p, 0), s_wm0);
+    igd_wr(CUR_BUF_CFG(p), s_buf);
+    igd_wr(CUR_BASE(p), s_base);
     thread_sleep_ms(50);
-    int underrun = underrun_end(p, imr);
+    int underrun = igd_underrun_end(p, imr);
     for (uint32_t i = 0; i < pages; i++)
-        ggtt[base + i] = saved[i];
-    ggtt_flush();
+        igd_ggtt[base + i] = saved[i];
+    igd_ggtt_flush();
     kprintf("igdtest: Zeiger wieder aus, Register und GGTT zurueck; FIFO-Unterlauf waehrend des Tests: %s\n",
             underrun ? "JA" : "nein");
     rc = live && !underrun ? 0 : -7;
@@ -573,10 +574,10 @@ free_frames:
 static int       hw_cursor;           /* Zeiger-Ebene eingerichtet */
 static uint32_t  cursor_surf;
 static int       cursor_on = -1;
-static int       flip_ready;          /* Puffer B eingerichtet */
-static uint32_t  scr_w, scr_h, scr_stride;
-static uint32_t  surf_a, surf_b;
-static uint8_t  *buf_a, *buf_b;       /* CPU-Adressen: A ueber die Aperture (write-combining), B im RAM */
+int       igd_flip_ready;          /* Puffer B eingerichtet */
+uint32_t  igd_scr_w, igd_scr_h, igd_scr_stride;
+uint32_t  igd_surf_a, igd_surf_b;
+uint8_t  *igd_buf_a, *igd_buf_b;       /* CPU-Adressen: A ueber die Aperture (write-combining), B im RAM */
 static int       front_b;             /* 1: B wird angezeigt (oder der Wechsel dorthin steht an) */
 static uint32_t  pending;             /* Surface, deren Wechsel noch nicht bestaetigt ist, 0 = keiner */
 
@@ -598,15 +599,15 @@ static void draw_cursor_image(uint64_t frames[4])
             *(uint32_t *)(frames[off >> 12] + (off & 4095)) = px;
         }
     for (int i = 0; i < 4; i++)
-        clflush_range(frames[i], 4096);
+        igd_clflush(frames[i], 4096);
 }
 
 static int setup_cursor(int p)
 {
-    uint32_t plane_end = (rd(PLANE_BUF_CFG(p)) >> 16) & 0x3FF, start = plane_end + 1, end = start + 31;
-    uint32_t base = ggtt_entries / 2 + 0x30000; /* nicht dort, wo igdtest seine Probe-Bereiche hat */
+    uint32_t plane_end = (igd_rd(PLANE_BUF_CFG(p)) >> 16) & 0x3FF, start = plane_end + 1, end = start + 31;
+    uint32_t base = igd_ggtt_entries / 2 + 0x30000; /* nicht dort, wo igdtest seine Probe-Bereiche hat */
     uint64_t saved[4], frames[4];
-    if (end >= DDB_BLOCKS || ggtt_claim(base, 4, saved) != 0)
+    if (end >= DDB_BLOCKS || igd_ggtt_claim(base, 4, saved) != 0)
         return -1;
     for (int i = 0; i < 4; i++)
         if (!(frames[i] = pmm_alloc_frame())) {
@@ -616,13 +617,13 @@ static int setup_cursor(int p)
         }
     draw_cursor_image(frames);
     for (int i = 0; i < 4; i++)
-        ggtt[base + i] = frames[i] | PTE_VALID;
-    ggtt_flush();
+        igd_ggtt[base + i] = frames[i] | PTE_VALID;
+    igd_ggtt_flush();
     cursor_surf = base << 12;
-    wr(CUR_BUF_CFG(p), (end << 16) | start);
-    wr(CUR_WM(p, 0), (1u << 31) | (1u << 14) | 8);
-    wr(CUR_CTL(p), 0);            /* erst sichtbar, wenn eine Maus da ist */
-    wr(CUR_BASE(p), cursor_surf);
+    igd_wr(CUR_BUF_CFG(p), (end << 16) | start);
+    igd_wr(CUR_WM(p, 0), (1u << 31) | (1u << 14) | 8);
+    igd_wr(CUR_CTL(p), 0);            /* erst sichtbar, wenn eine Maus da ist */
+    igd_wr(CUR_BASE(p), cursor_surf);
     hw_cursor = 1;
     cursor_on = 0;
     return 0;
@@ -630,12 +631,12 @@ static int setup_cursor(int p)
 
 static int setup_flip(int p)
 {
-    uint32_t pages = (uint32_t)(((uint64_t)scr_stride * scr_h + 4095) / 4096);
-    uint32_t base = ggtt_entries / 4; /* 1 GiB: getrennt von igdtest (ab 2 GiB) */
+    uint32_t pages = (uint32_t)(((uint64_t)igd_scr_stride * igd_scr_h + 4095) / 4096);
+    uint32_t base = igd_ggtt_entries / 4; /* 1 GiB: getrennt von igdtest (ab 2 GiB) */
     uint64_t *saved = kmalloc(sizeof(uint64_t) * pages);
     if (!saved)
         return -1;
-    int claim = ggtt_claim(base, pages, saved);
+    int claim = igd_ggtt_claim(base, pages, saved);
     kfree(saved); /* die Eintraege gehoeren ab jetzt dauerhaft uns */
     if (claim)
         return -1;
@@ -643,12 +644,12 @@ static int setup_flip(int p)
     if (!b)
         return -1;
     for (uint32_t i = 0; i < pages; i++)
-        ggtt[base + i] = (b + (uint64_t)i * 4096) | PTE_VALID;
-    ggtt_flush();
-    buf_b = (uint8_t *)b;
-    surf_b = base << 12;
+        igd_ggtt[base + i] = (b + (uint64_t)i * 4096) | PTE_VALID;
+    igd_ggtt_flush();
+    igd_buf_b = (uint8_t *)b;
+    igd_surf_b = base << 12;
     (void)p;
-    flip_ready = 1;
+    igd_flip_ready = 1;
     return 0;
 }
 
@@ -658,20 +659,20 @@ static void display_init(const BootInfo *bi)
         kprintf("igd: 'noigd': Mauszeiger und Doppelpufferung bleiben in Software\n");
         return;
     }
-    int p = info.scanout_pipe;
-    uint32_t ctl = rd(PLANE_CTL(p)), size = rd(PLANE_SIZE(p));
-    scr_w = (size & 0xFFF) + 1;
-    scr_h = ((size >> 16) & 0xFFF) + 1;
-    scr_stride = (rd(PLANE_STRIDE(p)) & 0x3FF) * 64;
-    if ((ctl & (7u << 10)) || ((ctl >> 24) & 0xF) != 4 || scr_stride < scr_w * 4) {
+    int p = igd_state.scanout_pipe;
+    uint32_t ctl = igd_rd(PLANE_CTL(p)), size = igd_rd(PLANE_SIZE(p));
+    igd_scr_w = (size & 0xFFF) + 1;
+    igd_scr_h = ((size >> 16) & 0xFFF) + 1;
+    igd_scr_stride = (igd_rd(PLANE_STRIDE(p)) & 0x3FF) * 64;
+    if ((ctl & (7u << 10)) || ((ctl >> 24) & 0xF) != 4 || igd_scr_stride < igd_scr_w * 4) {
         kprintf("igd: Ebene nicht linear/32 Bit: Mauszeiger und Doppelpufferung bleiben in Software\n");
         return;
     }
-    surf_a = info.scanout_surf;
-    buf_a = (uint8_t *)bi->fb.base;
+    igd_surf_a = igd_state.scanout_surf;
+    igd_buf_a = (uint8_t *)bi->fb.base;
     int c = setup_cursor(p), f = setup_flip(p);
     kprintf("igd: Hardware-Mauszeiger %s, Doppelpufferung %s (zweiter Puffer %u KiB im RAM)\n", c == 0 ? "an" : "AUS",
-            f == 0 ? "an" : "AUS", (uint32_t)((uint64_t)scr_stride * scr_h / 1024));
+            f == 0 ? "an" : "AUS", (uint32_t)((uint64_t)igd_scr_stride * igd_scr_h / 1024));
 }
 
 int igd_cursor_available(void)
@@ -683,13 +684,13 @@ void igd_cursor_move(int x, int y, int visible)
 {
     if (!hw_cursor)
         return;
-    int p = info.scanout_pipe;
+    int p = igd_state.scanout_pipe;
     if (visible != cursor_on) {
-        wr(CUR_CTL(p), visible ? 0x27 : 0);
+        igd_wr(CUR_CTL(p), visible ? 0x27 : 0);
         cursor_on = visible;
     }
-    wr(CUR_POS(p), cur_pos(x, y));
-    wr(CUR_BASE(p), cursor_surf); /* uebernimmt Position/Sichtbarkeit beim naechsten Bildwechsel */
+    igd_wr(CUR_POS(p), cur_pos(x, y));
+    igd_wr(CUR_BASE(p), cursor_surf); /* uebernimmt Position/Sichtbarkeit beim naechsten Bildwechsel */
 }
 
 /* Wartet, bis der zuletzt angestossene Wechsel angezeigt wird (danach wird der andere Puffer nicht mehr gelesen) */
@@ -697,8 +698,8 @@ static void wait_flip(void)
 {
     if (!pending)
         return;
-    int p = info.scanout_pipe;
-    for (int i = 0; i < 20 && (rd(PLANE_SURFLIVE(p)) & ~0xFFFu) != pending; i++)
+    int p = igd_state.scanout_pipe;
+    for (int i = 0; i < 20 && (igd_rd(PLANE_SURFLIVE(p)) & ~0xFFFu) != pending; i++)
         thread_sleep_ms(2); /* hoechstens ein Bild (20 ms bei 50 Hz); schlafend, damit andere CPUs weiterkommen */
     pending = 0;
 }
@@ -706,39 +707,39 @@ static void wait_flip(void)
 static void copy_rect(uint8_t *dst, const uint32_t *src, uint32_t pitch, int x, int y, int w, int h, int flush)
 {
     for (int yy = 0; yy < h; yy++) {
-        uint8_t *d = dst + (uint64_t)(y + yy) * scr_stride + (uint64_t)x * 4;
+        uint8_t *d = dst + (uint64_t)(y + yy) * igd_scr_stride + (uint64_t)x * 4;
         memcpy(d, src + (uint64_t)yy * pitch, (uint64_t)w * 4);
         if (flush) /* RAM-Puffer B: die Display-Engine liest am CPU-Cache vorbei */
-            clflush_range((uint64_t)d, (uint64_t)w * 4);
+            igd_clflush((uint64_t)d, (uint64_t)w * 4);
     }
     __asm__ __volatile__("sfence" : : : "memory"); /* write-combining-Puffer leeren (A) */
 }
 
 int igd_gfx_blit(const uint32_t *src, uint32_t pitch, int x, int y, int w, int h)
 {
-    if (!flip_ready || x < 0 || y < 0 || (uint32_t)(x + w) > scr_w || (uint32_t)(y + h) > scr_h)
+    if (!igd_flip_ready || x < 0 || y < 0 || (uint32_t)(x + w) > igd_scr_w || (uint32_t)(y + h) > igd_scr_h)
         return 0;
-    if (x == 0 && y == 0 && (uint32_t)w == scr_w && (uint32_t)h == scr_h) { /* ganzes Bild: in den Hintergrund, umschalten */
+    if (x == 0 && y == 0 && (uint32_t)w == igd_scr_w && (uint32_t)h == igd_scr_h) { /* ganzes Bild: in den Hintergrund, umschalten */
         wait_flip();
         int to_b = !front_b;
-        copy_rect(to_b ? buf_b : buf_a, src, pitch, 0, 0, w, h, to_b);
-        pending = to_b ? surf_b : surf_a;
-        wr(PLANE_SURF(info.scanout_pipe), pending);
+        copy_rect(to_b ? igd_buf_b : igd_buf_a, src, pitch, 0, 0, w, h, to_b);
+        pending = to_b ? igd_surf_b : igd_surf_a;
+        igd_wr(PLANE_SURF(igd_state.scanout_pipe), pending);
         front_b = to_b;
         return 1;
     }
-    copy_rect(front_b ? buf_b : buf_a, src, pitch, x, y, w, h, front_b); /* Teil-Update: in den angezeigten Puffer */
+    copy_rect(front_b ? igd_buf_b : igd_buf_a, src, pitch, x, y, w, h, front_b); /* Teil-Update: in den angezeigten Puffer */
     return 1;
 }
 
 void igd_gfx_end(void)
 {
-    if (!flip_ready)
+    if (!igd_flip_ready)
         return;
     wait_flip();
     if (front_b) { /* die Konsole zeichnet in A */
-        pending = surf_a;
-        wr(PLANE_SURF(info.scanout_pipe), surf_a);
+        pending = igd_surf_a;
+        igd_wr(PLANE_SURF(igd_state.scanout_pipe), igd_surf_a);
         wait_flip();
         front_b = 0;
     }
