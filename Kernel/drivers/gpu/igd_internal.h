@@ -19,6 +19,8 @@ void     igd_clflush(uint64_t addr, uint64_t len);   /* CPU-Cache zurueckschreib
 void     igd_ggtt_flush(void);                        /* geaenderte GGTT-Eintraege uebernehmen */
 int      igd_ggtt_claim(uint32_t base, uint32_t pages, uint64_t *saved); /* 0 = frei, alte Eintraege gesichert */
 int      igd_preflight(const char *what);             /* Vorpruefung fuer igdtest (0 = weiter) */
+uint32_t igd_underrun_begin(int pipe);                 /* FIFO-Unterlauf festhalten lassen; Ergebnis: alte Maske */
+int      igd_underrun_end(int pipe, uint32_t imr);     /* 1 = Unterlauf seit begin */
 
 /* Doppelpufferung (igd.c): A = Framebuffer der Firmware, B = zweiter Puffer im RAM */
 extern int       igd_flip_ready;
