@@ -58,7 +58,8 @@ Modus bleiben unveraendert), und ergaenzt:
 
 - **Hardware-Mauszeiger:** eigene Ebene der Pipe; Konsole und Grafikprogramme verschieben ihn nur noch
 - **Doppelpufferung:** ganze Bilder von Grafikprogrammen (`gfx_present_all`) kommen in einen verdeckten Puffer und
-  werden beim Bildwechsel umgeschaltet (kein Tearing)
+  werden beim Bildwechsel umgeschaltet (kein Tearing). Der Puffer liegt im RAM und wird mit Non-Temporal-Stores
+  beschrieben (am CPU-Cache vorbei, den die Display-Engine nicht sieht); bei 3440x1440 ca. 4 ms je Bild
 
 `noigd` in der Kommandozeile schaltet beides ab. `igdtest`, `igdtest cursor` und `igdtest blit` pruefen
 Page-Flipping, Mauszeiger und Blitter einzeln und schreiben Messwerte ins Kernel-Log (`dmesg`). `igdtest info`

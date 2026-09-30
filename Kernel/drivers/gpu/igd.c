@@ -710,15 +710,43 @@ static void wait_flip(void)
     pending = 0;
 }
 
-static void copy_rect(uint8_t *dst, const uint32_t *src, uint32_t pitch, int x, int y, int w, int h, int flush)
+/* Kopieren mit Non-Temporal-Stores (n Vielfaches von 4): die Daten gehen am Cache vorbei direkt in den RAM. Die
+ * Display-Engine liest am Cache vorbei, so ist kein clflush noetig (das war achtmal langsamer als das Kopieren
+ * selbst: igdtest info). Danach ist ein sfence noetig. */
+static void nt_copy(void *dst, const void *src, uint64_t n)
+{
+    uint8_t *d = dst;
+    const uint8_t *s = src;
+    if (((uint64_t)d & 4) && n >= 4) { /* auf 8 Byte ausrichten */
+        __asm__ __volatile__("movnti %1, %0" : "=m"(*(uint32_t *)d) : "r"(*(const uint32_t *)s));
+        d += 4, s += 4, n -= 4;
+    }
+    for (; n >= 64; d += 64, s += 64, n -= 64) /* eine Cache-Zeile am Stueck */
+        for (int k = 0; k < 64; k += 8) {
+            uint64_t v;
+            __builtin_memcpy(&v, s + k, 8);
+            __asm__ __volatile__("movnti %1, %0" : "=m"(*(uint64_t *)(d + k)) : "r"(v));
+        }
+    for (; n >= 8; d += 8, s += 8, n -= 8) {
+        uint64_t v;
+        __builtin_memcpy(&v, s, 8);
+        __asm__ __volatile__("movnti %1, %0" : "=m"(*(uint64_t *)d) : "r"(v));
+    }
+    if (n >= 4)
+        __asm__ __volatile__("movnti %1, %0" : "=m"(*(uint32_t *)d) : "r"(*(const uint32_t *)s));
+}
+
+/* nt = 1: RAM-Puffer B (Non-Temporal-Stores), sonst Framebuffer A (write-combining, normales memcpy) */
+static void copy_rect(uint8_t *dst, const uint32_t *src, uint32_t pitch, int x, int y, int w, int h, int nt)
 {
     for (int yy = 0; yy < h; yy++) {
         uint8_t *d = dst + (uint64_t)(y + yy) * igd_scr_stride + (uint64_t)x * 4;
-        memcpy(d, src + (uint64_t)yy * pitch, (uint64_t)w * 4);
-        if (flush) /* RAM-Puffer B: die Display-Engine liest am CPU-Cache vorbei */
-            igd_clflush((uint64_t)d, (uint64_t)w * 4);
+        if (nt)
+            nt_copy(d, src + (uint64_t)yy * pitch, (uint64_t)w * 4);
+        else
+            memcpy(d, src + (uint64_t)yy * pitch, (uint64_t)w * 4);
     }
-    __asm__ __volatile__("sfence" : : : "memory"); /* write-combining-Puffer leeren (A) */
+    __asm__ __volatile__("sfence" : : : "memory"); /* Non-Temporal- bzw. write-combining-Puffer leeren */
 }
 
 int igd_gfx_blit(const uint32_t *src, uint32_t pitch, int x, int y, int w, int h)
@@ -778,17 +806,6 @@ static void flush_opt(uint64_t addr, uint64_t len)
     __asm__ __volatile__("sfence" : : : "memory");
 }
 
-/* Kopieren mit Non-Temporal-Stores: die Daten gehen am Cache vorbei direkt in den RAM, kein clflush noetig */
-static void nt_copy(void *dst, const void *src, uint64_t n)
-{
-    uint64_t *d = dst;
-    const uint64_t *s = src;
-    for (uint64_t i = 0; i + 8 <= n / 8; i += 8)
-        for (int k = 0; k < 8; k++)
-            __asm__ __volatile__("movnti %1, %0" : "=m"(d[i + k]) : "r"(s[i + k]));
-    __asm__ __volatile__("sfence" : : : "memory");
-}
-
 static uint64_t us_avg(uint64_t us, uint64_t n)
 {
     return n ? us / n : 0;
@@ -826,8 +843,8 @@ int igd_info_report(void)
     for (uint64_t i = 0; i < size / 4; i++)
         sp[i] = (uint32_t)i * 2654435761u;
     int opt = has_clflushopt();
-    const char *names[] = {"memcpy ohne Zurueckschreiben (nicht anzeigbar)", "heute: memcpy + clflush je Zeile",
-                           "memcpy, danach clflushopt", "Non-Temporal-Stores (movnti)"};
+    const char *names[] = {"memcpy ohne Zurueckschreiben (nicht anzeigbar)", "frueher: memcpy + clflush je Zeile",
+                           "memcpy, danach clflushopt", "jetzt: Non-Temporal-Stores (movnti)"};
     for (int way = 0; way < 4; way++) {
         if (way == 2 && !opt) {
             kprintf("igdinfo:   %s: CPU kann kein clflushopt\n", names[way]);
@@ -840,12 +857,16 @@ int igd_info_report(void)
             if (way == 0) {
                 memcpy(igd_buf_b, sp, size);
             } else if (way == 1) {
-                copy_rect(igd_buf_b, sp, igd_scr_stride / 4, 0, 0, (int)igd_scr_w, (int)igd_scr_h, 1);
+                for (uint32_t yy = 0; yy < igd_scr_h; yy++) {
+                    uint8_t *d = igd_buf_b + (uint64_t)yy * igd_scr_stride;
+                    memcpy(d, sp + (uint64_t)yy * igd_scr_stride / 4, (uint64_t)igd_scr_w * 4);
+                    igd_clflush((uint64_t)d, (uint64_t)igd_scr_w * 4);
+                }
             } else if (way == 2) {
                 memcpy(igd_buf_b, sp, size);
                 flush_opt((uint64_t)igd_buf_b, size);
             } else {
-                nt_copy(igd_buf_b, sp, size);
+                copy_rect(igd_buf_b, sp, igd_scr_stride / 4, 0, 0, (int)igd_scr_w, (int)igd_scr_h, 1);
             }
             uint64_t t = time_us() - t0;
             if (t < best)
