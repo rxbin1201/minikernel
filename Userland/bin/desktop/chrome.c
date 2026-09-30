@@ -432,65 +432,99 @@ static int n_minimized(void)
     return n;
 }
 
-static void dock_box(int *x, int *y, int *w, int *h)
+/* Vergroesserung unter der Maus (wie bei macOS): mag laeuft weich zwischen 0 und 1, jedes Symbol waechst je nach
+ * Abstand seiner (unvergroesserten) Mitte von der Maus um bis zu 60 %. Das Dock wird entsprechend breiter; die
+ * Symbole bleiben unten buendig und ragen nach oben heraus. */
+#define MAG_MAX   0.6f
+#define MAXSLOTS  (NAPPS + MAXW)
+
+static float dock_mag;
+static int   dock_mx = -1, dock_in;
+
+typedef struct {
+    int n, nm, box_x, box_w, y, h;
+    int x[MAXSLOTS], sz[MAXSLOTS];
+} DockLayout;
+
+static void dock_layout(DockLayout *L)
 {
-    int nm = n_minimized();
-    *w = DOCK_PAD * 2 + NAPPS * ICON + (NAPPS - 1) * DOCK_GAP + (nm ? DOCK_GAP * 2 + 1 + nm * (ICON + DOCK_GAP) : 0);
-    *h = ICON + DOCK_PAD * 2;
-    *x = (W - *w) / 2;
-    *y = H - *h - U(8);
+    L->nm = n_minimized();
+    L->n = NAPPS + L->nm;
+    L->h = ICON + DOCK_PAD * 2;
+    L->y = H - L->h - U(8);
+    int sep = L->nm ? DOCK_GAP + 1 : 0;
+    int w0 = DOCK_PAD * 2 + L->n * ICON + (L->n - 1) * DOCK_GAP + sep, bx0 = (W - w0) / 2, total = 0;
+    for (int i = 0; i < L->n; i++) {
+        float c = bx0 + DOCK_PAD + i * (ICON + DOCK_GAP) + (i >= NAPPS ? sep : 0) + ICON * 0.5f;
+        float d = dock_mx < 0 ? 9 : (dock_mx - c) / (ICON * 2.3f);
+        d = d < 0 ? -d : d;
+        float f = d < 1 ? (1 + fsin(3.14159265f * d + 1.5707963f)) * 0.5f : 0; /* (1 + cos(pi d)) / 2 */
+        L->sz[i] = (int)(ICON * (1 + MAG_MAX * dock_mag * f) + 0.5f);
+        total += L->sz[i];
+    }
+    total += (L->n - 1) * DOCK_GAP + sep;
+    L->box_w = total + DOCK_PAD * 2;
+    L->box_x = (W - L->box_w) / 2;
+    int x = L->box_x + DOCK_PAD;
+    for (int i = 0; i < L->n; i++) {
+        if (i == NAPPS)
+            x += sep;
+        L->x[i] = x;
+        x += L->sz[i] + DOCK_GAP;
+    }
 }
 
 int dock_top(void)
 {
-    int x, y, w, h;
-    dock_box(&x, &y, &w, &h);
-    return y - U(6);
+    return H - (ICON + DOCK_PAD * 2) - U(8) - U(6);
 }
 
-static int slot_x(int i) /* linke Kante von Symbol i (Programme, dann minimierte Fenster) */
+void dock_slot_of(const Win *w, int *x, int *y, int *size)
 {
-    int x, y, w, h;
-    dock_box(&x, &y, &w, &h);
-    int sx = x + DOCK_PAD + i * (ICON + DOCK_GAP);
-    if (i >= NAPPS)
-        sx += DOCK_GAP + 1;
-    return sx;
+    DockLayout L;
+    dock_layout(&L);
+    int k = 0;
+    for (int i = 0; i < MAXW && &wins[i] != w; i++)
+        k += wins[i].used && wins[i].minimized;
+    int i = NAPPS + k < L.n ? NAPPS + k : L.n - 1;
+    *x = L.x[i];
+    *size = L.sz[i];
+    *y = L.y + L.h - DOCK_PAD - L.sz[i];
 }
 
 void draw_dock(void)
 {
     Surface *s = &gfx_screen;
-    int x, y, w, h, r = U(18);
-    dock_box(&x, &y, &w, &h);
-    gfx_shadow(s, x, y + U(2), w, h, r, U(22), 55);
-    gfx_blit_round(s, &bg_blur, x, y, x, y, w, h, r);
-    gfx_round_rect(s, x, y, w, h, r, 0xFFFFFF, 100);
-    gfx_round_frame(s, x, y, w, h, r, 0xFFFFFF, 150);
-    int nm = n_minimized();
-    for (int i = 0; i < NAPPS + nm; i++) {
-        int ix = slot_x(i), iy = y + DOCK_PAD;
+    DockLayout L;
+    dock_layout(&L);
+    int r = U(18);
+    gfx_shadow(s, L.box_x, L.y + U(2), L.box_w, L.h, r, U(22), 55);
+    gfx_blit_round(s, &bg_blur, L.box_x, L.y, L.box_x, L.y, L.box_w, L.h, r);
+    gfx_round_rect(s, L.box_x, L.y, L.box_w, L.h, r, 0xFFFFFF, 100);
+    gfx_round_frame(s, L.box_x, L.y, L.box_w, L.h, r, 0xFFFFFF, 150);
+    for (int i = 0; i < L.n; i++) {
+        int ix = L.x[i], sz = L.sz[i], iy = L.y + L.h - DOCK_PAD - sz;
         if (i < NAPPS) {
-            draw_app_icon(s, dock_apps[i].action, ix, iy, ICON);
+            draw_app_icon(s, dock_apps[i].action, ix, iy, sz);
             int running = 0;
             for (int k = 0; k < MAXW; k++)
                 running |= wins[k].used && wins[k].kind == dock_apps[i].kind;
             if (running)
-                gfx_disc(s, ix + ICON * 0.5f, y + h - U(4), U(2) * 1.1f, 0x1D1D1F, 200);
+                gfx_disc(s, ix + sz * 0.5f, L.y + L.h - U(4), U(2) * 1.1f, 0x1D1D1F, 200);
         } else {
             Win *mw = minimized_win(i - NAPPS);
-            if (mw)
-                draw_app_icon(s, icon_of_win(mw), ix, iy, ICON);
+            if (mw && mw->anim != ANIM_MIN) /* noch auf dem Weg ins Dock: Platz frei lassen */
+                draw_app_icon(s, icon_of_win(mw), ix, iy, sz);
         }
     }
-    if (nm) {
-        int sx = slot_x(NAPPS) - DOCK_GAP / 2 - 1;
-        gfx_blend_fill(s, sx, y + DOCK_PAD, 1, ICON, 0x000000, 40);
-    }
-    if (dock_hover >= 0 && dock_hover < NAPPS + nm) { /* Name ueber dem Symbol */
-        const char *name = dock_hover < NAPPS ? dock_apps[dock_hover].name : minimized_win(dock_hover - NAPPS)->title;
+    if (L.nm)
+        gfx_blend_fill(s, L.x[NAPPS] - DOCK_GAP / 2 - 1, L.y + DOCK_PAD, 1, ICON, 0x000000, 40);
+    if (dock_hover >= 0 && dock_hover < L.n) { /* Name ueber dem Symbol */
+        Win *mw = dock_hover >= NAPPS ? minimized_win(dock_hover - NAPPS) : 0;
+        const char *name = dock_hover < NAPPS ? dock_apps[dock_hover].name : mw ? mw->title : "";
         int tw = text_width(font_ui, FS, name), bw = tw + U(22), bh = U(24);
-        int bx = slot_x(dock_hover) + ICON / 2 - bw / 2, by = y - bh - U(10);
+        int sz = L.sz[dock_hover];
+        int bx = L.x[dock_hover] + sz / 2 - bw / 2, by = L.y + L.h - DOCK_PAD - sz - bh - U(10);
         if (bx < U(4)) bx = U(4);
         if (bx + bw > W - U(4)) bx = W - U(4) - bw;
         gfx_shadow(s, bx, by + U(2), bw, bh, U(6), U(10), 45);
@@ -500,36 +534,56 @@ void draw_dock(void)
     }
 }
 
+/* Streifen unten, in dem Dock, vergroesserte Symbole und Namen liegen koennen */
 void damage_dock(void)
 {
-    int x, y, w, h;
-    dock_box(&x, &y, &w, &h);
-    int grow = ICON + DOCK_GAP; /* ein Symbol mehr/weniger und der Name darueber */
-    damage(x - grow - U(30), y - U(50), w + 2 * grow + U(60), h + U(60));
+    int top = H - (ICON + DOCK_PAD * 2) - U(8) - (int)(ICON * MAG_MAX) - U(60);
+    damage(0, top, W, H - top);
 }
 
 int dock_hit(int px, int py)
 {
-    int x, y, w, h;
-    dock_box(&x, &y, &w, &h);
-    if (py < y || py >= y + h || px < x || px >= x + w)
+    DockLayout L;
+    dock_layout(&L);
+    if (py >= L.y + L.h || px < L.box_x || px >= L.box_x + L.box_w)
         return -1;
-    int nm = n_minimized();
-    for (int i = 0; i < NAPPS + nm; i++) {
-        int ix = slot_x(i);
-        if (px >= ix - DOCK_GAP / 2 && px < ix + ICON + DOCK_GAP / 2)
+    for (int i = 0; i < L.n; i++)
+        if (px >= L.x[i] - DOCK_GAP / 2 && px < L.x[i] + L.sz[i] + DOCK_GAP / 2 &&
+            py >= (py >= L.y ? L.y : L.y + L.h - DOCK_PAD - L.sz[i]))
             return i;
-    }
     return -1;
 }
 
 void dock_hover_at(int px, int py)
 {
+    DockLayout L;
+    dock_layout(&L);
+    /* Bereich der Vergroesserung: das Dock und darueber, so hoch die Symbole gerade ragen */
+    int zone_top = L.y - (int)(ICON * MAG_MAX * dock_mag);
+    int in = px >= L.box_x && px < L.box_x + L.box_w && py >= zone_top && py < H;
+    int moved = in && px != dock_mx;
+    dock_in = in;
+    if (in)
+        dock_mx = px;
     int h = dock_hit(px, py);
-    if (h != dock_hover) {
+    if (h != dock_hover || (moved && dock_mag > 0.01f)) {
         dock_hover = h;
         damage_dock();
     }
+}
+
+void dock_tick(s64 dt_us)
+{
+    float target = dock_in ? 1.0f : 0.0f;
+    if (dock_mag == target)
+        return;
+    float k = (float)dt_us / 90000.0f; /* etwa 90 ms bis fast ganz */
+    dock_mag += (target - dock_mag) * (k > 1 ? 1 : k);
+    if ((target - dock_mag) * (target - dock_mag) < 0.0001f)
+        dock_mag = target;
+    if (dock_mag == 0)
+        dock_mx = -1;
+    damage_dock();
 }
 
 void dock_click(int i)

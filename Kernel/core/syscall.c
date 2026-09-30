@@ -289,7 +289,7 @@ static int syscall_unlocked(SyscallFrame *f)
     Process *p = process_current();
     int64_t ret;
     switch (f->rax) {
-    case SYS_TICKS:  ret = (int64_t)apic_ticks(); break;
+    case SYS_TICKS:  ret = f->rdi == 1 ? (int64_t)time_us() : (int64_t)apic_ticks(); break;
     case SYS_GETPID: ret = process_pid(p); break;
     case SYS_TIME:   ret = (int64_t)rtc_now(); break;
     case SYS_YIELD:
@@ -354,7 +354,7 @@ static void syscall_do(SyscallFrame *f)
     case SYS_GETPID:   ret = process_pid(process_current()); break;
     case SYS_YIELD:    thread_yield(); ret = 0; break;
     case SYS_SLEEP_MS: sys_sleep(f->rdi); ret = 0; break;
-    case SYS_TICKS:    ret = (int64_t)apic_ticks(); break;
+    case SYS_TICKS:    ret = f->rdi == 1 ? (int64_t)time_us() : (int64_t)apic_ticks(); break;
     case SYS_GETCHAR:  ret = keyboard_getchar(); break;
     case SYS_OPEN:     ret = sys_open(f->rdi, f->rsi); break;
     case SYS_READ:     ret = sys_read(f->rdi, f->rsi, f->rdx); break;

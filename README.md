@@ -90,6 +90,10 @@ laeuft, rechts die minimierten Fenster). Fenster haben runde Ecken, weiche Schat
 (schliessen, minimieren, zoomen; Doppelklick auf die Titelleiste zoomt). Menueleiste und Dock sind Milchglas ueber
 einem berechneten Farbverlauf. Ab 1300 Pixel Hoehe wird alles um 25 % groesser.
 
+Animationen (nach der Uhr, nicht nach Bildern): Fenster blenden beim Oeffnen und Schliessen weich ein und aus, fliegen
+beim Minimieren an ihren Platz im Dock und von dort zurueck, Zoomen gleitet auf die neue Groesse. Das Dock
+vergroessert die Symbole unter der Maus (bis 60 %, Nachbarn abgestuft).
+
 - Schriften: Inter und JetBrains Mono (SIL Open Font License, verkleinert in `/share/fonts`), gerastert mit
   stb_truetype (gemeinfrei, `Userland/include/stb_truetype.h`); `ttf.h` fuer Programme
 - Zeichnen mit Kantenglaettung und Transparenz (`Userland/lib/draw.c`): abgerundete Rechtecke, Kreise, Linien,

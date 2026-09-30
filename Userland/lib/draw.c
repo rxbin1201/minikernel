@@ -272,3 +272,32 @@ void gfx_round_rect_grad(Surface *s, int x, int y, int w, int h, int r, u32 top,
         }
     }
 }
+
+/* Ganzes Bild src auf das Rechteck (dx, dy, dw, dh) skalieren (bilinear), mit runden Ecken (Radius r) und
+ * Transparenz alpha: fuer Animationen (Fenster auf/zu, ins Dock) */
+void gfx_blit_scaled(Surface *dst, const Surface *src, int dx, int dy, int dw, int dh, int alpha, int r)
+{
+    int x0 = dx, y0 = dy, x1 = dx + dw, y1 = dy + dh;
+    if (dw < 2 || dh < 2 || alpha <= 0 || !clip_box(dst, &x0, &y0, &x1, &y1))
+        return;
+    if (r * 2 > dw) r = dw / 2;
+    if (r * 2 > dh) r = dh / 2;
+    u64 stepx = ((u64)(src->w - 1) << 16) / (u64)(dw - 1), stepy = ((u64)(src->h - 1) << 16) / (u64)(dh - 1);
+    for (int yy = y0; yy < y1; yy++) {
+        u64 fy = (u64)(yy - dy) * stepy;
+        int sy = (int)(fy >> 16), wy = (int)(fy >> 8 & 0xFF), sy1 = sy + 1 < src->h ? sy + 1 : sy;
+        const u32 *r0 = src->px + (u64)sy * (u64)src->w, *r1 = src->px + (u64)sy1 * (u64)src->w;
+        u32 *dp = dst->px + (u64)yy * (u64)dst->w;
+        for (int xx = x0; xx < x1; xx++) {
+            u64 fx = (u64)(xx - dx) * stepx;
+            int sx = (int)(fx >> 16), wx = (int)(fx >> 8 & 0xFF), sx1 = sx + 1 < src->w ? sx + 1 : sx;
+            u32 top = gfx_mix(r0[sx], r0[sx1], wx), bot = gfx_mix(r1[sx], r1[sx1], wx);
+            u32 c = gfx_mix(top, bot, wy);
+            int a = round_cov(xx, yy, dx, dy, dw, dh, r) * alpha / 256;
+            if (a >= 255)
+                dp[xx] = c;
+            else if (a > 0)
+                dp[xx] = gfx_mix(dp[xx], c, a);
+        }
+    }
+}

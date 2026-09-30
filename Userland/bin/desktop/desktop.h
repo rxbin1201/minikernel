@@ -35,6 +35,7 @@ extern int CELL_W, CELL_H;       /* Terminal: Zeichenzelle */
 #define C_TERM_BG    0x1E1E1E
 
 enum { W_TERM, W_FILES, W_TEXT, W_IMAGE, W_CALC, W_CLOCK, W_ABOUT };
+enum { ANIM_NONE, ANIM_OPEN, ANIM_CLOSE, ANIM_MIN, ANIM_RESTORE, ANIM_ZOOM };
 
 typedef struct {
     unsigned short ch;
@@ -50,6 +51,11 @@ typedef struct {
 typedef struct {
     int  used, kind, x, y, w, h, minimized;
     int  zoomed, zx, zy, zw, zh;  /* gezoomt: vorige Lage */
+    /* Animation: das Fensterbild wird von Rechteck from nach to skaliert (und ein-/ausgeblendet) */
+    int  anim;                    /* ANIM_* */
+    s64  anim_t0;                 /* Beginn (Mikrosekunden) */
+    int  anim_ms;
+    int  from[4], to[4], last[4]; /* x, y, w, h; last = zuletzt gezeichnet (fuer das Neuzeichnen) */
     char title[80];
     /* Das Fenster wird in ein eigenes Bild gezeichnet (nur wenn sich sein Inhalt aendert); auf den Bildschirm wird es
      * nur kopiert (mit runden Ecken). Neu zu zeichnen ist das Rechteck [rx0, rx1) x [ry0, ry1) in Fensterkoordinaten. */
@@ -98,6 +104,7 @@ extern int      W, H;
 extern int      drag_mode;   /* 0 = nichts, 1 = verschieben, 2 = Groesse */
 extern Win     *drag_win;
 extern int      mouse_x, mouse_y;
+extern s64      now_us;      /* Zeit dieses Bildes (Mikrosekunden) */
 void do_action(int a);
 
 /* ---------- chrome.c: Masse, Hintergrund, Menueleiste, Dock, Menues, Symbole ---------- */
@@ -121,6 +128,8 @@ int  dock_hit(int x, int y);     /* Symbol, -1 = keins */
 void dock_click(int i);
 void dock_hover_at(int x, int y);
 int  dock_top(void);             /* Oberkante des Docks (Fenster enden darueber) */
+void dock_slot_of(const Win *w, int *x, int *y, int *size); /* wo das minimierte Fenster im Dock liegt */
+void dock_tick(s64 dt_us);       /* Vergroesserung unter der Maus weich nachfuehren */
 void draw_app_icon(Surface *s, int kind, int x, int y, int size); /* Programmsymbol (W_* oder A_*) */
 const char *app_name(const Win *w);
 
@@ -137,7 +146,9 @@ void raise_win(Win *w);
 void minimize(Win *w);
 void zoom_win(Win *w);
 Win *focused(void);
-void close_win(Win *w);
+void close_win(Win *w);      /* mit Animation; close_win_now sofort */
+void close_win_now(Win *w);
+void anim_tick(void);        /* laufende Fenster-Animationen weiterfuehren */
 int  title_button_at(const Win *w, int x, int y); /* 1 schliessen, 2 minimieren, 3 zoomen, 0 keiner */
 void set_button_hover(Win *w);                    /* Maus ueber den Knoepfen: Symbole zeigen */
 void draw_all(void);

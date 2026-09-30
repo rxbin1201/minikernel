@@ -11,6 +11,7 @@ int      W, H;
 int      drag_mode; /* 0 = nichts, 1 = verschieben, 2 = Groesse */
 Win     *drag_win;
 int      mouse_x, mouse_y;
+s64      now_us;
 
 static int drag_dx, drag_dy;
 static s64 last_click_tick;
@@ -83,7 +84,7 @@ static Win *window_at(int x, int y)
 {
     for (int i = nord - 1; i >= 0; i--) {
         Win *w = order[i];
-        if (!w->minimized && x >= w->x && y >= w->y && x < w->x + w->w && y < w->y + w->h)
+        if (!w->minimized && w->anim != ANIM_CLOSE && x >= w->x && y >= w->y && x < w->x + w->w && y < w->y + w->h)
             return w;
     }
     return 0;
@@ -180,6 +181,13 @@ static void mouse_down(Event *e)
     content_click(w, e->x, e->y, dbl);
 }
 
+/* Symbole in den drei Knoepfen, wenn die Maus darueber steht (auch nach Klicks, die Fenster bewegen) */
+static void update_button_hover(int x, int y)
+{
+    Win *w = window_at(x, y);
+    set_button_hover(w && y < w->y + TITLE_H && x < w->x + U(70) ? w : 0);
+}
+
 static void mouse_move(Event *e)
 {
     mouse_x = e->x;
@@ -193,8 +201,7 @@ static void mouse_move(Event *e)
     }
     if (!drag_mode) {
         dock_hover_at(e->x, e->y);
-        Win *w = window_at(e->x, e->y); /* Symbole in den drei Knoepfen, wenn die Maus darueber steht */
-        set_button_hover(w && e->y < w->y + TITLE_H && e->x < w->x + U(70) ? w : 0);
+        update_button_hover(e->x, e->y);
         return;
     }
     Win *w = drag_win;
@@ -296,6 +303,7 @@ void _start(int argc, char **argv)
     sys_tty_fg(0); /* Strg+C geht an die Fenster, nicht an den Desktop */
     W = gfx_screen.w;
     H = gfx_screen.h;
+    now_us = sys_time_us();
     ui_init();
     make_background();
     open_terminal();
@@ -305,12 +313,14 @@ void _start(int argc, char **argv)
     s64 last_sec = -1, last_min = -1;
     Win *last_focus = focused();
     while (!quit) {
+        s64 prev_us = now_us;
+        now_us = sys_time_us();
         Event e;
         int n = 0;
         while (n < 64 && gfx_poll(&e)) {
             n++;
             if (e.type == EV_KEY) key(e.key);
-            else if (e.type == EV_DOWN) mouse_down(&e);
+            else if (e.type == EV_DOWN) { mouse_down(&e); update_button_hover(e.x, e.y); }
             else if (e.type == EV_UP) drag_mode = 0;
             else if (e.type == EV_MOVE) mouse_move(&e);
             else if (e.type == EV_WHEEL) wheel(&e);
@@ -350,12 +360,14 @@ void _start(int argc, char **argv)
                 damage_menubar();
             }
         }
+        anim_tick();
+        dock_tick(now_us - prev_us);
         draw_all(); /* direkt nach dem Bildwechsel: was sich geaendert hat, steht bis zum naechsten Bild */
         gfx_vsync();
     }
     for (int i = 0; i < MAXW; i++)
         if (wins[i].used)
-            close_win(&wins[i]);
+            close_win_now(&wins[i]);
     gfx_close();
     sys_exit(0);
 }

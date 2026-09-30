@@ -69,6 +69,83 @@ void win_dirty(Win *w, int x, int y, int ww, int hh)
 void win_dirty_all(Win *w) { win_dirty(w, 0, 0, w->w, w->h); }
 
 /* ======================================================================================================================
+ * Animationen: Fensterbild von Rechteck from nach to, weich beschleunigt/abgebremst
+ * ==================================================================================================================== */
+
+static void set4(int *r, int x, int y, int w, int h) { r[0] = x; r[1] = y; r[2] = w; r[3] = h; }
+
+static void anim_start(Win *w, int type, const int *from, const int *to, int ms)
+{
+    w->anim = type;
+    w->anim_t0 = now_us;
+    w->anim_ms = ms;
+    memcpy(w->from, from, sizeof(w->from));
+    memcpy(w->to, to, sizeof(w->to));
+    memcpy(w->last, from, sizeof(w->last));
+}
+
+/* Rechteck um r schrumpfen/wachsen (Faktor pct/100) um die Mitte */
+static void scaled_rect(const Win *w, int pct, int *r)
+{
+    int nw = w->w * pct / 100, nh = w->h * pct / 100;
+    set4(r, w->x + (w->w - nw) / 2, w->y + (w->h - nh) / 2, nw, nh);
+}
+
+/* Stand der Animation: Rechteck und Deckkraft (0-255) */
+static void anim_state(const Win *w, int *r, int *alpha)
+{
+    float t = (float)(now_us - w->anim_t0) / (w->anim_ms * 1000.0f);
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    float e;
+    if (w->anim == ANIM_OPEN) {
+        float u = 1 - t;
+        e = 1 - u * u * u; /* schnell los, sanft ankommen */
+    } else if (w->anim == ANIM_CLOSE) {
+        e = t * t;
+    } else {
+        e = t < 0.5f ? 4 * t * t * t : 1 - (-2 * t + 2) * (-2 * t + 2) * (-2 * t + 2) / 2; /* weich an beiden Enden */
+    }
+    for (int i = 0; i < 4; i++)
+        r[i] = w->from[i] + (int)((w->to[i] - w->from[i]) * e);
+    switch (w->anim) {
+    case ANIM_OPEN: *alpha = (int)(255 * (t * 2 < 1 ? t * 2 : 1)); break;
+    case ANIM_CLOSE: *alpha = (int)(255 * (1 - e)); break;
+    case ANIM_MIN: *alpha = (int)(255 - 120 * e); break;
+    case ANIM_RESTORE: *alpha = (int)(135 + 120 * e); break;
+    default: *alpha = 255;
+    }
+}
+
+static void damage_rect_shadow(const int *r)
+{
+    damage(r[0] - SHADOW, r[1] - SHADOW + shadow_dy(), r[2] + 2 * SHADOW, r[3] + 2 * SHADOW);
+}
+
+void anim_tick(void)
+{
+    for (int i = 0; i < MAXW; i++) {
+        Win *w = &wins[i];
+        if (!w->used || !w->anim)
+            continue;
+        int r[4], a;
+        anim_state(w, r, &a);
+        damage_rect_shadow(w->last);
+        damage_rect_shadow(r);
+        memcpy(w->last, r, sizeof(r));
+        if (now_us - w->anim_t0 < (s64)w->anim_ms * 1000)
+            continue;
+        int type = w->anim;
+        w->anim = 0;
+        if (type == ANIM_CLOSE)
+            close_win_now(w);
+        else if (type == ANIM_MIN)
+            damage_dock(); /* jetzt erscheint das Fenster im Dock */
+        else
+            damage_win(w);
+    }
+}
+
+/* ======================================================================================================================
  * Fensterverwaltung
  * ==================================================================================================================== */
 
@@ -106,7 +183,10 @@ Win *new_window(int kind, const char *title, int w, int h)
             n->tr0 = 1;
             order[nord++] = n;
             win_dirty_all(n);
-            damage_win(n);
+            int from[4], to[4];
+            scaled_rect(n, 92, from);
+            set4(to, n->x, n->y, n->w, n->h);
+            anim_start(n, ANIM_OPEN, from, to, 200);
             damage_menubar();
             damage_dock();
             return n;
@@ -126,8 +206,13 @@ void raise_win(Win *w)
     for (; i < nord - 1; i++)
         order[i] = order[i + 1];
     order[nord - 1] = w;
-    if (w->minimized) {
+    if (w->minimized) { /* aus dem Dock zurueck: vom Symbol auf die alte Groesse */
+        int from[4], to[4], sz;
+        dock_slot_of(w, &from[0], &from[1], &sz);
+        set4(from, from[0], from[1], sz, sz * w->h / (w->w ? w->w : 1));
         w->minimized = 0;
+        set4(to, w->x, w->y, w->w, w->h);
+        anim_start(w, ANIM_RESTORE, from, to, 280);
         damage_dock();
     }
     if (old && old != w)
@@ -140,7 +225,12 @@ void raise_win(Win *w)
 void minimize(Win *w)
 {
     damage_win(w);
-    w->minimized = 1;
+    w->minimized = 1; /* das Dock macht schon Platz: dorthin schrumpft das Fenster */
+    int from[4], to[4], sz;
+    set4(from, w->x, w->y, w->w, w->h);
+    dock_slot_of(w, &to[0], &to[1], &sz);
+    set4(to, to[0], to[1] + sz / 2 - sz * w->h / (2 * (w->w ? w->w : 1)), sz, sz * w->h / (w->w ? w->w : 1));
+    anim_start(w, ANIM_MIN, from, to, 280);
     damage_dock();
     damage_menubar();
     Win *f = focused();
@@ -151,6 +241,8 @@ void minimize(Win *w)
 void zoom_win(Win *w)
 {
     damage_win(w);
+    int from[4];
+    set4(from, w->x, w->y, w->w, w->h);
     if (w->zoomed) {
         w->x = w->zx; w->y = w->zy; w->w = w->zw; w->h = w->zh;
         w->zoomed = 0;
@@ -165,18 +257,41 @@ void zoom_win(Win *w)
     if (w->kind == W_TERM)
         term_alloc(w);
     win_dirty_all(w);
-    damage_win(w);
+    int to[4];
+    set4(to, w->x, w->y, w->w, w->h);
+    anim_start(w, ANIM_ZOOM, from, to, 220);
 }
 
 Win *focused(void)
 {
     for (int i = nord - 1; i >= 0; i--)
-        if (!order[i]->minimized)
+        if (!order[i]->minimized && order[i]->anim != ANIM_CLOSE)
             return order[i];
     return 0;
 }
 
+/* Schliessen: erst ausblenden (das Bild bleibt so lange), dann wirklich schliessen */
 void close_win(Win *w)
+{
+    if (w->anim == ANIM_CLOSE)
+        return;
+    if (w->minimized || !w->buf.px) {
+        close_win_now(w);
+        return;
+    }
+    int from[4], to[4];
+    set4(from, w->x, w->y, w->w, w->h);
+    scaled_rect(w, 92, to);
+    anim_start(w, ANIM_CLOSE, from, to, 160);
+    if (drag_win == w)
+        drag_mode = 0;
+    damage_menubar();
+    Win *f = focused();
+    if (f)
+        win_dirty(f, 0, 0, f->w, TITLE_H);
+}
+
+void close_win_now(Win *w)
 {
     if (w->kind == W_TERM) {
         if (w->to_child >= 0)
@@ -347,8 +462,17 @@ static void compose(const Clip *r)
     Win *f = focused();
     for (int i = 0; i < nord; i++) {
         Win *w = order[i];
-        if (w->minimized || !w->buf.px)
+        if (!w->buf.px || (w->minimized && w->anim != ANIM_MIN))
             continue;
+        if (w->anim) { /* waehrend der Animation: skaliert und ein-/ausgeblendet */
+            int r[4], a;
+            anim_state(w, r, &a);
+            int rad = RADIUS * r[2] / (w->w ? w->w : 1);
+            gfx_shadow(&gfx_screen, r[0], r[1] + shadow_dy() * r[2] / (w->w ? w->w : 1), r[2], r[3], rad, SHADOW,
+                       (w == f ? 95 : 55) * a / 255);
+            gfx_blit_scaled(&gfx_screen, &w->buf, r[0], r[1], r[2], r[3], a, rad);
+            continue;
+        }
         if (w->x - SHADOW >= x1 || w->x + w->w + SHADOW <= x0 || w->y - SHADOW >= y1 || w->y + w->h + 2 * SHADOW <= y0)
             continue;
         gfx_shadow(&gfx_screen, w->x, w->y + shadow_dy(), w->w, w->h, RADIUS, SHADOW, w == f ? 95 : 55);
@@ -357,7 +481,7 @@ static void compose(const Clip *r)
     }
     if (y0 < MENUBAR_H)
         draw_menubar();
-    if (y1 > dock_top() - U(60))
+    if (y1 > dock_top() - DOCK_H - U(100)) /* vergroesserte Symbole und Namen ragen hoch */
         draw_dock();
     draw_menu();
     gfx_reset_base_clip();

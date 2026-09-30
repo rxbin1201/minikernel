@@ -222,6 +222,7 @@ static inline s64 sys_getpid(void)                            { return syscall3(
 static inline void sys_yield(void)                            { syscall3(SYS_YIELD, 0, 0, 0); }
 static inline void sys_sleep_ms(u64 ms)                       { syscall3(SYS_SLEEP_MS, ms, 0, 0); }
 static inline s64 sys_ticks(void)                             { return syscall3(SYS_TICKS, 0, 0, 0); }
+static inline s64 sys_time_us(void)                           { return syscall3(SYS_TICKS, 1, 0, 0); } /* Mikrosekunden seit Start */
 static inline s64 sys_getchar(void)                           { return syscall3(SYS_GETCHAR, 0, 0, 0); }
 static inline s64 sys_open(const char *path, int flags)       { return syscall3(SYS_OPEN, (u64)path, flags, 0); }
 static inline s64 sys_mkdir(const char *path)                 { return syscall3(SYS_MKDIR, (u64)path, 0, 0); }

@@ -10,7 +10,7 @@
 #define SYS_GETPID    3
 #define SYS_YIELD     4
 #define SYS_SLEEP_MS  5  /* (ms), wird durch Ctrl-C/kill unterbrochen */
-#define SYS_TICKS     6  /* -> Timer-Ticks seit Start (100 Hz) */
+#define SYS_TICKS     6  /* (0) -> Timer-Ticks seit Start (100 Hz); (1) -> Mikrosekunden seit Start */
 #define SYS_GETCHAR   7  /* -> Zeichen oder -1, wenn keins bereitliegt (roh, ohne Terminal-Zeilenmodus) */
 #define SYS_OPEN      8  /* (path, flags) -> fd; flags wie Linux: O_WRONLY 1, O_RDWR 2, O_CREAT 0x40, O_TRUNC 0x200, O_APPEND 0x400 */
 #define SYS_READ      9  /* (fd, buf, len) -> gelesene Bytes, 0 = Dateiende/Ende der Pipe */
