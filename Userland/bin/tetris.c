@@ -1,7 +1,8 @@
 #include "gfx.h"
+#include "sound.h"
 
 /* tetris: Pfeil links/rechts bewegen, Pfeil hoch drehen, Pfeil runter schneller, Leertaste fallen lassen,
- * p Pause, Esc beenden. Punkte fuer volle Reihen; alle 10 Reihen wird es schneller. */
+ * p Pause, Esc beenden. Punkte fuer volle Reihen; alle 10 Reihen wird es schneller. Mit Soundkarte: Effekte. */
 
 #define COLS 10
 #define ROWS 20
@@ -57,8 +58,12 @@ static void spawn(void)
     rot = 0;
     px = 3;
     py = -1;
-    if (!fits(piece, rot, px, py))
+    if (!fits(piece, rot, px, py)) {
         over = 1;
+        static const int down[4] = {392, 330, 262, 196}; /* abwaerts: Game Over */
+        for (int i = 0; i < 4; i++)
+            snd_tone(down[i], i == 3 ? 300 : 130, 55);
+    }
 }
 
 static void reset(void)
@@ -147,6 +152,13 @@ static void lock_piece(void)
             y++; /* dieselbe Zeile noch einmal pruefen */
         }
     }
+    if (cleared) { /* aufsteigend; vier Reihen auf einmal mit Schlusston */
+        static const int up[4] = {523, 659, 784, 1047};
+        for (int i = 0; i < (cleared == 4 ? 4 : 3); i++)
+            snd_tone(up[i], cleared == 4 ? 90 : 55, 55);
+    } else {
+        snd_tone(220, 30, 40); /* Stein liegt */
+    }
     static const int pts[5] = {0, 100, 300, 500, 800};
     score += pts[cleared] * (level + 1);
     lines += cleared;
@@ -162,6 +174,7 @@ void _start(int argc, char **argv)
         sys_exit(1);
     sys_tty_fg(0);
     gfx_show_cursor(0);
+    snd_open();
     rng ^= (u64)sys_ticks() * 2654435761ULL + (u64)sys_time();
     cell = (gfx_screen.h - 60) / ROWS;
     if (cell > 36)
@@ -207,6 +220,7 @@ void _start(int argc, char **argv)
                     if (fits(piece, nr, px + kicks[kick], py)) {
                         rot = nr;
                         px += kicks[kick];
+                        snd_tone(1400, 12, 20);
                         break;
                     }
                 }

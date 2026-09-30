@@ -1,6 +1,8 @@
 #include "gfx.h"
+#include "sound.h"
 
-/* snake: Pfeiltasten lenken, Futter macht laenger und schneller. Leertaste = Pause/neues Spiel, Esc beendet. */
+/* snake: Pfeiltasten lenken, Futter macht laenger und schneller. Leertaste = Pause/neues Spiel, Esc beendet.
+ * Mit Soundkarte: Toene beim Fressen und beim Aufprall. */
 
 #define CELL 20
 #define MAXLEN 4096
@@ -82,6 +84,8 @@ static void step(void)
         dead = 1;
         if (score > best)
             best = score;
+        for (int i = 0; i < 4; i++) /* Aufprall: abwaerts */
+            snd_tone(330 - i * 50, i == 3 ? 250 : 90, 55);
         return;
     }
     int grow = nx == fx && ny == fy;
@@ -96,6 +100,8 @@ static void step(void)
     if (grow) {
         score += 10;
         place_food();
+        snd_tone(880, 45, 45);
+        snd_tone(1320, 60, 45);
     }
 }
 
@@ -107,6 +113,7 @@ void _start(int argc, char **argv)
         sys_exit(1);
     sys_tty_fg(0);
     gfx_show_cursor(0);
+    snd_open();
     rng ^= (u64)sys_ticks() * 2654435761ULL + (u64)sys_time();
     gw = (gfx_screen.w - 40) / CELL;
     gh = (gfx_screen.h - 60) / CELL;

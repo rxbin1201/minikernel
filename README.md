@@ -83,9 +83,13 @@ auf echter Hardware (bisher i5-8400T, UHD 630, 3440x1440 ueber HDMI).
 
 `Kernel/drivers/sound/hda.c` sucht einen HDA-Controller (PCI-Klasse 04.03), setzt ihn zurueck und fragt die Codecs
 ueber CORB/RIRB ab. Von jedem analogen Ausgang (Kopfhoerer, Line-Out, Lautsprecher) sucht er einen Weg zu einem DAC,
-schaltet ihn durch und stellt die Verstaerker ein; alle diese Ausgaenge spielen denselben Stream. Die Daten liest der
-Controller per DMA aus einem Ringpuffer (128 KiB); `SYS_AUDIO` schreibt hinein und wartet, wenn er voll ist. Ein
-Programm zur Zeit hat die Ausgabe, beim Beenden wird sie freigegeben.
+schaltet ihn durch und stellt die Verstaerker ein. Steckt an einer Buchse etwas, sind die eingebauten Lautsprecher
+aus (Auto-Mute). Bis zu 8 Programme spielen gleichzeitig: jedes hat eine Stimme, deren Abtastrate der Kernel auf
+48 kHz umrechnet; ein Mischer-Thread addiert die Stimmen und haelt den DMA-Ring der Soundkarte etwa 60 ms voraus
+gefuellt. Ohne Ton ist der Stream aus und der Thread schlaeft.
+
+- Programme: `#include "sound.h"`, `snd_open()`, `snd_tone(hz, ms, lautstaerke)`, `snd_rest(ms)` (Tetris und Snake
+  machen damit ihre Effekte); direkt ueber `SYS_AUDIO` gehen beliebige 16-Bit-Daten
 
 - `play datei.wav` spielt WAV-Dateien: PCM mit 8/16/24/32 Bit oder 32-Bit-Gleitkomma, Mono oder Stereo, jede
   Abtastrate (kann der Codec sie nicht, rechnet `play` auf 48 kHz um). Beispiel: `play /share/klang.wav`

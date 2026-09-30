@@ -116,7 +116,6 @@ static int               npaths;
 static uint32_t          rates_ok;    /* P_PCM des ersten DACs */
 static uint8_t          *ring;
 static uint64_t          ring_phys;
-static uint32_t          owner;       /* PID, 0 = frei */
 static int               running;
 static uint64_t          written, played;
 static uint32_t          last_lpib;
@@ -484,19 +483,44 @@ int hda_present(void)
     return present;
 }
 
-int hda_open(uint32_t pid, uint32_t rate, uint32_t channels)
+/* ---------- Mischer ----------
+ * Jedes Programm hat eine Stimme mit eigenem Puffer; beim Schreiben wird seine Abtastrate auf die Mischrate
+ * (48 kHz, Stereo) umgerechnet. Ein Kernel-Thread addiert alle Stimmen und haelt den Ring der Soundkarte etwa
+ * LEAD_MS voraus gefuellt: kurz genug, dass Effekte ohne spuerbare Verzoegerung kommen. Ist keine Stimme mehr offen
+ * und alles ausgespielt, geht der Stream aus und der Thread schlaeft, bis wieder Daten kommen. */
+
+#define MAX_VOICES   8
+#define VOICE_FRAMES 16384 /* je Stimme 0,34 s bei 48 kHz */
+#define LEAD_MS      60
+
+typedef struct {
+    uint32_t pid;
+    int      used, channels, vol;  /* vol: 0-256 */
+    uint64_t step, pos;            /* Quellrate / Mischrate als 32.32; Position zwischen zwei Quell-Frames */
+    int32_t  prev_l, prev_r;
+    int16_t *buf;                  /* Stereo-Frames in der Mischrate */
+    uint64_t wr, rd;               /* geschrieben / vom Mischer genommen (Frames, laufend) */
+    uint64_t done_at;              /* Ring-Position (written), bis zu der der letzte Frame gemischt ist */
+    uint64_t mixed;                /* gemischte Bytes (Mischformat) */
+} Voice;
+
+static Voice    voices[MAX_VOICES];
+static uint32_t mix_rate = 48000;
+static Event    mix_event = EVENT_INIT; /* weckt den Mischer, wenn neue Daten kommen */
+
+static Voice *voice_of(uint32_t pid)
 {
-    if (!present)
-        return HDA_ERR_NODEV;
-    if (owner && owner != pid)
-        return HDA_ERR_BUSY;
-    if (channels < 1 || channels > 2)
-        return HDA_ERR_FORMAT;
+    for (int i = 0; i < MAX_VOICES; i++)
+        if (voices[i].used && voices[i].pid == pid)
+            return &voices[i];
+    return 0;
+}
+
+/* Stream der Soundkarte starten: Mischrate, 16 Bit Stereo, alle DACs */
+static void hw_start(void)
+{
     int ok;
-    uint16_t fmt = hda_format(rate, channels == 1 ? 2 : channels, &ok);
-    if (!ok || channels != 2) /* Mono rechnet das Programm auf Stereo um (die Pins sind Stereo) */
-        return HDA_ERR_FORMAT;
-    owner = pid;
+    uint16_t fmt = hda_format(mix_rate, 2, &ok);
     stream_reset();
     memset(ring, 0, RING_BYTES);
     uint64_t *bdl = (uint64_t *)(ring + RING_BYTES); /* BDL direkt hinter dem Ringpuffer */
@@ -510,7 +534,7 @@ int hda_open(uint32_t pid, uint32_t rate, uint32_t channels)
     wr16(sd + SD_LVI, BDL_ENTRIES - 1);
     wr16(sd + SD_FMT, fmt);
     wr32(sd + SD_CTL, (rd32(sd + SD_CTL) & 0x000FFFFFu & ~0x1Fu) | (uint32_t)STREAM_TAG << 20);
-    for (int i = 0; i < npaths; i++) { /* alle DACs auf diesen Stream und dieses Format */
+    for (int i = 0; i < npaths; i++) {
         int dac = paths[i].node[paths[i].n - 1];
         cmd(paths[i].cad, dac, V_SET_FORMAT << 16 | fmt);
         cmd(paths[i].cad, dac, V_SET_STREAM << 8 | STREAM_TAG << 4);
@@ -518,82 +542,186 @@ int hda_open(uint32_t pid, uint32_t rate, uint32_t channels)
     set_dac_volume();
     automute(1);
     written = played = 0; /* nach dem Start liest der Controller ab dem Anfang des Rings */
-    bytes_per_sec = rate * 4;
+    bytes_per_sec = mix_rate * 4;
+}
+
+static void hw_stop(void)
+{
+    stream_stop();
+    dacs_release();
+}
+
+/* Ring bis LEAD_MS vor die Leseposition mit der Summe aller Stimmen fuellen */
+static void mix_some(void)
+{
+    poll_position();
+    uint64_t lead = (uint64_t)mix_rate * 4 * LEAD_MS / 1000;
+    int16_t *out = (int16_t *)ring;
+    const uint32_t ring_frames = RING_BYTES / 4;
+    while (written - played < lead) {
+        uint64_t frames = (lead - (written - played)) / 4;
+        if (frames > 1024)
+            frames = 1024;
+        if (!frames)
+            break;
+        uint64_t f0 = written / 4;
+        for (uint64_t f = 0; f < frames; f++) {
+            int32_t l = 0, r = 0;
+            for (int i = 0; i < MAX_VOICES; i++) {
+                Voice *v = &voices[i];
+                if (!v->used || v->rd == v->wr)
+                    continue;
+                const int16_t *smp = v->buf + (v->rd % VOICE_FRAMES) * 2;
+                l += (smp[0] * v->vol) >> 8;
+                r += (smp[1] * v->vol) >> 8;
+                v->rd++;
+                v->mixed += 4;
+                if (v->rd == v->wr)
+                    v->done_at = (f0 + f + 1) * 4;
+            }
+            l = l > 32767 ? 32767 : l < -32768 ? -32768 : l; /* begrenzen statt ueberlaufen */
+            r = r > 32767 ? 32767 : r < -32768 ? -32768 : r;
+            uint32_t idx = (uint32_t)((f0 + f) % ring_frames) * 2;
+            out[idx] = (int16_t)l;
+            out[idx + 1] = (int16_t)r;
+        }
+        written += frames * 4;
+    }
+    /* dahinter etwas Stille: bleibt der Mischer einmal haengen, spielt der Controller nichts Altes */
+    uint64_t guard = (uint64_t)mix_rate * 4 * 30 / 1000, room = RING_BYTES - (written - played) - 1024;
+    if (guard > room)
+        guard = room;
+    for (uint64_t k = 0; k < guard; k += 4) {
+        uint32_t idx = (uint32_t)(((written + k) / 4) % ring_frames) * 2;
+        out[idx] = out[idx + 1] = 0;
+    }
+    __asm__ __volatile__("sfence" : : : "memory");
+}
+
+static void mixer_thread(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        int used = 0, data = 0;
+        for (int i = 0; i < MAX_VOICES; i++) {
+            used |= voices[i].used;
+            data |= voices[i].used && voices[i].rd != voices[i].wr;
+        }
+        if (!running && data) {
+            hw_start();
+            mix_some();
+            stream_start();
+        } else if (running && used) {
+            mix_some();
+            automute_tick();
+        } else if (running) { /* keine Stimme mehr: nichts nachschieben (dahinter steht Stille), ausspielen, dann aus */
+            poll_position();
+            if (played >= written)
+                hw_stop();
+        }
+        if (running)
+            thread_sleep_ms(5);
+        else
+            event_wait(&mix_event, 0); /* ohne Ton: schlafen, bis hda_write Daten bringt */
+    }
+}
+
+int hda_open(uint32_t pid, uint32_t rate, uint32_t channels)
+{
+    if (!present)
+        return HDA_ERR_NODEV;
+    if (channels < 1 || channels > 2 || rate < 8000 || rate > 192000)
+        return HDA_ERR_FORMAT;
+    Voice *v = voice_of(pid);
+    for (int i = 0; !v && i < MAX_VOICES; i++)
+        if (!voices[i].used)
+            v = &voices[i];
+    if (!v)
+        return HDA_ERR_BUSY;
+    int16_t *buf = v->buf;
+    memset(v, 0, sizeof(*v));
+    v->buf = buf;
+    v->pid = pid;
+    v->channels = (int)channels;
+    v->vol = 256;
+    v->step = ((uint64_t)rate << 32) / mix_rate;
+    v->used = 1;
     return 0;
 }
 
 int64_t hda_write(uint32_t pid, const void *buf, uint64_t len)
 {
-    if (!present || owner != pid)
+    Voice *v = present ? voice_of(pid) : 0;
+    if (!v)
         return HDA_ERR_NOTOPEN;
-    const uint8_t *src = buf;
-    uint64_t done = 0;
-    len &= ~3ULL; /* ganze Stereo-Abtastwerte */
-    while (done < len) {
-        poll_position();
-        automute_tick();
-        uint64_t fill = written - played, free = RING_BYTES - 1024 - fill; /* 1 KiB Abstand zur Leseposition */
-        if (fill > RING_BYTES - 1024 || free < 256) {
-            stream_start(); /* Puffer voll: spaetestens jetzt abspielen */
+    const int16_t *src = buf;
+    uint64_t frames = len / (uint64_t)(v->channels * 2), done = 0;
+    uint32_t most = (uint32_t)(((1ULL << 32) + v->step - 1) / v->step) + 1; /* hoechstens so viele Ausgabe-Frames je Eingabe-Frame */
+    while (done < frames) {
+        if (VOICE_FRAMES - (v->wr - v->rd) < most) { /* Puffer voll: warten, bis der Mischer Platz macht */
             thread_sleep_ms(5);
+            if (!v->used || v->pid != pid)
+                return (int64_t)(done * (uint64_t)(v->channels * 2)); /* waehrenddessen geschlossen */
             continue;
         }
-        uint64_t n = len - done < free ? len - done : free;
-        uint32_t pos = (uint32_t)(written % RING_BYTES);
-        uint64_t first = RING_BYTES - pos < n ? RING_BYTES - pos : n;
-        memcpy(ring + pos, src + done, first);
-        if (n > first)
-            memcpy(ring, src + done + first, n - first);
-        written += n;
-        done += n;
-        /* dahinter Stille: laeuft das Programm nicht schnell genug nach, spielt der Controller nichts Altes */
-        uint32_t wpos = (uint32_t)(written % RING_BYTES), rpos = (uint32_t)(played % RING_BYTES);
-        uint32_t quiet = (rpos + RING_BYTES - wpos) % RING_BYTES;
-        quiet = quiet > 1024 ? quiet - 1024 : 0;
-        uint32_t q1 = RING_BYTES - wpos < quiet ? RING_BYTES - wpos : quiet;
-        memset(ring + wpos, 0, q1);
-        memset(ring, 0, quiet - q1);
-        __asm__ __volatile__("sfence" : : : "memory");
-        if (written - played >= RING_BYTES / 2)
-            stream_start();
+        while (done < frames && VOICE_FRAMES - (v->wr - v->rd) >= most) {
+            int32_t l = src[done * (uint64_t)v->channels], r = v->channels == 2 ? src[done * 2 + 1] : l;
+            while ((v->pos >> 32) == 0) { /* lineare Interpolation zwischen vorigem und diesem Quell-Frame */
+                int32_t frac = (int32_t)((v->pos >> 16) & 0xFFFF);
+                int16_t *d = v->buf + (v->wr % VOICE_FRAMES) * 2;
+                d[0] = (int16_t)(v->prev_l + (int32_t)(((int64_t)(l - v->prev_l) * frac) >> 16));
+                d[1] = (int16_t)(v->prev_r + (int32_t)(((int64_t)(r - v->prev_r) * frac) >> 16));
+                v->wr++;
+                v->pos += v->step;
+            }
+            v->pos -= 1ULL << 32;
+            v->prev_l = l;
+            v->prev_r = r;
+            done++;
+        }
+        if (!running)
+            event_signal(&mix_event);
     }
-    return (int64_t)done;
+    return (int64_t)(done * (uint64_t)(v->channels * 2));
 }
 
 int hda_drain(uint32_t pid)
 {
-    if (!present || owner != pid)
+    Voice *v = present ? voice_of(pid) : 0;
+    if (!v)
         return HDA_ERR_NOTOPEN;
-    if (written > played)
-        stream_start();
-    uint64_t end = time_ms() + 2000 + (written - played) * 1000 / (bytes_per_sec ? bytes_per_sec : 1);
-    while (running && played < written && time_ms() < end) {
-        thread_sleep_ms(5);
+    uint64_t end = time_ms() + 3000 + (v->wr - v->rd) * 1000 / mix_rate;
+    while (time_ms() < end && v->used && v->pid == pid) {
         poll_position();
-        automute_tick();
+        if (v->rd == v->wr && (!running || played >= v->done_at))
+            break;
+        thread_sleep_ms(5);
     }
-    /* Die DMA-Position laeuft der Ausgabe voraus (FIFO des Controllers; QEMU puffert deutlich mehr). Hinter den Daten
-     * steht im Ring Stille: noch etwas weiterlaufen lassen, damit das Ende nicht abgeschnitten wird. */
-    thread_sleep_ms(250);
-    stream_stop();
+    thread_sleep_ms(30); /* FIFO des Controllers */
     return 0;
 }
 
 void hda_close(uint32_t pid)
 {
-    if (!present || owner != pid || !pid)
-        return;
-    stream_stop();
-    dacs_release();
-    owner = 0;
+    Voice *v = present && pid ? voice_of(pid) : 0;
+    if (v)
+        v->used = 0;
 }
 
 uint64_t hda_played(uint32_t pid)
 {
-    if (!present || owner != pid)
-        return 0;
-    poll_position();
-    return played;
+    Voice *v = present ? voice_of(pid) : 0;
+    return v ? v->mixed : 0;
+}
+
+int hda_voice_volume(uint32_t pid, int percent)
+{
+    Voice *v = present ? voice_of(pid) : 0;
+    if (!v)
+        return HDA_ERR_NOTOPEN;
+    if (percent >= 0)
+        v->vol = (percent > 100 ? 100 : percent) * 256 / 100;
+    return v->vol * 100 / 256;
 }
 
 int hda_volume(int percent)
@@ -674,8 +802,19 @@ void hda_init(void)
     ring = (uint8_t *)r;
     ring_phys = r;
     wr32(SSYNC, 0);
+    uint64_t vm = pmm_alloc_frames((uint64_t)MAX_VOICES * VOICE_FRAMES * 4 / 4096);
+    if (!vm) {
+        kprintf("hda: kein Speicher fuer die Stimmen\n");
+        return;
+    }
+    for (int i = 0; i < MAX_VOICES; i++)
+        voices[i].buf = (int16_t *)(vm + (uint64_t)i * VOICE_FRAMES * 4);
+    if (!(rates_ok & (1u << 6)) && (rates_ok & (1u << 5)))
+        mix_rate = 44100; /* kein 48 kHz: dann 44,1 kHz mischen */
     present = 1;
     stream_reset();
     automute(1);
-    kprintf("hda: bereit, %d Ausgang/Ausgaenge, Raten %#x\n", npaths, rates_ok & 0xFFF);
+    thread_create("audio", mixer_thread, 0);
+    kprintf("hda: bereit, %d Ausgang/Ausgaenge, Raten %#x, Mischer %u Hz, bis %d Stimmen\n", npaths, rates_ok & 0xFFF,
+            mix_rate, MAX_VOICES);
 }

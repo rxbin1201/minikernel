@@ -403,6 +403,7 @@ static void syscall_do(SyscallFrame *f)
         case 3: hda_close(pid); r = 0; break;
         case 4: r = hda_volume((int)(int64_t)f->rsi); break;
         case 5: r = (int64_t)hda_played(pid); break;
+        case 6: r = hda_voice_volume(pid, (int)(int64_t)f->rsi); break;
         default: r = ERR_INVAL; break;
         }
         ret = r == HDA_ERR_NODEV ? ERR_NOSYS : r == HDA_ERR_BUSY ? ERR_AGAIN : r == HDA_ERR_FORMAT ? ERR_INVAL
