@@ -26,3 +26,4 @@ df > TB.TXT
 tree FT > TC.TXT
 cal 2 2026 > TD.TXT
 uptime > TE.TXT
+dmesg > TF.TXT

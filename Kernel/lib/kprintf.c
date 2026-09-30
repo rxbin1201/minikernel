@@ -2,6 +2,7 @@
 #include "console/console.h"
 #include "arch/x86_64/cpu.h"
 #include "drivers/serial.h"
+#include "lib/klog.h"
 #include <stdint.h>
 
 /* Ausgabe-Senke: pro Zeichen aufgerufen. Damit teilen sich kprintf und ksnprintf denselben Formatierer. */
@@ -236,6 +237,7 @@ void kputc(char c)
     if (c == '\n')
         serial_putc('\r');
     serial_putc(c);
+    klog_putc(c);
 }
 
 static void put_console(char c, void *ctx)

@@ -69,6 +69,9 @@ In der Shell: `burn 5000 & burn 5000 & cpus` zeigt zwei ausgelastete CPUs.
   sich, laedt die Symbole aus `Build/kernel.debug.elf` und setzt einen Breakpoint auf `kmain` (`tools/gdbinit`).
   Braucht `sudo apt install gdb`.
 - **Adressen von Hand:** `addr2line -f -e Build/kernel.debug.elf 0x10427d`
+- **Kernel-Log auf echter Hardware:** `dmesg` zeigt alle Kernel-Meldungen seit dem Start (letzte 256 KiB);
+  `dmesg > /disk/log.txt` speichert sie. `/disk` ist das FAT32-Volume mit dem Label `MINIKERNEL` (nur dieses
+  beschreibt der Kernel), z.B. ein USB-Stick, der unter Windows so benannt wurde.
 
 ## Kernel-Kommandozeile
 

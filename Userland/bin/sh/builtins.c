@@ -205,7 +205,7 @@ static void print_help(void)
            "            jobs  fg [n]  wait  true  false  help\n"
            "%sProgramme:%s  ls  cat  less  edit  cp  mv  rm  mkdir  touch  wc  grep  head  tail  sort  uniq  diff  find  du\n"
            "            df  tree  hexdump  cal  uptime  seq  sleep  date  ps  kill  mount  lsusb  keymap  resolution\n"
-           "            mouse  cpus  burn  poweroff  reboot  (siehe 'ls /bin')\n"
+           "            mouse  cpus  burn  dmesg  poweroff  reboot  (siehe 'ls /bin')\n"
            "%sGrafik:%s     desktop (Fenster, Terminal, Dateien, Rechner, Uhr)  paint [bild.bmp]  view bild.bmp  snake  tetris\n"
            "%sNetzwerk:%s   ifconfig [-a | dhcp | 192.168.1.50/24 gw 192.168.1.1]  ping name  nslookup name  ntp [-n]\n"
            "            udp send ziel port text / udp listen port [-e]  lspci [-v]\n"

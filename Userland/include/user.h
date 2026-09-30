@@ -66,6 +66,7 @@ typedef long long          s64;
 #define SYS_NTP       58
 #define SYS_SOCKPORT  59
 #define SYS_CPUINFO   60
+#define SYS_KLOG      61
 #define ERR_NOENT     (-2)
 #define ERR_IO        (-5)
 #define ERR_EXIST     (-17)
@@ -274,6 +275,7 @@ static inline s64 sys_ping(const unsigned char ip[4], unsigned seq, unsigned siz
 static inline s64 sys_udp_socket(unsigned port)              { return syscall3(SYS_SOCKET, 1, port, 0); }
 static inline s64 sys_sockport(int fd)                       { return syscall3(SYS_SOCKPORT, fd, 0, 0); }
 static inline s64 sys_cpuinfo(u64 index, CpuInfo *ci)        { return syscall3(SYS_CPUINFO, index, (u64)ci, 0); } /* ERR_NOENT: keine CPU mehr */
+static inline s64 sys_klog(u64 *pos, char *buf, u64 max)     { return syscall3(SYS_KLOG, (u64)pos, (u64)buf, max); } /* 0 = Ende des Kernel-Logs */
 static inline s64 sys_sendto(int fd, const unsigned char ip[4], unsigned port, const void *buf, unsigned len)
 {
     SockMsg m = {(u64)buf, len, {ip[0], ip[1], ip[2], ip[3]}, (unsigned short)port, 0, 0};

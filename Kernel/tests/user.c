@@ -473,9 +473,12 @@ void test_tools(void)
     check("cal (Februar 2026 beginnt am Sonntag, KW 5)", file_has("/disk/TD.TXT", "Februar 2026") &&
                                                        file_has("/disk/TD.TXT", " 5                     1 \n"));
     check("uptime", file_has("/disk/TE.TXT", "laeuft seit"));
+    uint64_t log_size = 0;
+    check("dmesg: Kernel-Log vom Start an", file_has("/disk/TF.TXT", "Kernel gestartet") &&
+                                            dir_has("/disk", "TF.TXT", &log_size) && log_size > 4096);
 
     static const char *const files[] = {"U1", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "TA", "TB", "TC",
-                                        "TD", "TE", "D1", "D2", 0};
+                                        "TD", "TE", "TF", "D1", "D2", 0};
     char path[32];
     for (int i = 0; files[i]; i++) {
         ksnprintf(path, sizeof(path), "/disk/%s.TXT", files[i]);

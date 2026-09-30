@@ -66,6 +66,7 @@
 #define SYS_NTP       58 /* (server oder 0, NtpResult*, uhr_stellen) -> 0 oder Fehler */
 #define SYS_SOCKPORT  59 /* (fd) -> lokaler Port des Sockets */
 #define SYS_CPUINFO   60 /* (index, CpuInfo*) -> 0 oder ERR_NOENT am Ende */
+#define SYS_KLOG      61 /* (u64 *pos, buf, max) -> Bytes aus dem Kernel-Log ab *pos (wird weitergezaehlt), 0 = Ende */
 
 /* Argument fuer SYS_SENDTO/SYS_RECVFROM (gleiches Layout in Userland/user.h) */
 typedef struct {

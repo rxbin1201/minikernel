@@ -6,6 +6,7 @@
 #include "fs/fs.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/smp.h"
+#include "lib/klog.h"
 #include "drivers/keyboard.h"
 #include "lib/kprintf.h"
 #include "arch/x86_64/power.h"
@@ -308,6 +309,14 @@ static int syscall_unlocked(SyscallFrame *f)
             memcpy((void *)f->rsi, &ci, sizeof(ci));
             ret = 0;
         }
+        break;
+    }
+    case SYS_KLOG: { /* das Log hat seinen eigenen Lock */
+        uint64_t max = f->rdx > 65536 ? 65536 : f->rdx;
+        if (!process_user_range_ok(p, f->rdi, 8, 1) || !process_user_range_ok(p, f->rsi, max, 1))
+            ret = ERR_FAULT;
+        else
+            ret = (int64_t)klog_read((uint64_t *)f->rdi, (char *)f->rsi, max);
         break;
     }
     default:
