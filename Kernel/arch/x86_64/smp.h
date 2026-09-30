@@ -14,7 +14,17 @@
  * bkl_enter), das Warten des Idle-Threads (hlt) und das Spinnen auf den Lock selbst. Syscalls und Interrupts aus dem
  * User-Mode oder aus dem Idle-Warten holen ihn mit bkl_enter/bkl_leave; bei einem Threadwechsel bleibt er bei der CPU.
  * Deshalb gilt innerhalb des Kernels weiter: Interrupts aus = exklusiver Zugriff (wie auf einer CPU). Wer den BKL
- * haelt, darf nie auf eine andere CPU warten (die spinnt womoeglich mit ausgeschalteten Interrupts auf den Lock). */
+ * haelt, darf nie auf eine andere CPU warten (die spinnt womoeglich mit ausgeschalteten Interrupts auf den Lock).
+ *
+ * Feinere Locks (spinlock.h) fuer Teile, die auch ohne BKL laufen koennen:
+ *   sched_lock   Run-Queue, Thread-Zustaende, Aufweckzeiten (sched.c). Der Timer einer CPU, die User-Code rechnet
+ *                oder im Idle wartet, weckt damit Threads ohne BKL und holt ihn nur, wenn wirklich gewechselt werden
+ *                muss und keine andere CPU frei ist (apic_timer_unlocked).
+ *   heap_lock    Kernel-Heap (kmalloc/kfree)
+ *   paging_lock  Kernel-Bereich der Seitentabellen
+ *   pmm_lock     physische Frames
+ * Reihenfolge: BKL -> sched_lock -> heap_lock -> paging_lock -> pmm_lock. Den Threadwechsel selbst macht nur, wer den
+ * BKL haelt. Der Selbsttest "smp" prueft Heap und PMM mit Threads, die den BKL abgeben. */
 
 #define SMP_MAX_CPUS 16
 
@@ -31,6 +41,7 @@ typedef struct Cpu {
     uint64_t       tlb_gen;     /* zuletzt gesehener Stand von paging_kernel_gen (siehe bkl_acquire) */
     volatile int   online;
     uint64_t       ticks_user, ticks_kernel, ticks_idle; /* Timer-Ticks nach Zustand der CPU */
+    uint64_t       bkl_timer;   /* Timer-Interrupts in User-Code, die doch den BKL holen mussten (Threadwechsel/Kill) */
 } Cpu;
 
 #define CPU_OFF_KERNEL_RSP 8
@@ -50,6 +61,7 @@ void smp_early_init(void);
 void smp_init(void);
 
 unsigned smp_cpu_count(void);    /* laufende CPUs */
+unsigned smp_idle_cpus(void);    /* CPUs, die gerade ihren Idle-Thread laufen lassen (Momentaufnahme, ohne Lock) */
 Cpu     *smp_cpu(unsigned index); /* NULL ausserhalb */
 void     smp_set_gs(Cpu *c);      /* GS-Basis dieser CPU auf c setzen */
 

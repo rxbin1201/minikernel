@@ -79,6 +79,10 @@ static void isr_dispatch(InterruptFrame *f);
  * Kontext: er wird beim Fortsetzen (vielleicht auf einer anderen CPU) wieder richtig freigegeben. */
 void isr_handler(InterruptFrame *f)
 {
+    if (f->vector == VECTOR_TIMER && !bkl_held()) {
+        apic_timer_unlocked(f); /* holt den BKL nur bei Bedarf */
+        return;
+    }
     int taken = bkl_enter();
     isr_dispatch(f);
     bkl_leave(taken);

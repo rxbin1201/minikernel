@@ -1,4 +1,5 @@
 #include "mm/paging.h"
+#include "arch/x86_64/spinlock.h"
 #include "mm/pmm.h"
 #include "arch/x86_64/cpu.h"
 #include "lib/kprintf.h"
@@ -149,6 +150,16 @@ void paging_init(const BootInfo *info)
 
 static uint64_t table_frames; /* Frames, die gerade als Page Table dienen (fuer paging_table_frames) */
 
+/* Aenderungen im Kernel-Bereich (in allen Adressraeumen gemeinsam) laufen unter paging_lock, damit z.B. der Heap auch
+ * ohne Big Kernel Lock Seiten einblenden kann. Den User-Bereich eines Adressraums aendert nur sein Prozess (unter
+ * dem BKL). */
+static Spinlock paging_lock = SPINLOCK_INIT("paging");
+
+static int is_kernel_va(uint64_t virt)
+{
+    return (virt >> 39) != (USER_BASE >> 39);
+}
+
 /* Frischer, genullter Frame fuer eine Page Table (PMM-Frames sind identity-mapped). */
 static uint64_t *table_alloc(void)
 {
@@ -156,14 +167,14 @@ static uint64_t *table_alloc(void)
     if (!frame)
         return 0;
     memset((void *)frame, 0, SIZE_4K);
-    table_frames++;
+    __atomic_add_fetch(&table_frames, 1, __ATOMIC_RELAXED);
     return (uint64_t *)frame;
 }
 
 static void table_free(uint64_t *t)
 {
     pmm_free_frame((uint64_t)t);
-    table_frames--;
+    __atomic_sub_fetch(&table_frames, 1, __ATOMIC_RELAXED);
 }
 
 uint64_t paging_table_frames(void)
@@ -346,7 +357,7 @@ void paging_reserve_kernel_slot(uint64_t virt)
     next_table(&pml4[(virt >> 39) & 511], 1, 0);
 }
 
-int as_map(AddressSpace *as, uint64_t virt, uint64_t phys, uint64_t flags)
+static int map_locked(AddressSpace *as, uint64_t virt, uint64_t phys, uint64_t flags)
 {
     uint64_t *pte = walk((uint64_t *)as, virt, 1, flags & PAGE_USER);
     if (!pte || (*pte & PTE_PRESENT))
@@ -356,28 +367,58 @@ int as_map(AddressSpace *as, uint64_t virt, uint64_t phys, uint64_t flags)
     return 0;
 }
 
-int as_unmap(AddressSpace *as, uint64_t virt)
+static int unmap_locked(AddressSpace *as, uint64_t virt)
 {
     uint64_t *pte = walk((uint64_t *)as, virt, 0, 0);
     if (!pte || !(*pte & PTE_PRESENT))
         return -1;
     *pte = 0;
     invlpg(virt);
-    if ((virt >> 39) != (USER_BASE >> 39))
-        kernel_gen++; /* Kernel-Bereich: gilt fuer alle CPUs */
+    if (is_kernel_va(virt))
+        __atomic_add_fetch(&kernel_gen, 1, __ATOMIC_RELEASE); /* Kernel-Bereich: gilt fuer alle CPUs */
     return 0;
 }
 
-int as_set_flags(AddressSpace *as, uint64_t virt, uint64_t flags)
+static int set_flags_locked(AddressSpace *as, uint64_t virt, uint64_t flags)
 {
     uint64_t *pte = walk((uint64_t *)as, virt, 0, flags & PAGE_USER);
     if (!pte || !(*pte & PTE_PRESENT))
         return -1;
     *pte = (*pte & ADDR_MASK_4K) | PTE_PRESENT | sanitize(flags);
     invlpg(virt);
-    if ((virt >> 39) != (USER_BASE >> 39))
-        kernel_gen++;
+    if (is_kernel_va(virt))
+        __atomic_add_fetch(&kernel_gen, 1, __ATOMIC_RELEASE);
     return 0;
+}
+
+int as_map(AddressSpace *as, uint64_t virt, uint64_t phys, uint64_t flags)
+{
+    if (!is_kernel_va(virt))
+        return map_locked(as, virt, phys, flags);
+    uint64_t f = spin_lock(&paging_lock);
+    int r = map_locked(as, virt, phys, flags);
+    spin_unlock(&paging_lock, f);
+    return r;
+}
+
+int as_unmap(AddressSpace *as, uint64_t virt)
+{
+    if (!is_kernel_va(virt))
+        return unmap_locked(as, virt);
+    uint64_t f = spin_lock(&paging_lock);
+    int r = unmap_locked(as, virt);
+    spin_unlock(&paging_lock, f);
+    return r;
+}
+
+int as_set_flags(AddressSpace *as, uint64_t virt, uint64_t flags)
+{
+    if (!is_kernel_va(virt))
+        return set_flags_locked(as, virt, flags);
+    uint64_t f = spin_lock(&paging_lock);
+    int r = set_flags_locked(as, virt, flags);
+    spin_unlock(&paging_lock, f);
+    return r;
 }
 
 int paging_map(uint64_t virt, uint64_t phys, uint64_t flags)   { return as_map(as_kernel(), virt, phys, flags); }

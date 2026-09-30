@@ -44,7 +44,12 @@ void mutex_lock(Mutex *m);
 void mutex_unlock(Mutex *m);
 
 /* Wird vom Timer-Interrupt aufgerufen: weckt Schlafende und wechselt ggf. den Thread. */
-void sched_tick(void);
+void sched_tick(void); /* mit BKL */
+
+/* Timer ohne BKL (CPU kam aus dem User-Mode oder dem Idle-Warten): Buchhaltung und Aufwecken; 1 = es wartet ein
+ * Thread. Dann den BKL nehmen und sched_preempt() aufrufen. */
+int  sched_tick_prepare(void);
+void sched_preempt(void);
 
 uint64_t sched_switch_count(void);
 

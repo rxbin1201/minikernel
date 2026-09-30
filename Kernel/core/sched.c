@@ -8,6 +8,7 @@
 #include "mm/paging.h"
 #include "lib/string.h"
 #include "arch/x86_64/smp.h"
+#include "arch/x86_64/spinlock.h"
 
 typedef enum { T_READY, T_RUNNING, T_SLEEPING, T_BLOCKED, T_DEAD } ThreadState;
 
@@ -30,9 +31,17 @@ struct Thread {
 extern void switch_context(uint64_t *old_rsp, uint64_t new_rsp);
 extern void thread_trampoline(void);
 
-/* Laufender Thread und Idle-Thread gehoeren zur CPU (smp.h). Run-Queue, Listen und Zaehler sind gemeinsam; sie
- * werden nur unter dem Big Kernel Lock und mit ausgeschalteten Interrupts benutzt. */
+/* Laufender Thread und Idle-Thread gehoeren zur CPU (smp.h). Gemeinsam sind Run-Queue, Thread-Zustaende,
+ * Aufweckzeiten, Listen und Mutex-Wartelisten: sie stehen unter sched_lock, damit der Timer einer CPU, die gerade
+ * User-Code rechnet, ohne Big Kernel Lock Threads wecken und pruefen kann, ob ein Wechsel ansteht (sched_tick_prepare).
+ *
+ * Den eigentlichen Wechsel (schedule) macht dagegen nur, wer den BKL haelt: nur dort werden Threads aus der Run-Queue
+ * genommen. Weil die CPU den BKL ueber den ganzen Wechsel behaelt, kann kein anderer einen gerade abgegebenen Thread
+ * starten, bevor switch_context seinen Kontext gesichert hat, auch wenn sched_lock vorher frei wird.
+ * Aufraeumen beendeter Threads (reap_dead) ebenso nur unter dem BKL. */
 static inline Thread *cur_thread(void) { return this_cpu()->current; }
+
+static Spinlock sched_lock = SPINLOCK_INIT("sched");
 
 static Thread  main_thread;
 static Thread *rq_head, *rq_tail;
@@ -42,7 +51,7 @@ static uint32_t next_id = 1;
 static uint64_t switches;
 static int      sched_on;
 
-/* ---------- Run-Queue (nur mit ausgeschalteten Interrupts benutzen) ---------- */
+/* ---------- Run-Queue (nur unter sched_lock) ---------- */
 
 static void enqueue(Thread *t)
 {
@@ -66,9 +75,9 @@ static Thread *dequeue(void)
     return t;
 }
 
-/* Waehlt den naechsten Thread und wechselt zu ihm. Aufruf nur mit IF = 0. Kehrt erst zurueck,
- * wenn der aufrufende Thread wieder an der Reihe ist. */
-static void schedule(void)
+/* Waehlt den naechsten Thread und wechselt zu ihm. Aufruf mit BKL, IF = 0 und gehaltenem sched_lock (wird hier
+ * freigegeben). Kehrt erst zurueck, wenn der aufrufende Thread wieder an der Reihe ist. */
+static void schedule_locked(void)
 {
     Cpu *c = this_cpu();
     Thread *prev = c->current;
@@ -83,11 +92,14 @@ static void schedule(void)
     if (!next)
         next = c->idle;
     next->state = T_RUNNING;
-    if (next == prev)
+    if (next == prev) {
+        spin_unlock(&sched_lock, 0); /* 0: Interrupts bleiben aus */
         return;
+    }
 
     c->current = next;
     switches++;
+    spin_unlock(&sched_lock, 0);
 
     /* Stack fuer Ring-3-Interrupts/Syscalls und Adressraum des neuen Threads. Der Kernel-Teil ist in allen
      * Adressraeumen gleich, deshalb kann hier mitten auf dem Kernel-Stack umgeschaltet werden. */
@@ -100,26 +112,32 @@ static void schedule(void)
     switch_context(&prev->rsp, next->rsp);
 }
 
+static void schedule(void)
+{
+    spin_lock(&sched_lock);
+    schedule_locked();
+}
+
 /* ---------- Threads anlegen / beenden ---------- */
 
 static void reap_dead(void)
 {
-    uint64_t f = irq_save();
+    uint64_t f = spin_lock(&sched_lock);
     Thread *t = dead_list;
     dead_list = 0;
-    irq_restore(f);
+    spin_unlock(&sched_lock, f);
 
     while (t) {
         Thread *next = t->next;
 
-        f = irq_save();
+        f = spin_lock(&sched_lock);
         for (Thread **p = &all_list; *p; p = &(*p)->all_next) {
             if (*p == t) {
                 *p = t->all_next;
                 break;
             }
         }
-        irq_restore(f);
+        spin_unlock(&sched_lock, f);
 
         if (t->as)
             as_destroy(t->as); /* laeuft nicht mehr, also ist dieser Adressraum nicht in CR3 */
@@ -169,14 +187,14 @@ static Thread *create(const char *name, ThreadEntry entry, void *arg, AddressSpa
     sp[6] = (uint64_t)thread_trampoline;
     t->rsp = (uint64_t)sp;
 
-    uint64_t f = irq_save();
+    uint64_t f = spin_lock(&sched_lock);
     t->id = next_id++;
     t->all_next = all_list;
     all_list = t;
     t->state = T_READY;
     if (runnable)
         enqueue(t);
-    irq_restore(f);
+    spin_unlock(&sched_lock, f);
     return t;
 }
 
@@ -199,8 +217,9 @@ static void __attribute__((noreturn)) idle_loop(void)
         reap_dead();
         cpu_cli();
         bkl_release();
-        cpu_wait_for_interrupt(); /* sti; hlt */
-        cpu_cli();
+        do /* ohne BKL schlafen, bis es etwas aufzuraeumen gibt; bereite Threads holt der Timer (sched_tick_prepare) */
+            cpu_wait_for_interrupt(); /* sti; hlt */
+        while ((cpu_cli(), !*(Thread *volatile *)&dead_list));
         bkl_acquire();
         cpu_sti();
     }
@@ -255,11 +274,11 @@ void sched_init(void)
 
 void thread_exit(void)
 {
-    irq_save(); /* bewusst kein Restore: dieser Thread laeuft nie wieder */
+    spin_lock(&sched_lock); /* bewusst kein Restore der Interrupts: dieser Thread laeuft nie wieder */
     cur_thread()->state = T_DEAD;
     cur_thread()->next = dead_list;
     dead_list = cur_thread();
-    schedule();
+    schedule_locked();
     for (;;)
         cpu_hlt(); /* unerreichbar */
 }
@@ -279,16 +298,16 @@ void thread_sleep_ms(uint64_t ms)
     if (!ticks)
         ticks = 1;
 
-    uint64_t f = irq_save();
+    uint64_t f = spin_lock(&sched_lock);
     cur_thread()->wake_tick = apic_ticks() + ticks;
     cur_thread()->state = T_SLEEPING;
-    schedule();
+    schedule_locked();
     irq_restore(f);
 }
 
 void mutex_lock(Mutex *m)
 {
-    uint64_t f = irq_save();
+    uint64_t f = spin_lock(&sched_lock);
     while (m->locked) {
         cur_thread()->next = 0;
         if (m->waiters_tail)
@@ -297,16 +316,17 @@ void mutex_lock(Mutex *m)
             m->waiters_head = cur_thread();
         m->waiters_tail = cur_thread();
         cur_thread()->state = T_BLOCKED;
-        schedule();
+        schedule_locked();
+        spin_lock(&sched_lock);
     }
     m->locked = 1;
     m->owner  = cur_thread();
-    irq_restore(f);
+    spin_unlock(&sched_lock, f);
 }
 
 void mutex_unlock(Mutex *m)
 {
-    uint64_t f = irq_save();
+    uint64_t f = spin_lock(&sched_lock);
     m->locked = 0;
     m->owner  = 0;
     Thread *w = m->waiters_head;
@@ -317,27 +337,47 @@ void mutex_unlock(Mutex *m)
         w->state = T_READY;
         enqueue(w); /* prueft beim Aufwachen erneut, ob der Mutex frei ist */
     }
-    irq_restore(f);
+    spin_unlock(&sched_lock, f);
 }
 
 /* ---------- Timer ---------- */
 
-void sched_tick(void)
+/* Tick-Buchhaltung und Aufwecken faelliger Threads; 1 = es wartet ein Thread, ein Wechsel steht an. Braucht keinen
+ * BKL (nur sched_lock), damit CPUs, die User-Code rechnen, fuer den Timer nicht auf den BKL warten muessen. */
+int sched_tick_prepare(void)
 {
     if (!sched_on)
-        return;
+        return 0;
+    cur_thread()->cpu_ticks++; /* der laufende Thread gehoert dieser CPU */
 
     uint64_t now = apic_ticks();
-    Thread *cur = cur_thread();
-    cur->cpu_ticks++;
-
+    uint64_t f = spin_lock(&sched_lock);
     for (Thread *t = all_list; t; t = t->all_next) {
         if (t->state == T_SLEEPING && t->wake_tick <= now) {
             t->state = T_READY;
             enqueue(t);
         }
     }
+    int waiting = rq_head != 0;
+    spin_unlock(&sched_lock, f);
+    /* Rechnet hier User-Code (BKL nicht gehalten) und ist eine andere CPU frei, uebernimmt die den Wartenden bei ihrem
+     * naechsten Tick: so wird rechnender Code nicht unterbrochen, solange CPUs frei sind. Haelt diese CPU den BKL
+     * (Kernel-Code), muss sie selbst wechseln: die freie CPU kaeme ohne den BKL nie an den Wartenden. */
+    if (waiting && !bkl_held() && cur_thread() != this_cpu()->idle && smp_idle_cpus() > 0)
+        waiting = 0;
+    return waiting;
+}
+
+/* Naechster Thread nach Round-Robin (mit BKL, IF = 0) */
+void sched_preempt(void)
+{
     schedule();
+}
+
+void sched_tick(void)
+{
+    if (sched_tick_prepare())
+        schedule();
 }
 
 /* ---------- Auskunft ---------- */
@@ -353,9 +393,9 @@ uint64_t    sched_switch_count(void)            { return switches; }
 void sched_dump(void)
 {
     static const char *names[] = {"bereit", "laeuft", "schlaeft", "blockiert", "beendet"};
-    uint64_t f = irq_save();
+    uint64_t f = spin_lock(&sched_lock);
     kprintf("  %3s %-10s %-10s %s\n", "ID", "Name", "Zustand", "CPU-Ticks");
     for (Thread *t = all_list; t; t = t->all_next)
         kprintf("  %3u %-10s %-10s %lu\n", t->id, t->name, names[t->state], t->cpu_ticks);
-    irq_restore(f);
+    spin_unlock(&sched_lock, f);
 }

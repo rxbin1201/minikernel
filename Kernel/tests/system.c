@@ -10,6 +10,8 @@
 #include "core/sched.h"
 #include "core/process.h"
 #include "arch/x86_64/smp.h"
+#include "arch/x86_64/cpu.h"
+#include "mm/paging.h"
 #include "drivers/rtc.h"
 #include "tests/selftest.h"
 
@@ -262,6 +264,90 @@ void test_rtc(void)
     check("DOS-Zeitstempel: hin und zurueck (auf 2 s genau)", back != 0 && back + 4 >= rtc_now() && back <= rtc_now() + 1);
 }
 
+/* Stresstest fuer die Spinlocks von Heap, Paging und PMM: Kernel-Threads geben den Big Kernel Lock ab und rufen
+ * gleichzeitig auf mehreren CPUs kmalloc/kfree (auch grosse Bloecke, damit der Heap waechst) und pmm_alloc/free auf.
+ * Jeder Block traegt ein Muster, das beim Freigeben geprueft wird. Ohne BKL kein kprintf (die Konsole braucht ihn). */
+#define STRESS_ROUNDS 20000
+#define STRESS_SLOTS  16
+
+static volatile int stress_done, stress_bad, stress_cpus_mask;
+
+static void stress_thread(void *arg)
+{
+    uint32_t id = (uint32_t)(uint64_t)arg, seed = id * 2654435761u + 1;
+    uint8_t *ptr[STRESS_SLOTS] = {0};
+    uint32_t len[STRESS_SLOTS] = {0};
+    int bad = 0;
+
+    cpu_cli();
+    bkl_release(); /* ab hier laeuft der Thread parallel zu den anderen */
+    cpu_sti();
+    for (int i = 0; i < STRESS_ROUNDS; i++) {
+        __atomic_or_fetch(&stress_cpus_mask, 1 << this_cpu()->index, __ATOMIC_RELAXED);
+        int k = i % STRESS_SLOTS;
+        uint8_t mark = (uint8_t)(id * 16 + k);
+        if (ptr[k]) {
+            for (uint32_t j = 0; j < len[k]; j++)
+                if (ptr[k][j] != mark) {
+                    bad++;
+                    break;
+                }
+            kfree(ptr[k]);
+        }
+        seed = seed * 1103515245u + 12345u;
+        len[k] = i % 997 == 0 ? 70000 : 16 + (seed >> 8) % 3000;
+        ptr[k] = kmalloc(len[k]);
+        if (!ptr[k]) {
+            bad++;
+            continue;
+        }
+        memset(ptr[k], mark, len[k]);
+        if (i % 8 == 0) {
+            uint64_t fr = pmm_alloc_frame();
+            if (!fr) {
+                bad++;
+            } else {
+                *(volatile uint64_t *)fr = id;
+                for (int j = 0; j < 50; j++)
+                    __asm__ __volatile__("pause");
+                if (*(volatile uint64_t *)fr != id) /* zwei CPUs mit demselben Frame? */
+                    bad++;
+                pmm_free_frame(fr);
+            }
+        }
+    }
+    for (int k = 0; k < STRESS_SLOTS; k++)
+        kfree(ptr[k]);
+    cpu_cli();
+    bkl_acquire(); /* thread_exit braucht ihn wieder */
+    stress_bad += bad;
+    stress_done++;
+}
+
+static void smp_stress(unsigned n)
+{
+    unsigned k = n < 4 ? n : 4;
+    uint64_t frames = pmm_free_frame_count(), heap0 = heap_total_bytes(), tables0 = paging_table_frames();
+    stress_done = stress_bad = stress_cpus_mask = 0;
+    uint64_t t0 = time_ms();
+    for (unsigned i = 0; i < k; i++)
+        thread_create("stress", stress_thread, (void *)(uint64_t)(i + 1));
+    for (int w = 0; w < 3000 && stress_done < (int)k; w++)
+        thread_sleep_ms(10);
+    unsigned cpus = 0;
+    for (unsigned i = 0; i < SMP_MAX_CPUS; i++)
+        if (stress_cpus_mask & (1 << i))
+            cpus++;
+    kprintf("  (%u Threads x %d Runden kmalloc/kfree/pmm ohne BKL auf %u CPU(s): %lu ms, %d Fehler)\n", k,
+            STRESS_ROUNDS, cpus, (unsigned long)(time_ms() - t0), stress_bad);
+    check("Stresstest ohne BKL: alle Threads fertig", stress_done == (int)k);
+    check("Stresstest ohne BKL: lief auf mehreren CPUs", cpus >= 2);
+    check("Stresstest ohne BKL: kein Block/Frame doppelt vergeben oder ueberschrieben", stress_bad == 0);
+    check("Stresstest ohne BKL: Heap konsistent", heap_check());
+    uint64_t grown = (heap_total_bytes() - heap0) / 4096 + (paging_table_frames() - tables0); /* Heap gibt nichts zurueck */
+    check("Stresstest ohne BKL: alle Frames zurueck", frames - pmm_free_frame_count() == grown);
+}
+
 /* Mehrere CPUs: alle gestarteten CPUs laufen, und User-Programme rechnen wirklich gleichzeitig. Dazu laufen einige
  * /bin/burn nebeneinander; die Timer-Ticks im User-Mode je CPU zeigen, wo gerechnet wurde. */
 void test_smp(void)
@@ -280,13 +366,16 @@ void test_smp(void)
     }
 
     unsigned k = n < 4 ? n : 4, busy = 0;
-    uint64_t before[SMP_MAX_CPUS], sum = 0;
-    for (unsigned i = 0; i < n; i++)
+    uint64_t before[SMP_MAX_CPUS], sum = 0, bkl_before = 0, bkl_after = 0;
+    for (unsigned i = 0; i < n; i++) {
         before[i] = smp_cpu(i)->ticks_user;
+        bkl_before += smp_cpu(i)->bkl_timer;
+    }
     int pids[4], started = 1;
     for (unsigned i = 0; i < k; i++)
         if ((pids[i] = process_spawn("/bin/burn", "burn 1500", 0)) <= 0)
             started = 0;
+    thread_sleep_ms(1600); /* am Stueck schlafen: process_wait fragt jeden Tick nach und wuerde dafuer Wechsel ausloesen */
     for (unsigned i = 0; i < k; i++)
         if (pids[i] > 0)
             process_wait(pids[i], 0, 0, 0, 10000);
@@ -295,9 +384,19 @@ void test_smp(void)
         sum += d;
         if (d >= 50) /* mindestens eine halbe Sekunde im User-Mode */
             busy++;
+        bkl_after += smp_cpu(i)->bkl_timer;
     }
-    kprintf("  (%u x burn 1500 ms: %lu User-Ticks, %u CPU(s) mit mindestens 50)\n", k, (unsigned long)sum, busy);
+    uint64_t bkl_ticks = bkl_after - bkl_before;
+    kprintf("  (%u x burn 1500 ms: %lu User-Ticks, %u CPU(s) mit mindestens 50; davon %lu Timer-Ticks mit BKL)\n", k,
+            (unsigned long)sum, busy, (unsigned long)bkl_ticks);
     check("burn-Prozesse gestartet", started);
     check("User-Programme laufen auf mehreren CPUs gleichzeitig", busy >= 2);
     check("Rechenzeit mehr als eine CPU schaffen koennte", sum > 200); /* eine CPU: hoechstens 150 Ticks in 1,5 s */
+    /* Vorher holte jeder Tick den BKL (bkl_ticks = sum). Jetzt nur noch, wenn ein aufgewachter Thread laufen muss und
+     * keine CPU frei ist; mit freien CPUs werden rechnende gar nicht mehr unterbrochen. */
+    check("Timer rechnender CPUs holt den BKL nicht bei jedem Tick", bkl_ticks * 4 < sum * 3);
+    if (n > k)
+        check("Mit freien CPUs werden rechnende kaum unterbrochen", bkl_ticks * 10 < sum);
+
+    smp_stress(n);
 }

@@ -1,5 +1,6 @@
 #include "mm/pmm.h"
 #include "arch/x86_64/cpu.h"
+#include "arch/x86_64/spinlock.h"
 #include "lib/kprintf.h"
 #include "lib/string.h"
 
@@ -14,6 +15,7 @@ static uint64_t  frame_count;   /* Frames, die die Bitmap abdeckt */
 static uint64_t  managed;       /* tatsaechlich nutzbare Frames */
 static uint64_t  free_count;
 static uint64_t  search_hint;   /* Wort-Index, ab dem die naechste Suche beginnt */
+static Spinlock  pmm_lock = SPINLOCK_INIT("pmm"); /* schuetzt Bitmap und Zaehler (auch ohne Big Kernel Lock) */
 static uint64_t  low_page;      /* freie Seite unter 1 MiB (Startcode weiterer CPUs), 0 = keine */
 
 static inline int  frame_used(uint64_t f) { return (bitmap[f / 64] >> (f % 64)) & 1; }
@@ -134,7 +136,7 @@ static uint64_t alloc_frames_impl(uint64_t count)
     if (count == 0)
         return 0;
     if (count == 1)
-        return pmm_alloc_frame();
+        return alloc_frame_impl();
 
     uint64_t run = 0;
     for (uint64_t f = 0; f < frame_count; f++) {
@@ -172,20 +174,20 @@ static void free_frames_impl(uint64_t addr, uint64_t count)
     }
 }
 
-/* Oeffentliche Funktionen: gegen Reentranz aus Interrupts/Thread-Wechseln geschuetzt (1 CPU). */
+/* Oeffentliche Funktionen: unter pmm_lock, also von jeder CPU aus und auch ohne Big Kernel Lock aufrufbar */
 uint64_t pmm_alloc_frame(void)
 {
-    uint64_t f = irq_save();
+    uint64_t f = spin_lock(&pmm_lock);
     uint64_t r = alloc_frame_impl();
-    irq_restore(f);
+    spin_unlock(&pmm_lock, f);
     return r;
 }
 
 uint64_t pmm_alloc_frames(uint64_t count)
 {
-    uint64_t f = irq_save();
-    uint64_t r = count == 1 ? alloc_frame_impl() : alloc_frames_impl(count);
-    irq_restore(f);
+    uint64_t f = spin_lock(&pmm_lock);
+    uint64_t r = alloc_frames_impl(count);
+    spin_unlock(&pmm_lock, f);
     return r;
 }
 
@@ -196,9 +198,9 @@ void pmm_free_frame(uint64_t addr)
 
 void pmm_free_frames(uint64_t addr, uint64_t count)
 {
-    uint64_t f = irq_save();
+    uint64_t f = spin_lock(&pmm_lock);
     free_frames_impl(addr, count);
-    irq_restore(f);
+    spin_unlock(&pmm_lock, f);
 }
 
 uint64_t pmm_low_page(void)          { return low_page; }

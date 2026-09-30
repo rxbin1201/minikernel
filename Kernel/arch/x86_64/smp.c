@@ -9,7 +9,9 @@
 #include "core/cmdline.h"
 #include "core/sched.h"
 #include "core/syscall.h"
+#include "arch/x86_64/spinlock.h"
 #include "lib/kprintf.h"
+#include "lib/ksyms.h"
 #include "lib/string.h"
 #include "mm/paging.h"
 #include "mm/pmm.h"
@@ -33,7 +35,37 @@ void smp_set_gs(Cpu *c)
 }
 
 unsigned smp_cpu_count(void) { return cpu_count; }
+
+unsigned smp_idle_cpus(void)
+{
+    unsigned n = 0;
+    for (unsigned i = 0; i < cpu_count; i++) {
+        Cpu *c = &cpus[i];
+        if (c->online && c->idle && *(struct Thread *volatile *)&c->current == c->idle)
+            n++;
+    }
+    return n;
+}
 Cpu     *smp_cpu(unsigned index) { return index < cpu_count ? &cpus[index] : 0; }
+
+/* ---------- Spinlocks (spinlock.h) ---------- */
+
+int spin_cpu_tag(void)
+{
+    return (int)this_cpu()->index + 1;
+}
+
+void spin_deadlock(Spinlock *l)
+{
+    cpu_cli();
+    kprintf("\n*** Spinlock '%s' auf CPU %u doppelt genommen ***\n", l->name, this_cpu()->index);
+    uint64_t rbp;
+    __asm__ __volatile__("mov %%rbp, %0" : "=r"(rbp));
+    backtrace_print((uint64_t)__builtin_return_address(0), rbp, 16);
+    kprintf("System angehalten.\n");
+    for (;;)
+        cpu_hlt();
+}
 
 /* ---------- Big Kernel Lock ---------- */
 

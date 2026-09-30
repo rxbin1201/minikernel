@@ -5,6 +5,7 @@
 #include "lib/kprintf.h"
 #include "mm/paging.h"
 #include "core/sched.h"
+#include "core/process.h"
 #include "arch/x86_64/smp.h"
 
 #define MSR_APIC_BASE     0x1B
@@ -79,7 +80,7 @@ static int pit_wait_10ms(void)
 
 /* ---------- Local APIC ---------- */
 
-static void timer_handler(InterruptFrame *f)
+static void timer_account(InterruptFrame *f)
 {
     Cpu *c = this_cpu();
     if (f->cs & 3)
@@ -89,8 +90,35 @@ static void timer_handler(InterruptFrame *f)
     else
         c->ticks_kernel++;
     if (c->index == 0)
-        ticks++; /* jede CPU hat ihren Timer, die Uhrzeit zaehlt nur die Boot-CPU */
+        __atomic_add_fetch(&ticks, 1, __ATOMIC_RELAXED); /* jede CPU hat ihren Timer, die Uhrzeit zaehlt nur die Boot-CPU */
+}
+
+/* Timer, waehrend die CPU Kernel-Code ausfuehrt (BKL gehalten) */
+static void timer_handler(InterruptFrame *f)
+{
+    timer_account(f);
     sched_tick(); /* kann zu einem anderen Thread wechseln und kehrt erst spaeter zurueck */
+}
+
+/* Timer aus dem User-Mode oder dem Idle-Warten (BKL nicht gehalten, von isr_handler direkt aufgerufen): der BKL wird
+ * nur geholt, wenn ein anderer Thread wartet oder der Prozess beendet werden soll. So muessen CPUs, die rechnen,
+ * nicht bei jedem Tick auf den Kernel warten. */
+void apic_timer_unlocked(InterruptFrame *f)
+{
+    apic_eoi();
+    timer_account(f);
+    int user = (f->cs & 3) != 0;
+    int resched = sched_tick_prepare();
+    if (!resched && !(user && process_kill_pending()))
+        return;
+    if (user)
+        this_cpu()->bkl_timer++;
+    bkl_acquire();
+    if (resched)
+        sched_preempt(); /* kann den Thread wechseln; zurueck (vielleicht auf einer anderen CPU) gilt wieder dieser Frame */
+    if (user)
+        process_check_killed();
+    bkl_release();
 }
 
 int apic_init(uint64_t lapic_base)

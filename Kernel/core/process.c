@@ -574,6 +574,12 @@ void process_check_killed(void)
     }
 }
 
+int process_kill_pending(void)
+{
+    const volatile Process *p = process_current();
+    return p && p->killed;
+}
+
 int process_killed(const Process *p)
 {
     return p && p->killed;

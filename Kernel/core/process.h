@@ -59,6 +59,7 @@ void process_kill_pgid(uint32_t pgid);
 int  process_kill_pid(uint32_t pid);
 int  process_killed(const Process *p);
 void process_check_killed(void);        /* beendet den aktuellen Prozess, falls gekillt */
+int  process_kill_pending(void);        /* soll der aktuelle Prozess beendet werden? (ohne BKL lesbar) */
 int  process_wait_tick(void);           /* schlaeft einen Timer-Tick; -1, wenn der Prozess gekillt wurde (fuer blockierende Aufrufe) */
 
 /* Auskunft fuer "ps" */

@@ -1,5 +1,6 @@
 #include "mm/heap.h"
 #include "arch/x86_64/cpu.h"
+#include "arch/x86_64/spinlock.h"
 #include "mm/paging.h"
 #include "mm/pmm.h"
 #include "lib/kprintf.h"
@@ -25,6 +26,7 @@ static Block   *first;
 static Block   *last;
 static uint64_t heap_size; /* gemappte Bytes ab HEAP_BASE */
 static uint64_t used;
+static Spinlock heap_lock = SPINLOCK_INIT("heap"); /* schuetzt alles oben (auch ohne Big Kernel Lock) */
 
 static Block *next_block(Block *b)
 {
@@ -176,14 +178,15 @@ static void kfree_locked(void *ptr)
     }
 }
 
-/* Die oeffentlichen Funktionen schuetzen den Heap vor Reentranz aus Interrupts/Thread-Wechseln (1 CPU). */
+/* Die oeffentlichen Funktionen nehmen heap_lock: von jeder CPU aus aufrufbar, auch ohne Big Kernel Lock.
+ * heap_grow blendet unter heap_lock Seiten ein (Reihenfolge heap_lock -> paging_lock -> pmm_lock). */
 #define CALLER() ((uint64_t)__builtin_return_address(0))
 
 static void *kmalloc_from(size_t size, uint64_t caller)
 {
-    uint64_t f = irq_save();
+    uint64_t f = spin_lock(&heap_lock);
     void *p = kmalloc_locked(size, caller);
-    irq_restore(f);
+    spin_unlock(&heap_lock, f);
     return p;
 }
 
@@ -194,9 +197,9 @@ void *kmalloc(size_t size)
 
 void kfree(void *ptr)
 {
-    uint64_t f = irq_save();
+    uint64_t f = spin_lock(&heap_lock);
     kfree_locked(ptr);
-    irq_restore(f);
+    spin_unlock(&heap_lock, f);
 }
 
 void *kcalloc(size_t count, size_t size)
@@ -217,7 +220,7 @@ void *krealloc(void *ptr, size_t size)
         kfree(ptr);
         return 0;
     }
-    Block *b = (Block *)ptr - 1;
+    Block *b = (Block *)ptr - 1; /* der Block gehoert dem Aufrufer: seine Groesse aendert sich nicht nebenher */
     if (b->magic == BLOCK_MAGIC && ((size + 15) & ~(size_t)15) <= b->size)
         return ptr; /* passt schon, kein Verkleinern */
 
@@ -232,7 +235,17 @@ void *krealloc(void *ptr, size_t size)
 uint64_t heap_used_bytes(void)  { return used; }
 uint64_t heap_total_bytes(void) { return heap_size; }
 
+static int heap_check_locked(void);
+
 int heap_check(void)
+{
+    uint64_t f = spin_lock(&heap_lock);
+    int ok = heap_check_locked();
+    spin_unlock(&heap_lock, f);
+    return ok;
+}
+
+static int heap_check_locked(void)
 {
     uint64_t total = 0;
     Block *prev = 0;

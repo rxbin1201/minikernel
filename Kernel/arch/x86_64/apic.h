@@ -2,6 +2,7 @@
 #define APIC_H
 
 #include <stdint.h>
+#include "arch/x86_64/idt.h"
 
 #define VECTOR_TIMER    0x40
 #define VECTOR_KEYBOARD 0x41
@@ -18,6 +19,9 @@ void pic_disable(void);
 int apic_init(uint64_t lapic_base);
 
 void     apic_eoi(void);
+
+/* Timer-Interrupt, wenn die CPU den Big Kernel Lock nicht haelt (von isr_handler aufgerufen, siehe smp.h) */
+void     apic_timer_unlocked(InterruptFrame *f);
 uint32_t apic_id(void);
 
 /* Fuer weitere CPUs (smp.c): Local APIC samt Timer auf der aufrufenden CPU einschalten; INIT und STARTUP senden */
