@@ -60,7 +60,8 @@ Image/kernel.elf: Build/kernel.debug.elf
 	objcopy --strip-debug $< $@
 
 # ---------------------------------------------------------------------------------------------------------------------
-# Userland: jede Userland/bin/NAME.c wird zum Programm /bin/NAME in der initrd (tar); Initrd/ wird 1:1 dazukopiert.
+# Userland: jede Userland/bin/NAME.c (oder alle .c in Userland/bin/NAME/) wird zum Programm /bin/NAME in der initrd
+# (tar); Initrd/ wird 1:1 dazukopiert.
 # Gemeinsamer Code liegt in Userland/lib/ (libuser.a: nur benutzte Teile landen im Programm), Header in Userland/include/.
 # ---------------------------------------------------------------------------------------------------------------------
 
@@ -70,7 +71,9 @@ USER_CFLAGS  = -O2 -Wall -Wextra -ffreestanding -fno-tree-loop-distribute-patter
 USER_LDFLAGS = -nostdlib -static -no-pie -z max-page-size=0x1000 -z noexecstack -T Userland/user.ld
 
 USER_PROGS    := $(patsubst Userland/bin/%.c,%,$(wildcard Userland/bin/*.c))
-USER_BINS     := $(addprefix Build/initrd/bin/,$(USER_PROGS))
+USER_DIRPROGS := $(patsubst Userland/bin/%/,%,$(wildcard Userland/bin/*/))
+USER_BINS     := $(addprefix Build/initrd/bin/,$(USER_PROGS) $(USER_DIRPROGS))
+USER_SOURCES  := $(wildcard Userland/bin/*.c Userland/bin/*/*.c Userland/lib/*.c)
 USER_LIB_OBJS := $(patsubst Userland/lib/%.c,Build/user/lib/%.o,$(wildcard Userland/lib/*.c))
 USER_LIB      := Build/user/libuser.a
 INITRD_FILES  := $(shell find Initrd -type f 2>/dev/null)
@@ -79,7 +82,7 @@ Build/user/%.o: Userland/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(USER_CFLAGS) -c $< -o $@
 
--include $(patsubst Userland/%.c,Build/user/%.d,$(wildcard Userland/bin/*.c Userland/lib/*.c))
+-include $(patsubst Userland/%.c,Build/user/%.d,$(USER_SOURCES))
 
 $(USER_LIB): $(USER_LIB_OBJS)
 	@rm -f $@
@@ -88,6 +91,14 @@ $(USER_LIB): $(USER_LIB_OBJS)
 Build/initrd/bin/%: Build/user/bin/%.o $(USER_LIB) Userland/user.ld
 	@mkdir -p $(dir $@)
 	$(LD) $< $(USER_LIB) $(USER_LDFLAGS) -o $@
+
+# Programme aus mehreren Dateien
+define USER_DIRPROG
+Build/initrd/bin/$(1): $(patsubst Userland/%.c,Build/user/%.o,$(wildcard Userland/bin/$(1)/*.c)) $(USER_LIB) Userland/user.ld
+	@mkdir -p $$(dir $$@)
+	$(LD) $$(filter %.o,$$^) $(USER_LIB) $(USER_LDFLAGS) -o $$@
+endef
+$(foreach p,$(USER_DIRPROGS),$(eval $(call USER_DIRPROG,$(p))))
 
 Image/initrd.tar: $(USER_BINS) $(INITRD_FILES)
 	@mkdir -p $(dir $@)
@@ -247,4 +258,4 @@ help:
 FORCE:
 
 # Objektdateien der Programme behalten (sonst loescht make sie als Zwischenergebnisse nach jedem Lauf)
-.SECONDARY: $(patsubst Userland/%.c,Build/user/%.o,$(wildcard Userland/bin/*.c))
+.SECONDARY: $(patsubst Userland/%.c,Build/user/%.o,$(USER_SOURCES))
