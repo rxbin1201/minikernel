@@ -4,10 +4,13 @@
 
 static void term_byte2(Win *w, unsigned char b);
 
+/* ANSI-Farben fuer dunklen Grund (Farbe 0 als Hintergrund = Grund des Terminals) */
 static const u32 term_pal[16] = {
-    0x000000, 0xCD3131, 0x0DBC79, 0xE5E510, 0x2472C8, 0xBC3FBC, 0x11A8CD, 0xC0C0C0,
-    0x666666, 0xF14C4C, 0x23D18B, 0xF5F543, 0x3B8EEA, 0xD670D6, 0x29B8DB, 0xFFFFFF,
+    0x3A3A3C, 0xFF5F57, 0x32D74B, 0xFFD60A, 0x409CFF, 0xDA8FFF, 0x5AC8FA, 0xE5E5EA,
+    0x8E8E93, 0xFF6961, 0x30DB5B, 0xFFE55C, 0x70B8FF, 0xE8A8FF, 0x8CDBFF, 0xFFFFFF,
 };
+
+static int pad(void) { return U(8); }
 
 /* ======================================================================================================================
  * Terminal
@@ -17,7 +20,7 @@ void term_alloc(Win *w)
 {
     int x, y, cw, ch;
     content_rect(w, &x, &y, &cw, &ch);
-    int cols = (cw - 4) / 8, rows = (ch - 4) / 16;
+    int cols = (cw - 2 * pad()) / CELL_W, rows = (ch - 2 * pad()) / CELL_H;
     if (cols < 10) cols = 10;
     if (rows < 3) rows = 3;
     TCell *n = u_malloc(sizeof(TCell) * (u64)(cols * rows));
@@ -186,7 +189,7 @@ static void term_byte2(Win *w, unsigned char b)
 
 void open_terminal(void)
 {
-    Win *w = new_window(W_TERM, "Terminal", 8 * 82 + 2 * BORDER + 4, 16 * 26 + TITLE_H + BORDER + 4);
+    Win *w = new_window(W_TERM, "Terminal", 90 * CELL_W + 2 * pad(), 28 * CELL_H + TITLE_H + 2 * pad());
     if (!w)
         return;
     w->to_child = w->from_child = -1;
@@ -218,7 +221,7 @@ void open_terminal(void)
     w->pid = (int)pid;
     w->to_child = in[1];
     w->from_child = out[0];
-    const char *hello = "\x1b[36mTerminal im Desktop\x1b[0m (Programme mit Vollbild wie edit laufen hier nicht)\r\n";
+    const char *hello = "\x1b[36mTerminal\x1b[0m \xE2\x80\x93 Programme mit Vollbild (edit, snake, \xE2\x80\xA6) laufen hier nicht\r\n";
     for (const char *p = hello; *p; p++)
         term_byte(w, (unsigned char)*p);
 }
@@ -249,29 +252,35 @@ void term_flush(Win *w)
 {
     if (w->tr0 > w->tr1)
         return;
-    win_dirty(w, BORDER, TITLE_H + 2 + w->tr0 * 16, w->w - 2 * BORDER, (w->tr1 - w->tr0 + 1) * 16);
+    win_dirty(w, 0, TITLE_H + pad() + w->tr0 * CELL_H, w->w, (w->tr1 - w->tr0 + 1) * CELL_H);
     w->tr0 = 1;
     w->tr1 = 0;
 }
 
 void draw_terminal(Win *w, int x, int y, int cw, int ch)
 {
-    gfx_fill(tgt, x, y, cw, ch, 0);
-    int ox = x + 2, oy = y + 2, active = w == focused();
+    gfx_fill(tgt, x, y, cw, ch, C_TERM_BG);
+    int ox = x + pad(), oy = y + pad(), active = w == focused();
     for (int r = 0; r < w->rows; r++) {
-        if (oy + r * 16 + 16 <= gfx_clip.y0 || oy + r * 16 >= gfx_clip.y1)
+        int ry = oy + r * CELL_H;
+        if (ry + CELL_H <= gfx_clip.y0 || ry >= gfx_clip.y1)
             continue; /* Zeile liegt nicht im neu zu zeichnenden Bereich */
         for (int c = 0; c < w->cols; c++) {
             TCell *t = &w->cells[r * w->cols + c];
-            u32 fgc = term_pal[t->fg & 15], bgc = term_pal[t->bg & 15];
-            if (active && r == w->cy && c == w->cx) { /* Cursor */
-                u32 tmp = fgc;
-                fgc = bgc;
-                bgc = tmp == bgc ? 0xC0C0C0 : tmp;
+            u32 fgc = term_pal[t->fg & 15];
+            int cx = ox + c * CELL_W;
+            if (t->bg & 15)
+                gfx_fill(tgt, cx, ry, CELL_W, CELL_H, term_pal[t->bg & 15]);
+            if (r == w->cy && c == w->cx) { /* Cursor: Block (aktiv) bzw. Rahmen */
+                if (active) {
+                    gfx_fill(tgt, cx, ry, CELL_W, CELL_H, 0xE5E5EA);
+                    fgc = C_TERM_BG;
+                } else {
+                    gfx_rect(tgt, cx, ry, CELL_W, CELL_H, 0x8E8E93);
+                }
             }
-            if (t->ch == ' ' && bgc == 0)
-                continue;
-            gfx_char(tgt, ox + c * 8, oy + r * 16, t->ch, fgc, bgc, 1);
+            if (t->ch != ' ')
+                text_glyph(tgt, font_mono, FS_MONO, cx, ry, t->ch, fgc);
         }
     }
 }

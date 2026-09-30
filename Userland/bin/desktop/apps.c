@@ -57,14 +57,15 @@ static void files_load(Win *w)
     w->nent = n;
     w->scroll = 0;
     w->sel = 0;
-    snprintf(w->title, sizeof(w->title), "Dateien - %s", w->dir);
+    const char *base = strrchr(w->dir, '/');
+    snprintf(w->title, sizeof(w->title), "%s", strcmp(w->dir, "/") == 0 ? "System" : base ? base + 1 : w->dir);
     win_dirty_all(w);
-    damage_taskbar();
+    damage_menubar();
 }
 
 void open_files(const char *dir)
 {
-    Win *w = new_window(W_FILES, "Dateien", 460, 380);
+    Win *w = new_window(W_FILES, "Dateien", U(560), U(420));
     if (!w)
         return;
     snprintf(w->dir, sizeof(w->dir), "%s", dir);
@@ -74,9 +75,7 @@ void open_files(const char *dir)
 static void open_text(const char *path)
 {
     const char *base = strrchr(path, '/');
-    char t[80];
-    snprintf(t, sizeof(t), "Text - %s", base ? base + 1 : path);
-    Win *w = new_window(W_TEXT, t, 640, 420);
+    Win *w = new_window(W_TEXT, base ? base + 1 : path, 82 * CELL_W + U(24), U(460));
     if (!w)
         return;
     Stat st;
@@ -131,9 +130,7 @@ static void open_text(const char *path)
 static void open_image(const char *path)
 {
     const char *base = strrchr(path, '/');
-    char t[80];
-    snprintf(t, sizeof(t), "Bild - %s", base ? base + 1 : path);
-    Win *w = new_window(W_IMAGE, t, 520, 420);
+    Win *w = new_window(W_IMAGE, base ? base + 1 : path, U(560), U(440));
     if (!w)
         return;
     if (bmp_load(path, &w->img, w->err, sizeof(w->err)) != 0)
@@ -166,30 +163,55 @@ void files_open_entry(Win *w, int i)
     }
 }
 
+static void folder_icon(Surface *s, int x, int y, int sz)
+{
+    gfx_round_rect(s, x, y + sz / 8, sz * 45 / 100, sz / 4, sz / 10, 0x3B99F0, 255);
+    gfx_round_rect_grad(s, x, y + sz / 4, sz, sz * 65 / 100, sz / 8, 0x74BCFA, 0x3B99F0, 255);
+}
+
+static void doc_icon(Surface *s, int x, int y, int sz, u32 accent)
+{
+    gfx_round_rect(s, x + sz / 8, y, sz * 3 / 4, sz, sz / 10, 0xFFFFFF, 255);
+    gfx_round_frame(s, x + sz / 8, y, sz * 3 / 4, sz, sz / 10, 0xB0B0B8, 255);
+    if (accent)
+        gfx_round_rect(s, x + sz / 4, y + sz / 2, sz / 2, sz / 4, sz / 16, accent, 255);
+}
+
 void draw_files(Win *w, int x, int y, int cw, int ch)
 {
     Surface *s = tgt;
-    gfx_fill(s, x, y, cw, ch, RGB(250, 250, 252));
-    int vis = ch / ROW_H;
+    int head = U(28);
+    gfx_fill(s, x, y, cw, ch, C_WINDOW);
+    gfx_fill(s, x, y, cw, head, 0xFAFAFA);
+    gfx_fill(s, x, y + head - 1, cw, 1, 0xE5E5E5);
+    int ty = (head - text_height(font_bold, FS_SMALL)) / 2;
+    text_draw(s, font_bold, FS_SMALL, x + U(40), y + ty, "Name", C_TEXT2);
+    text_draw(s, font_bold, FS_SMALL, x + cw - U(80), y + ty, "Gr\xC3\xB6\xC3\x9F" "e", C_TEXT2);
+    int vis = (ch - head) / ROW_H;
     for (int i = 0; i < vis && w->scroll + i < w->nent; i++) {
         FileEnt *e = &w->ents[w->scroll + i];
-        int ry = y + i * ROW_H;
-        int selected = w->scroll + i == w->sel;
+        int ry = y + head + i * ROW_H;
+        int selected = w->scroll + i == w->sel, active = w == focused();
         if (selected)
-            gfx_fill(s, x, ry, cw, ROW_H, RGB(190, 215, 255));
-        u32 icon = e->is_dir ? RGB(240, 200, 60) : ends_with(e->name, ".bmp") ? RGB(200, 90, 200) :
-                   ends_with(e->name, ".sh") ? RGB(60, 170, 80) : RGB(170, 175, 190);
-        gfx_fill(s, x + 6, ry + 3, 14, 12, icon);
+            gfx_round_rect(s, x + U(6), ry + 1, cw - U(12), ROW_H - 2, U(5), active ? C_ACCENT : 0xDCDCE0, 255);
+        else if (i % 2)
+            gfx_fill(s, x, ry, cw, ROW_H, 0xF5F5F7);
+        int isz = ROW_H - U(8), iy = ry + U(4);
         if (e->is_dir)
-            gfx_fill(s, x + 6, ry + 1, 7, 3, icon);
-        gfx_text(s, x + 26, ry + 1, e->name, RGB(20, 20, 30), GFX_TRANSPARENT);
+            folder_icon(s, x + U(14), iy, isz);
+        else
+            doc_icon(s, x + U(14), iy, isz, ends_with(e->name, ".bmp") ? 0x34C759 : ends_with(e->name, ".sh") ? 0x0A84FF :
+                     ends_with(e->name, ".wav") || ends_with(e->name, ".mp3") ? 0xFF2D55 : 0);
+        u32 tc = selected && active ? 0xFFFFFF : C_TEXT;
+        int tty = ry + (ROW_H - text_height(font_ui, FS)) / 2;
+        text_draw(s, font_ui, FS, x + U(40), tty, e->name, tc);
         if (!e->is_dir) {
             char sz[24];
             u64 b = e->size;
-            if (b < 1024) snprintf(sz, sizeof(sz), "%llu B", (unsigned long long)b);
+            if (b < 1024) snprintf(sz, sizeof(sz), "%llu Byte", (unsigned long long)b);
             else if (b < 1024 * 1024) snprintf(sz, sizeof(sz), "%llu KB", (unsigned long long)(b / 1024));
             else snprintf(sz, sizeof(sz), "%llu MB", (unsigned long long)(b >> 20));
-            gfx_text(s, x + cw - gfx_text_width(sz) - 8, ry + 1, sz, RGB(110, 110, 120), GFX_TRANSPARENT);
+            text_draw(s, font_ui, FS, x + cw - U(80), tty, sz, selected && active ? 0xFFFFFF : C_TEXT2);
         }
     }
 }
@@ -197,26 +219,25 @@ void draw_files(Win *w, int x, int y, int cw, int ch)
 void draw_text(Win *w, int x, int y, int cw, int ch)
 {
     Surface *s = tgt;
-    gfx_fill(s, x, y, cw, ch, RGB(255, 255, 250));
-    int vis = (ch - 4) / 16;
+    gfx_fill(s, x, y, cw, ch, C_WINDOW);
+    int vis = (ch - U(16)) / CELL_H;
     for (int i = 0; i < vis && w->top + i < w->nlines; i++)
-        gfx_text(s, x + 4, y + 2 + i * 16, w->lines[w->top + i], RGB(20, 20, 30), GFX_TRANSPARENT);
-    if (w->nlines > vis) { /* Bildlaufleiste */
-        int bh = ch * vis / w->nlines;
-        if (bh < 10)
-            bh = 10;
-        int by = y + (ch - bh) * w->top / (w->nlines - vis > 0 ? w->nlines - vis : 1);
-        gfx_fill(s, x + cw - 6, y, 6, ch, RGB(225, 225, 230));
-        gfx_fill(s, x + cw - 6, by, 6, bh, RGB(140, 140, 160));
+        text_draw(s, font_mono, FS_MONO, x + U(12), y + U(8) + i * CELL_H, w->lines[w->top + i], C_TEXT);
+    if (w->nlines > vis) { /* Bildlaufleiste (schmal, abgerundet) */
+        int bh = (ch - U(8)) * vis / w->nlines;
+        if (bh < U(24))
+            bh = U(24);
+        int by = y + U(4) + (ch - U(8) - bh) * w->top / (w->nlines - vis > 0 ? w->nlines - vis : 1);
+        gfx_round_rect(s, x + cw - U(10), by, U(6), bh, U(3), 0x000000, 70);
     }
 }
 
 void draw_image(Win *w, int x, int y, int cw, int ch)
 {
     Surface *s = tgt;
-    gfx_fill(s, x, y, cw, ch, RGB(40, 40, 46));
+    gfx_fill(s, x, y, cw, ch, 0x1C1C1E);
     if (!w->img.px) {
-        gfx_text(s, x + 8, y + 8, w->err, RGB(255, 120, 120), GFX_TRANSPARENT);
+        text_draw(s, font_ui, FS, x + U(16), y + U(16), w->err, 0xFF6961);
         return;
     }
     int dw = cw, dh = (int)((s64)w->img.h * cw / w->img.w);
@@ -339,21 +360,32 @@ void calc_key(Win *w, const char *k)
 
 void open_calc(void)
 {
-    Win *w = new_window(W_CALC, "Rechner", 4 * 56 + 16 + 2 * BORDER, 5 * 44 + 64 + TITLE_H + BORDER);
+    Win *w = new_window(W_CALC, "Rechner", 4 * U(58) + 5 * U(10), TITLE_H + U(96) + 5 * U(58) + 6 * U(10));
     if (!w)
         return;
     w->fresh = 1;
     calc_show(w, 0);
 }
 
+/* Lage der Tasten: Anzeige oben, darunter 4 x 5 runde Tasten */
+static void calc_geom(Win *w, int *x, int *y, int *d, int *gap)
+{
+    int cx, cy, cw, ch;
+    content_rect(w, &cx, &cy, &cw, &ch);
+    *gap = U(10);
+    int dw = (cw - 5 * *gap) / 4, dh = (ch - U(96) - 6 * *gap) / 5;
+    *d = dw < dh ? dw : dh;
+    *x = cx + (cw - 4 * *d - 3 * *gap) / 2;
+    *y = cy + U(96) + *gap;
+}
+
 int calc_btn_at(Win *w, int px, int py)
 {
-    int x, y, cw, ch;
-    content_rect(w, &x, &y, &cw, &ch);
-    int bw = (cw - 16) / 4, bh = (ch - 64) / 5;
+    int x, y, d, gap;
+    calc_geom(w, &x, &y, &d, &gap);
     for (int i = 0; i < 20; i++) {
-        int bx = x + 8 + (i % 4) * bw, by = y + 56 + (i / 4) * bh;
-        if (px >= bx && px < bx + bw - 4 && py >= by && py < by + bh - 4)
+        int bx = x + (i % 4) * (d + gap), by = y + (i / 4) * (d + gap);
+        if (px >= bx && px < bx + d && py >= by && py < by + d)
             return i;
     }
     return -1;
@@ -362,20 +394,31 @@ int calc_btn_at(Win *w, int px, int py)
 void draw_calc(Win *w, int x, int y, int cw, int ch)
 {
     Surface *s = tgt;
-    gfx_fill(s, x, y, cw, ch, RGB(210, 214, 224));
-    gfx_fill(s, x + 8, y + 8, cw - 16, 40, RGB(235, 245, 235));
-    gfx_bevel(s, x + 8, y + 8, cw - 16, 40, 0);
-    int tw = gfx_text_width(w->disp) * 2;
-    gfx_text_scaled(s, x + cw - 16 - tw, y + 12, w->disp, RGB(20, 40, 20), GFX_TRANSPARENT, 2);
-    int bw = (cw - 16) / 4, bh = (ch - 64) / 5;
+    gfx_fill(s, x, y, cw, ch, 0x2C2C2E);
+    int dsz = U(44), tw = text_width(font_ui, dsz, w->disp);
+    while (tw > cw - U(28) && dsz > U(18)) { /* lange Zahlen kleiner */
+        dsz -= U(4);
+        tw = text_width(font_ui, dsz, w->disp);
+    }
+    text_draw(s, font_ui, dsz, x + cw - U(16) - tw, y + U(88) - text_height(font_ui, dsz), w->disp, 0xFFFFFF);
+    int bx0, by0, d, gap;
+    calc_geom(w, &bx0, &by0, &d, &gap);
     for (int i = 0; i < 20; i++) {
-        int bx = x + 8 + (i % 4) * bw, by = y + 56 + (i / 4) * bh;
-        int op = i % 4 == 3 || i == 19;
-        gfx_fill(s, bx, by, bw - 4, bh - 4, op ? RGB(250, 170, 70) : i < 3 ? RGB(190, 195, 205) : RGB(245, 245, 248));
-        gfx_bevel(s, bx, by, bw - 4, bh - 4, 1);
+        int bx = bx0 + (i % 4) * (d + gap), by = by0 + (i / 4) * (d + gap);
+        int op = i % 4 == 3 || i == 19, top = i < 3;
+        u32 c = op ? 0xFF9F0A : top ? 0xA5A5A5 : 0x505050, tc = top ? 0x000000 : 0xFFFFFF;
+        if (op && w->op && calc_keys[i][0] == w->op && w->fresh) { /* gewaehlter Operator: invertiert */
+            c = 0xFFFFFF;
+            tc = 0xFF9F0A;
+        }
+        gfx_disc(s, bx + d * 0.5f, by + d * 0.5f, d * 0.5f, c, 255);
         const char *k = calc_keys[i];
-        int kw = gfx_text_width(k) * 2;
-        gfx_text_scaled(s, bx + (bw - 4 - kw) / 2, by + (bh - 4 - 32) / 2, k, RGB(20, 20, 30), GFX_TRANSPARENT, 2);
+        if (k[0] == '/' && !k[1]) k = "\xC3\xB7";
+        else if (k[0] == '*' && !k[1]) k = "\xC3\x97";
+        else if (k[0] == '-' && !k[1]) k = "\xE2\x88\x92";
+        else if (k[0] == '.' && !k[1]) k = ",";
+        int fs = top ? U(20) : U(24), kw = text_width(font_ui, fs, k);
+        text_draw(s, font_ui, fs, bx + (d - kw) / 2, by + (d - text_height(font_ui, fs)) / 2, k, tc);
     }
 }
 
@@ -389,64 +432,101 @@ static const short sin60[60] = {0,    105,  208,  309,  407,  500,  588,  669,  
                                 0,    -105, -208, -309, -407, -500, -588, -669, -743, -809, -866, -914, -951, -978, -995,
                                 -1000, -995, -978, -951, -914, -866, -809, -743, -669, -588, -500, -407, -309, -208, -105};
 
-static void hand(int cx, int cy, int pos60, int len, int width, u32 c)
+static void hand(float cx, float cy, int pos60, float len, float back, float width, u32 c)
 {
     int i = ((pos60 % 60) + 60) % 60;
-    int dx = sin60[i] * len / 1000, dy = -sin60[(i + 15) % 60] * len / 1000;
-    gfx_thick_line(tgt,cx, cy, cx + dx, cy + dy, width, c);
+    float dx = sin60[i] / 1000.0f, dy = -sin60[(i + 15) % 60] / 1000.0f;
+    gfx_capsule(tgt, cx - dx * back, cy - dy * back, cx + dx * len, cy + dy * len, width, c, 255);
+}
+
+void open_clock(void)
+{
+    new_window(W_CLOCK, "Uhr", U(300), U(360));
+}
+
+void open_about(void)
+{
+    new_window(W_ABOUT, "Ü" "ber MiniKernel", U(480), U(260));
 }
 
 void draw_clock(Win *w, int x, int y, int cw, int ch)
 {
     (void)w;
     Surface *s = tgt;
-    gfx_fill(s, x, y, cw, ch, RGB(235, 238, 245));
-    int r = (cw < ch - 40 ? cw : ch - 40) / 2 - 10, cx = x + cw / 2, cy = y + r + 10;
+    gfx_fill(s, x, y, cw, ch, 0xF5F5F7);
+    float r = (float)((cw < ch - U(70) ? cw : ch - U(70)) / 2 - U(16)), cx = x + cw * 0.5f, cy = y + U(16) + r;
     if (r < 20)
         return;
-    gfx_fill_circle(s, cx, cy, r, RGB(255, 255, 255));
-    gfx_circle(s, cx, cy, r, RGB(60, 60, 80));
-    gfx_circle(s, cx, cy, r - 1, RGB(60, 60, 80));
+    gfx_shadow(s, (int)(cx - r), (int)(cy - r + U(3)), (int)(2 * r), (int)(2 * r), (int)r, U(14), 50);
+    gfx_disc(s, cx, cy, r, 0xFFFFFF, 255);
+    gfx_ring(s, cx, cy, r, U(1) * 1.5f, 0xD1D1D6, 255);
     for (int i = 0; i < 60; i++) {
-        int in = i % 5 ? r - 5 : r - 12;
-        int dx = sin60[i], dy = -sin60[(i + 15) % 60];
-        gfx_thick_line(s, cx + dx * in / 1000, cy + dy * in / 1000, cx + dx * (r - 3) / 1000, cy + dy * (r - 3) / 1000,
-                       i % 5 ? 1 : 3, RGB(60, 60, 80));
+        float dx = sin60[i] / 1000.0f, dy = -sin60[(i + 15) % 60] / 1000.0f, in = i % 5 ? r * 0.90f : r * 0.82f;
+        gfx_capsule(s, cx + dx * in, cy + dy * in, cx + dx * r * 0.94f, cy + dy * r * 0.94f, i % 5 ? U(1) * 1.0f : U(1) * 2.5f,
+                    i % 5 ? 0xAEAEB2 : 0x1D1D1F, 255);
+    }
+    static const char *num[4] = {"12", "3", "6", "9"};
+    for (int k = 0; k < 4; k++) {
+        int i = k * 15, fs = (int)(r * 0.20f);
+        float dx = sin60[i] / 1000.0f, dy = -sin60[(i + 15) % 60] / 1000.0f;
+        int tw = text_width(font_bold, fs, num[k]);
+        text_draw(s, font_bold, fs, (int)(cx + dx * r * 0.66f) - tw / 2, (int)(cy + dy * r * 0.66f) - text_height(font_bold, fs) / 2,
+                  num[k], 0x1D1D1F);
     }
     s64 now = sys_time();
     DateTime dt = {0, 0, 0, 0, 0, 0, 0};
     if (now > 0)
         time_to_date((u64)now, &dt);
-    hand(cx, cy, dt.hour % 12 * 5 + dt.min / 12, r * 5 / 10, 5, RGB(30, 30, 40));
-    hand(cx, cy, dt.min, r * 8 / 10, 3, RGB(30, 30, 40));
-    hand(cx, cy, dt.sec, r * 9 / 10, 1, RGB(210, 40, 40));
-    gfx_fill_circle(s, cx, cy, 4, RGB(210, 40, 40));
+    hand(cx, cy, dt.hour % 12 * 5 + dt.min / 12, r * 0.50f, 0, U(1) * 5.0f, 0x1D1D1F);
+    hand(cx, cy, dt.min, r * 0.78f, 0, U(1) * 3.5f, 0x1D1D1F);
+    hand(cx, cy, dt.sec, r * 0.86f, r * 0.15f, U(1) * 1.5f, 0xFF9500);
+    gfx_disc(s, cx, cy, U(1) * 4.0f, 0xFF9500, 255);
+    gfx_disc(s, cx, cy, U(1) * 1.5f, 0xFFFFFF, 255);
     char t[40];
-    snprintf(t, sizeof(t), "%02d:%02d:%02d  %02d.%02d.%04d", dt.hour, dt.min, dt.sec, dt.day, dt.month, dt.year);
-    gfx_text(s, x + (cw - gfx_text_width(t)) / 2, cy + r + 8, t, RGB(30, 30, 40), GFX_TRANSPARENT);
+    snprintf(t, sizeof(t), "%02d:%02d:%02d", dt.hour, dt.min, dt.sec);
+    int fs = U(22), tw = text_width(font_bold, fs, t);
+    text_draw(s, font_bold, fs, x + (cw - tw) / 2, (int)(cy + r + U(12)), t, C_TEXT);
+    snprintf(t, sizeof(t), "%02d.%02d.%04d", dt.day, dt.month, dt.year);
+    tw = text_width(font_ui, FS, t);
+    text_draw(s, font_ui, FS, x + (cw - tw) / 2, (int)(cy + r + U(12)) + text_height(font_bold, fs), t, C_TEXT2);
 }
 
 void draw_about(Win *w, int x, int y, int cw, int ch)
 {
     (void)w;
+    (void)ch;
     Surface *s = tgt;
-    gfx_fill(s, x, y, cw, ch, RGB(245, 246, 250));
-    gfx_text_scaled(s, x + 16, y + 12, "MiniKernel", RGB(40, 90, 180), GFX_TRANSPARENT, 2);
+    gfx_fill(s, x, y, cw, ch, C_WINDOW);
+    int isz = U(96);
+    draw_app_icon(s, A_ABOUT, x + U(28), y + U(34), isz);
+    int tx = x + U(28) + isz + U(28), ty = y + U(24);
+    text_draw(s, font_bold, U(26), tx, ty, "MiniKernel", C_TEXT);
+    ty += text_height(font_bold, U(26));
+    text_draw(s, font_ui, FS, tx, ty, "Version 1.0", C_TEXT2);
+    ty += text_height(font_ui, FS) + U(14);
     char t[128];
+    int cpus = 0;
+    CpuInfo ci;
+    while (sys_cpuinfo((u64)cpus, &ci) == 0)
+        cpus++;
     u64 up = (u64)sys_ticks() / 100;
     int procs = 0;
     ProcInfo pi;
     for (u64 i = 0; sys_procinfo(i, &pi) == 0; i++)
         if (!pi.state)
             procs++;
-    int ly = y + 52;
-    snprintf(t, sizeof(t), "Bildschirm: %dx%d", W, H);
-    gfx_text(s, x + 16, ly, t, RGB(30, 30, 40), GFX_TRANSPARENT);
-    snprintf(t, sizeof(t), "L\xC3\xA4uft seit: %llu:%02llu:%02llu", (unsigned long long)(up / 3600), (unsigned long long)(up / 60 % 60),
+    const char *lab[4] = {"Prozessor", "Bildschirm", "L\xC3\xA4uft seit", "Prozesse"};
+    char val[4][64];
+    snprintf(val[0], sizeof(val[0]), "%d Kern%s (x86-64)", cpus, cpus == 1 ? "" : "e");
+    snprintf(val[1], sizeof(val[1]), "%d \xC3\x97 %d", W, H);
+    snprintf(val[2], sizeof(val[2]), "%llu:%02llu:%02llu", (unsigned long long)(up / 3600), (unsigned long long)(up / 60 % 60),
              (unsigned long long)(up % 60));
-    gfx_text(s, x + 16, ly + 20, t, RGB(30, 30, 40), GFX_TRANSPARENT);
-    snprintf(t, sizeof(t), "Prozesse: %d", procs);
-    gfx_text(s, x + 16, ly + 40, t, RGB(30, 30, 40), GFX_TRANSPARENT);
-    gfx_text(s, x + 16, ly + 70, "Eigener 64-Bit-Kernel mit UEFI-Bootloader,", RGB(80, 80, 90), GFX_TRANSPARENT);
-    gfx_text(s, x + 16, ly + 88, "Shell, Editor, USB, FAT/exFAT und Grafik.", RGB(80, 80, 90), GFX_TRANSPARENT);
+    snprintf(val[3], sizeof(val[3]), "%d", procs);
+    for (int i = 0; i < 4; i++) {
+        text_draw(s, font_bold, FS, tx, ty, lab[i], C_TEXT);
+        text_draw(s, font_ui, FS, tx + U(100), ty, val[i], C_TEXT2);
+        ty += text_height(font_ui, FS) + U(3);
+    }
+    snprintf(t, sizeof(t), "Eigener 64-Bit-Kernel mit UEFI-Bootloader");
+    text_draw(s, font_ui, FS_SMALL, tx, ty + U(10), t, C_TEXT2);
 }

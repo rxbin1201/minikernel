@@ -76,6 +76,21 @@ void gfx_move_cursor(int x, int y);
 void gfx_show_cursor(int visible);
 /* Naechstes Ereignis; 0 = keins (nicht blockierend) */
 int gfx_poll(Event *e);
+/* ---------- Glatt zeichnen (draw.c): Kantenglaettung und Transparenz, alpha 0-255 ---------- */
+u32  gfx_mix(u32 under, u32 over, int alpha);
+void gfx_blend_fill(Surface *s, int x, int y, int w, int h, u32 c, int alpha);
+void gfx_round_rect(Surface *s, int x, int y, int w, int h, int r, u32 c, int alpha);  /* gefuellt, Radius r */
+void gfx_round_frame(Surface *s, int x, int y, int w, int h, int r, u32 c, int alpha); /* 1-px-Rahmen innen */
+void gfx_shadow(Surface *s, int x, int y, int w, int h, int r, int blur, int alpha);   /* weicher Schatten aussen */
+void gfx_gradient(Surface *s, int x, int y, int w, int h, u32 top, u32 bottom);
+void gfx_disc(Surface *s, float cx, float cy, float r, u32 c, int alpha);
+void gfx_ring(Surface *s, float cx, float cy, float r, float width, u32 c, int alpha);
+void gfx_capsule(Surface *s, float ax, float ay, float bx, float by, float width, u32 c, int alpha);
+void gfx_blur(Surface *s, int radius); /* ganzes Bild */
+/* Bildausschnitt (sx, sy, w, h) aus src nach (dx, dy) mit abgerundeten Ecken (Radius r, geglaettet) kopieren */
+void gfx_blit_round(Surface *dst, const Surface *src, int sx, int sy, int dx, int dy, int w, int h, int r);
+void gfx_round_rect_grad(Surface *s, int x, int y, int w, int h, int r, u32 top, u32 bottom, int alpha);
+
 /* Wartet hoechstens timeout_ms auf ein Ereignis (-1 = ohne Grenze). 0 = keins */
 int gfx_wait(Event *e, int timeout_ms);
 /* Wartet auf den naechsten Bildwechsel des Monitors (z.B. 100 Hz): damit laeuft eine Programmschleife genau im Takt der

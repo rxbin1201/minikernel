@@ -82,6 +82,19 @@ ganze Bilder. `igdtest edid`, `igdtest scale` und `igdtest mode` pruefen Monitor
 Moduswechsel (HDMI), `igdtest dp` und `igdtest dpmode` dasselbe per DisplayPort. QEMU emuliert keine Intel-GPU: getestet wird
 auf echter Hardware (bisher i5-8400T, UHD 630, 3440x1440 ueber HDMI).
 
+## Desktop
+
+`desktop` startet die grafische Oberflaeche im Stil von macOS (hell): oben die Menueleiste (Logo-Menue mit den
+Programmen und "Zur Konsole", Menue des aktiven Programms, Lautstaerke, Datum und Uhrzeit), unten das Dock (Punkt =
+laeuft, rechts die minimierten Fenster). Fenster haben runde Ecken, weiche Schatten und die drei Knoepfe
+(schliessen, minimieren, zoomen; Doppelklick auf die Titelleiste zoomt). Menueleiste und Dock sind Milchglas ueber
+einem berechneten Farbverlauf. Ab 1300 Pixel Hoehe wird alles um 25 % groesser.
+
+- Schriften: Inter und JetBrains Mono (SIL Open Font License, verkleinert in `/share/fonts`), gerastert mit
+  stb_truetype (gemeinfrei, `Userland/include/stb_truetype.h`); `ttf.h` fuer Programme
+- Zeichnen mit Kantenglaettung und Transparenz (`Userland/lib/draw.c`): abgerundete Rechtecke, Kreise, Linien,
+  Schatten, Verlaeufe, Weichzeichnen
+
 ## Ton (Intel High Definition Audio)
 
 `Kernel/drivers/sound/hda.c` sucht einen HDA-Controller (PCI-Klasse 04.03), setzt ihn zurueck und fragt die Codecs

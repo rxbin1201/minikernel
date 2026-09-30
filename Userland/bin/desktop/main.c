@@ -5,11 +5,12 @@
 Win      wins[MAXW];
 Win     *order[MAXW]; /* Stapel: order[nord-1] liegt oben und hat den Fokus */
 int      nord;
-Surface  bg;
+Surface  bg, bg_blur;
 Surface *tgt = &gfx_screen; /* Ziel der draw_*-Funktionen */
-int      W, H, menu_open, menu_hover = -1;
+int      W, H;
 int      drag_mode; /* 0 = nichts, 1 = verschieben, 2 = Groesse */
 Win     *drag_win;
+int      mouse_x, mouse_y;
 
 static int drag_dx, drag_dy;
 static s64 last_click_tick;
@@ -42,21 +43,39 @@ static void run_fullscreen(const char *path, const char *cmdline)
     damage_all();
 }
 
-static void do_action(int a)
+static void close_menu(void)
 {
+    if (!menu_open)
+        return;
     damage_menu();
-    damage_taskbar();
+    damage_menubar();
     menu_open = 0;
+    menu_hover = -1;
+}
+
+void do_action(int a)
+{
+    close_menu();
+    Win *f = focused();
     switch (a) {
     case A_TERM: open_terminal(); break;
     case A_FILES: open_files("/"); break;
     case A_CALC: open_calc(); break;
-    case A_CLOCK: new_window(W_CLOCK, "Uhr", 260, 300); break;
-    case A_ABOUT: new_window(W_ABOUT, "Info", 400, 220); break;
+    case A_CLOCK: open_clock(); break;
+    case A_ABOUT: open_about(); break;
     case A_PAINT: run_fullscreen("/bin/paint", "paint"); break;
     case A_SNAKE: run_fullscreen("/bin/snake", "snake"); break;
     case A_TETRIS: run_fullscreen("/bin/tetris", "tetris"); break;
     case A_QUIT: quit = 1; break;
+    case A_WIN_NEW:
+        if (!f || f->kind == W_TERM) open_terminal();
+        else if (f->kind == W_FILES) open_files("/");
+        else if (f->kind == W_CALC) open_calc();
+        else if (f->kind == W_CLOCK) open_clock();
+        break;
+    case A_WIN_MIN: if (f) minimize(f); break;
+    case A_WIN_ZOOM: if (f) zoom_win(f); break;
+    case A_WIN_CLOSE: if (f) close_win(f); break;
     }
 }
 
@@ -75,8 +94,10 @@ static void content_click(Win *w, int px, int py, int dbl)
     int x, y, cw, ch;
     content_rect(w, &x, &y, &cw, &ch);
     if (w->kind == W_FILES) {
-        int i = w->scroll + (py - y) / ROW_H;
-        if (i < w->nent) {
+        int i = w->scroll + (py - y - U(28)) / ROW_H; /* unter der Kopfzeile */
+        if (py - y < U(28))
+            i = -1;
+        if (i >= 0 && i < w->nent) {
             w->sel = i;
             if (dbl)
                 files_open_entry(w, i);
@@ -91,41 +112,34 @@ static void content_click(Win *w, int px, int py, int dbl)
 
 static void mouse_down(Event *e)
 {
-    int y0 = H - TASKBAR_H;
     if (menu_open) {
         int i = menu_hit(e->x, e->y);
         if (i >= 0) {
-            do_action(menu[i].action);
+            do_action(menu_action(i));
             return;
         }
-        damage_menu();
-        damage_taskbar();
-        menu_open = 0;
-        if (e->y < y0)
-            return;
+        int m = menubar_hit(e->x, e->y), was = menu_open;
+        close_menu();
+        if (m && m != was) { /* anderes Menue der Leiste: gleich oeffnen */
+            menu_open = m;
+            damage_menu();
+            damage_menubar();
+        }
+        return;
     }
-    if (e->y >= y0) { /* Taskleiste */
-        if (e->x < 78) {
-            menu_open = !menu_open;
+    if (e->y < MENUBAR_H) { /* Menueleiste */
+        int m = menubar_hit(e->x, e->y);
+        if (m) {
+            menu_open = m;
             menu_hover = -1;
             damage_menu();
-            damage_taskbar();
-            return;
+            damage_menubar();
         }
-        int bx = 82;
-        for (int i = 0; i < MAXW; i++) {
-            Win *w = &wins[i];
-            if (!w->used)
-                continue;
-            if (e->x >= bx && e->x < bx + 146) {
-                if (w == focused())
-                    minimize(w);
-                else
-                    raise_win(w);
-                return;
-            }
-            bx += 150;
-        }
+        return;
+    }
+    int d = dock_hit(e->x, e->y);
+    if (d >= 0) {
+        dock_click(d);
         return;
     }
     Win *w = window_at(e->x, e->y);
@@ -141,10 +155,13 @@ static void mouse_down(Event *e)
     last_click_x = e->x;
     last_click_y = e->y;
     if (e->y < w->y + TITLE_H) {
-        if (e->x >= w->x + w->w - 22) {
+        int b = title_button_at(w, e->x, e->y);
+        if (b == 1) {
             close_win(w);
-        } else if (e->x >= w->x + w->w - 44) {
+        } else if (b == 2) {
             minimize(w);
+        } else if (b == 3 || dbl) { /* gruener Knopf oder Doppelklick auf die Titelleiste */
+            zoom_win(w);
         } else {
             drag_mode = 1;
             drag_win = w;
@@ -153,7 +170,7 @@ static void mouse_down(Event *e)
         }
         return;
     }
-    if (e->x >= w->x + w->w - 14 && e->y >= w->y + w->h - 14) {
+    if (e->x >= w->x + w->w - U(16) && e->y >= w->y + w->h - U(16)) {
         drag_mode = 2;
         drag_win = w;
         drag_dx = w->x + w->w - e->x;
@@ -165,6 +182,8 @@ static void mouse_down(Event *e)
 
 static void mouse_move(Event *e)
 {
+    mouse_x = e->x;
+    mouse_y = e->y;
     if (menu_open) { /* Hervorhebung im Menue */
         int h = menu_hit(e->x, e->y);
         if (h != menu_hover) {
@@ -172,21 +191,27 @@ static void mouse_move(Event *e)
             damage_menu();
         }
     }
-    if (!drag_mode)
+    if (!drag_mode) {
+        dock_hover_at(e->x, e->y);
+        Win *w = window_at(e->x, e->y); /* Symbole in den drei Knoepfen, wenn die Maus darueber steht */
+        set_button_hover(w && e->y < w->y + TITLE_H && e->x < w->x + U(70) ? w : 0);
         return;
+    }
     Win *w = drag_win;
     damage_win(w); /* alte Stelle */
     if (drag_mode == 1) {
         w->x = e->x - drag_dx;
         w->y = e->y - drag_dy;
-        if (w->y < 0) w->y = 0;
-        if (w->y > H - TASKBAR_H - TITLE_H) w->y = H - TASKBAR_H - TITLE_H;
-        if (w->x > W - 60) w->x = W - 60;
-        if (w->x + w->w < 60) w->x = 60 - w->w;
+        w->zoomed = 0;
+        if (w->y < MENUBAR_H) w->y = MENUBAR_H;
+        if (w->y > H - TITLE_H) w->y = H - TITLE_H;
+        if (w->x > W - U(60)) w->x = W - U(60);
+        if (w->x + w->w < U(60)) w->x = U(60) - w->w;
     } else {
         int nw = e->x + drag_dx - w->x, nh = e->y + drag_dy - w->y;
-        w->w = nw < 180 ? 180 : nw;
-        w->h = nh < 120 ? 120 : nh;
+        w->w = nw < U(200) ? U(200) : nw;
+        w->h = nh < U(140) ? U(140) : nh;
+        w->zoomed = 0;
         if (w->kind == W_TERM)
             term_alloc(w);
         win_dirty_all(w);
@@ -197,9 +222,7 @@ static void mouse_move(Event *e)
 static void key(int k)
 {
     if (k == 0x1B && menu_open) {
-        damage_menu();
-        damage_taskbar();
-        menu_open = 0;
+        close_menu();
         return;
     }
     Win *w = focused();
@@ -224,14 +247,14 @@ static void key(int k)
         else if (k == '\b' || k == 0x7F) files_open_entry(w, 0 < w->nent && strcmp(w->ents[0].name, "..") == 0 ? 0 : -1);
         int x, y, cw, ch;
         content_rect(w, &x, &y, &cw, &ch);
-        int vis = ch / ROW_H;
+        int vis = (ch - U(28)) / ROW_H;
         if (w->sel < w->scroll) w->scroll = w->sel;
         if (w->sel >= w->scroll + vis) w->scroll = w->sel - vis + 1;
         win_dirty_all(w);
     } else if (w->kind == W_TEXT) {
         int x, y, cw, ch;
         content_rect(w, &x, &y, &cw, &ch);
-        int vis = (ch - 4) / 16;
+        int vis = (ch - U(16)) / CELL_H;
         if (k == KEY_DOWN) w->top++;
         else if (k == KEY_UP) w->top--;
         else if (k == KEY_PGDN || k == ' ') w->top += vis;
@@ -253,10 +276,10 @@ static void wheel(Event *e)
     content_rect(w, &x, &y, &cw, &ch);
     if (w->kind == W_FILES) {
         w->scroll -= e->wheel * 3;
-        if (w->scroll > w->nent - ch / ROW_H) w->scroll = w->nent - ch / ROW_H;
+        if (w->scroll > w->nent - (ch - U(28)) / ROW_H) w->scroll = w->nent - (ch - U(28)) / ROW_H;
         if (w->scroll < 0) w->scroll = 0;
     } else if (w->kind == W_TEXT) {
-        int vis = (ch - 4) / 16;
+        int vis = (ch - U(16)) / CELL_H;
         w->top -= e->wheel * 3;
         if (w->top > w->nlines - vis) w->top = w->nlines - vis;
         if (w->top < 0) w->top = 0;
@@ -273,6 +296,7 @@ void _start(int argc, char **argv)
     sys_tty_fg(0); /* Strg+C geht an die Fenster, nicht an den Desktop */
     W = gfx_screen.w;
     H = gfx_screen.h;
+    ui_init();
     make_background();
     open_terminal();
     damage_all();
@@ -302,13 +326,17 @@ void _start(int argc, char **argv)
             }
         }
         Win *f = focused();
-        if (f != last_focus) { /* Titelleiste (aktiv/inaktiv) und Terminal-Cursor beider Fenster */
+        if (f != last_focus) { /* Titelleiste, Terminal-Cursor und Schatten (aktiv kraeftiger) beider Fenster */
             for (int i = 0; i < nord; i++)
-                if (order[i] == last_focus)
+                if (order[i] == last_focus) {
                     win_dirty_all(last_focus);
-            if (f)
+                    damage_win(last_focus);
+                }
+            if (f) {
                 win_dirty_all(f);
-            damage_taskbar();
+                damage_win(f);
+            }
+            damage_menubar();
             last_focus = f;
         }
         s64 now = sys_time();
@@ -317,9 +345,9 @@ void _start(int argc, char **argv)
             for (int i = 0; i < nord; i++)
                 if (order[i]->kind == W_CLOCK || order[i]->kind == W_ABOUT)
                     win_dirty_all(order[i]);
-            if (now / 60 != last_min) { /* Uhrzeit in der Taskleiste */
+            if (now / 60 != last_min) { /* Uhrzeit in der Menueleiste */
                 last_min = now / 60;
-                damage(W - 60, H - TASKBAR_H, 60, TASKBAR_H);
+                damage_menubar();
             }
         }
         draw_all(); /* direkt nach dem Bildwechsel: was sich geaendert hat, steht bis zum naechsten Bild */
