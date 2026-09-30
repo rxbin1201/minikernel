@@ -47,6 +47,18 @@ int igd_scale_test(void);
 /* Stufe 4, Teil 3 (igdtest mode): die per HDMI moeglichen Modi aus der EDID je einige Sekunden setzen, dann zurueck */
 int igd_mode_test(void);
 
+/* Fest eingebaut: Modi des Monitors (EDID, per HDMI moeglich, hoechstens so gross wie der Framebuffer der Firmware)
+ * im Betrieb umschalten; die Konsole passt sich an. hz in 1/100 Hz (0 = hoechste Bildrate bzw. beim Setzen egal);
+ * w = 0 setzt den Modus der Firmware. */
+#define IGD_MODE_NODRIVER (-1)
+#define IGD_MODE_NOMODE   (-2)
+#define IGD_MODE_BUSY     (-3) /* ein Grafikprogramm laeuft */
+#define IGD_MODE_FAILED   (-4)
+int  igd_mode_count(void);
+int  igd_mode_info(int i, uint32_t *w, uint32_t *h, uint32_t *hz, int *current);
+int  igd_mode_set(uint32_t w, uint32_t h, uint32_t hz);
+void igd_modes_boot(void); /* aus igd_init: Modi einsammeln, "igdmode=" anwenden */
+
 /* Fest eingebaut (ohne "noigd" in der Kommandozeile): Hardware-Mauszeiger und Doppelpufferung */
 int  igd_cursor_available(void);
 void igd_cursor_move(int x, int y, int visible); /* Spitze des Pfeils bei (x, y) */

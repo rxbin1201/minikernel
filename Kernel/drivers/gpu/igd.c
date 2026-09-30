@@ -679,6 +679,7 @@ static void display_init(const BootInfo *bi)
     int c = setup_cursor(p), f = setup_flip(p);
     kprintf("igd: Hardware-Mauszeiger %s, Doppelpufferung %s (zweiter Puffer %u KiB im RAM)\n", c == 0 ? "an" : "AUS",
             f == 0 ? "an" : "AUS", (uint32_t)((uint64_t)igd_scr_stride * igd_scr_h / 1024));
+    igd_modes_boot();
 }
 
 int igd_cursor_available(void)

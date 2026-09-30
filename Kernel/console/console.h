@@ -25,6 +25,12 @@ uint32_t console_height_px(void);
 void     console_set_scale(uint32_t scale);
 uint32_t console_scale(void);
 
+/* Nach einem Moduswechsel: neue sichtbare Groesse (hoechstens die vom Start, gleiche Zeilenlaenge). Die Schrift passt
+ * sich an, wenn sie nicht per scale= festgelegt ist; die letzten Zeilen bleiben stehen. 0 = ok, -1 = geht nicht
+ * (z.B. zeichnet gerade ein Grafikprogramm) */
+int console_resize(uint32_t w, uint32_t h);
+int console_gfx_active(void); /* ein Programm hat den Bildschirm (SYS_GFX) */
+
 /* Verlauf: aus dem Bild gescrollte Zeilen bleiben erhalten. console_scroll_request ist aus Interrupts/anderen Threads
  * aufrufbar (positiv = zurueck in die Vergangenheit); ein Konsolen-Thread (console_start_thread, nach sched_init)
  * blaettert dann. Neue Ausgabe laesst die Ansicht stehen; ein Tastendruck springt zurueck zum Ende. */

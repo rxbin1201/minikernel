@@ -34,7 +34,9 @@ static uint32_t     gfx_owner;  /* PID dieses Programms */
 static uint32_t pitch;          /* Pixel pro Zeile */
 static uint32_t width_px, height_px;
 static uint32_t cols, rows;     /* Zeichen pro Zeile / Anzahl Zeilen */
+static uint32_t shadow_h;       /* Hoehe, fuer die Abbild (und Framebuffer) angelegt sind: groesser geht nicht */
 static uint32_t scale = 1;      /* Schriftvergroesserung: Zelle = (8 * scale) x (16 * scale) Pixel */
+static int      scale_fixed;    /* vom Benutzer gewaehlt (scale=): bleibt bei einem Moduswechsel */
 static uint32_t cw = FONT_WIDTH, chh = FONT_HEIGHT;
 static uint32_t cx, cy;
 #define DEF_FG 0x00C0C0C0u
@@ -466,13 +468,18 @@ static void set_layout(uint32_t s)
     }
 }
 
+static uint32_t auto_scale(uint32_t w, uint32_t h)
+{
+    return w >= 2400 && h >= 1300 ? 2 : 1; /* 4K und aehnlich: doppelte Schrift */
+}
+
 void console_init(const BootFramebuffer *info)
 {
     fb        = (volatile uint32_t *)info->base;
     pitch     = info->pixels_per_line;
     width_px  = info->width;
     height_px = info->height;
-    set_layout(width_px >= 2400 && height_px >= 1300 ? 2 : 1); /* 4K und aehnlich: doppelte Schrift */
+    set_layout(auto_scale(width_px, height_px));
     console_clear();
 }
 
@@ -485,6 +492,7 @@ void console_enable_shadow(void)
     shadow = kmalloc(bytes);
     if (!shadow)
         return;
+    shadow_h = height_px;
     /* Wortweise (64 Bit) kopieren; memmove wuerde hier rueckwaerts byteweise laufen (Ziel liegt hinter der Quelle) */
     const volatile uint64_t *src = (const volatile uint64_t *)fb;
     uint64_t *dst = (uint64_t *)shadow;
@@ -505,6 +513,7 @@ void console_enable_shadow(void)
 
 void console_set_scale(uint32_t s)
 {
+    scale_fixed = 1;
     if (!fb || s == scale)
         return;
     uint64_t f = irq_save();
@@ -516,6 +525,50 @@ void console_set_scale(uint32_t s)
 uint32_t console_scale(void)
 {
     return scale;
+}
+
+/* Neue sichtbare Groesse nach einem Moduswechsel (gleicher Framebuffer, gleiche Zeilenlaenge). Die Zeilen bis zum
+ * Cursor bleiben stehen (die letzten, soweit sie passen), der Verlauf beginnt neu. */
+int console_resize(uint32_t w, uint32_t h)
+{
+    if (!fb || !shadow || gfx_mode || w < 64 || h < 64 || w > pitch || h > shadow_h)
+        return -1;
+    uint64_t f = irq_save();
+    cursor_hide();
+    uint32_t ocols = cols, orows = cy + 1 < rows ? cy + 1 : rows, ocx = cx;
+    Cell *old = kmalloc((uint64_t)orows * ocols * sizeof(Cell));
+    if (old)
+        memcpy(old, cells, (uint64_t)orows * ocols * sizeof(Cell));
+    else
+        orows = 0;
+    width_px = w;
+    height_px = h;
+    set_layout(scale_fixed ? scale : auto_scale(w, h));
+    if (colors_dirty)
+        update_color_idx();
+    for (uint32_t i = 0; i < rows * cols; i++) {
+        cells[i].ch = 0;
+        cells[i].fg = cur_fg_i;
+        cells[i].bg = cur_bg_i;
+    }
+    uint32_t n = orows < rows ? orows : rows, nc = ocols < cols ? ocols : cols;
+    for (uint32_t r = 0; r < n; r++)
+        memcpy(&cells[r * cols], &old[(orows - n + r) * ocols], nc * sizeof(Cell));
+    cy = n ? n - 1 : 0;
+    cx = ocx < cols ? ocx : cols - 1;
+    for (uint64_t i = 0; i < (uint64_t)pitch * height_px; i++)
+        shadow[i] = bg;
+    render_all();
+    memmove((void *)fb, shadow, (uint64_t)height_px * pitch * sizeof(uint32_t));
+    cursor_show();
+    irq_restore(f);
+    kfree(old);
+    return 0;
+}
+
+int console_gfx_active(void)
+{
+    return gfx_mode;
 }
 
 void console_clear(void)

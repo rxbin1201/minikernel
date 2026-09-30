@@ -67,6 +67,7 @@
 #define SYS_SOCKPORT  59 /* (fd) -> lokaler Port des Sockets */
 #define SYS_CPUINFO   60 /* (index, CpuInfo*) -> 0 oder ERR_NOENT am Ende */
 #define SYS_GPU       62 /* (op): Intel-Grafik-Tests: 1 = Page-Flipping, 2 = Hardware-Mauszeiger, 3 = Blitter, 4 = Zaehler/Messung, 5 = EDID, 6 = Skalierer, 7 = Moduswechsel (igdtest) -> 0 ok, < 0 Fehler (Details im Kernel-Log) */
+#define SYS_SETMODE   63 /* (breite, hoehe, hz100; 0 = egal) -> 0; breite 0 = Modus der Firmware. ERR_NOSYS ohne Treiber, ERR_NOENT unbekannt, ERR_AGAIN Grafikprogramm laeuft, ERR_IO */
 #define SYS_KLOG      61 /* (u64 *pos, buf, max) -> Bytes aus dem Kernel-Log ab *pos (wird weitergezaehlt), 0 = Ende */
 
 /* Argument fuer SYS_SENDTO/SYS_RECVFROM (gleiches Layout in Userland/user.h) */
@@ -145,7 +146,7 @@ typedef struct {
     uint32_t current;    /* 1 = aktuell benutzter Modus */
     uint32_t scale;      /* Schriftvergroesserung */
     uint32_t cols, rows; /* Textfeld */
-    uint32_t pad;
+    uint32_t hz100;      /* Bildrate in 1/100 Hz; 0 = Modus der Firmware (umschalten erst nach Neustart) */
     uint64_t kernel_size; /* Groesse von \kernel.elf auf dem Boot-Volume */
 } VideoInfo;
 

@@ -291,4 +291,16 @@ void test_video(BootInfo *info)
     check("Der aktuelle Modus stimmt mit dem Framebuffer ueberein", have_cur);
     check("Textfeld passt in den Bildschirm", console_cols() * 8 * console_scale() <= info->fb.width &&
                                               console_rows() * 16 * console_scale() <= info->fb.height);
+
+    /* Moduswechsel (igd_mode_set): Konsole auf eine kleinere Groesse und zurueck */
+    uint32_t w0 = console_width_px(), h0 = console_height_px(), c0 = console_cols(), r0 = console_rows();
+    int small = console_resize(w0 / 2, h0 / 2) == 0;
+    uint32_t cs = console_cols(), rs = console_rows(), ws = console_width_px();
+    kprintf("  verkleinert auf %ux%u: Textfeld %ux%u\n", ws, console_height_px(), cs, rs);
+    int back = console_resize(w0, h0) == 0;
+    check("Konsole passt sich einer kleineren Aufloesung an", small && ws == w0 / 2 &&
+                                                              cs == (w0 / 2) / (8 * console_scale()) && rs < r0);
+    check("... und kommt zur alten Groesse zurueck", back && console_width_px() == w0 && console_height_px() == h0 &&
+                                                     console_cols() == c0 && console_rows() == r0);
+    check("Groesser als der Framebuffer geht nicht", console_resize(w0, h0 + 64) != 0 && console_height_px() == h0);
 }

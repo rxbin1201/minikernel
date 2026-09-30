@@ -3,6 +3,9 @@
 /* resolution                 listet die Grafikmodi, die der Bildschirm bzw. die Firmware anbietet (* = aktuell)
  * resolution 1920x1080       speichert den Wunsch in \cmdline.txt auf dem Boot-Volume: gilt ab dem naechsten Start
  * resolution max | auto      hoechste Aufloesung / die der Firmware (Standard)
+ * Mit Intel-Grafiktreiber (Modi mit Bildrate) schaltet "resolution 2560x1440[@60]" sofort um; gespeichert wird
+ * "igdmode=2560x1440@60" (der Kernel setzt ihn beim Start) und "mode=max" (der Framebuffer der Firmware muss so gross
+ * sein wie der groesste Modus).
  * resolution -s N            Schriftvergroesserung 1..4 (auto: ab ca. 2400 Pixel Breite 2)
  * Optionen: -r sofort neu starten, -d PFAD Boot-Volume selbst angeben (z.B. /mnt/usb0p1)
  * Der Modus kann nur der Bootloader einstellen (vor dem Kernel), deshalb wirkt eine Aenderung erst nach einem Neustart. */
@@ -31,12 +34,121 @@ static void list_modes(void)
         VideoInfo *m = &modes[order[k]];
         if (m->current)
             cur = *m;
-        printf("  %s%4ux%-4u%s%s\n", m->current && tty ? C_GREEN : "", m->width, m->height, m->current && tty ? C_RESET : "",
-               m->current ? "  <- aktuell" : "");
+        char hz[16] = "";
+        if (m->hz100)
+            snprintf(hz, sizeof(hz), "  %3u Hz", (m->hz100 + 50) / 100);
+        printf("  %s%4ux%-4u%s%s%s\n", m->current && tty ? C_GREEN : "", m->width, m->height, hz,
+               m->current && tty ? C_RESET : "", m->current ? "  <- aktuell" : "");
     }
     if (cur.width)
         printf("Konsole: %u x %u Zeichen, Schrift x%u\n", cur.cols, cur.rows, cur.scale);
-    printf("%sAendern: resolution 1920x1080 (oder max, auto), danach neu starten (reboot).%s\n", tty ? C_DIM : "", tty ? C_RESET : "");
+    if (nmodes && modes[0].hz100)
+        printf("%sAendern: resolution %ux%u@%u (sofort, gilt auch nach dem Neustart; max, auto).%s\n", tty ? C_DIM : "",
+               modes[0].width, modes[0].height, (modes[0].hz100 + 50) / 100, tty ? C_RESET : "");
+    else
+        printf("%sAendern: resolution 1920x1080 (oder max, auto), danach neu starten (reboot).%s\n", tty ? C_DIM : "", tty ? C_RESET : "");
+}
+
+/* Setzt in cmdline.txt aller Boot-Volumes die Schluessel keys (Wert NULL = entfernen); Ergebnis: 0 = alle geschrieben */
+static int save_boot(const char *dir, const char **keys, const char **vals, int nkeys)
+{
+    char dirs[4][40];
+    int n = 0;
+    if (dir) {
+        snprintf(dirs[0], 40, "%s", dir);
+        n = 1;
+    } else {
+        n = find_boot_volumes(dirs, 4);
+    }
+    if (!n) {
+        fprintf(2, "resolution: kein Boot-Volume gefunden (enthaelt \\kernel.elf und \\EFI). Mit -d PFAD angeben, z.B. -d /mnt/usb0p1\n");
+        return -1;
+    }
+    int rc = 0;
+    for (int i = 0; i < n; i++) {
+        int r = 0;
+        for (int k = 0; k < nkeys && r == 0; k++)
+            r = boot_cmdline_set(dirs[i], keys[k], vals[k]);
+        if (r == 0) {
+            printf("%s/cmdline.txt aktualisiert (", dirs[i]);
+            for (int k = 0; k < nkeys; k++)
+                printf("%s%s%s", k ? ", " : "", keys[k], vals[k] ? vals[k] : "(entfernt)");
+            printf(").\n");
+        } else {
+            fprintf(2, "resolution: %s/cmdline.txt konnte nicht geschrieben werden (Fehler %d%s)\n", dirs[i], r,
+                    r == -30 ? ": Volume ist nur lesbar" : "");
+            rc = -1;
+        }
+    }
+    return rc;
+}
+
+/* Intel-Treiber: sofort umschalten, dann fuer den naechsten Start speichern */
+static int set_live(const char *mode, const char *scale, const char *dir)
+{
+    unsigned w = 0, h = 0, hz = 0;
+    if (strcmp(mode, "max") == 0) {
+        w = modes[0].width;
+        h = modes[0].height;
+        hz = modes[0].hz100;
+    } else if (strcmp(mode, "auto") != 0) {
+        const char *p = mode;
+        while (*p >= '0' && *p <= '9')
+            w = w * 10 + (unsigned)(*p++ - '0');
+        if (*p == 'x')
+            p++;
+        while (*p >= '0' && *p <= '9')
+            h = h * 10 + (unsigned)(*p++ - '0');
+        if (*p == '@') {
+            p++;
+            while (*p >= '0' && *p <= '9')
+                hz = hz * 10 + (unsigned)(*p++ - '0');
+            hz *= 100;
+        }
+        if (!w || !h || *p) {
+            fprintf(2, "resolution: '%s' ist keine Aufloesung (Beispiel: 2560x1440, 2560x1440@60, max oder auto)\n", mode);
+            return 2;
+        }
+    }
+    s64 r = sys_setmode(w, h, hz);
+    if (r == ERR_NOENT) {
+        fprintf(2, "resolution: %s wird vom Monitor nicht angeboten (oder geht per HDMI nicht)\n", mode);
+        list_modes();
+        return 2;
+    }
+    if (r == ERR_AGAIN) {
+        fprintf(2, "resolution: ein Grafikprogramm hat gerade den Bildschirm, erst beenden\n");
+        return 1;
+    }
+    if (r < 0) {
+        fprintf(2, "resolution: Umschalten fehlgeschlagen (Fehler %lld), Details: dmesg | grep igd\n", (long long)r);
+        return 1;
+    }
+    VideoInfo now = {0};
+    for (u64 i = 0; sys_videoinfo(i, &now) == 0 && !now.current; i++) /* was ist jetzt aktiv (samt Textfeld)? */
+        ;
+    printf("Jetzt %ux%u mit %u Hz, Textfeld %ux%u (Schrift x%u).\n", now.width, now.height, (now.hz100 + 50) / 100,
+           now.cols, now.rows, now.scale);
+
+    char val[32];
+    const char *keys[3] = {"igdmode=", "mode=", "scale="}, *vals[3];
+    int nk = 2;
+    if (strcmp(mode, "auto") == 0) {
+        vals[0] = NULL; /* wieder der Modus, den die Firmware einstellt */
+        nk = 1;
+    } else {
+        snprintf(val, sizeof(val), "%ux%u@%u", now.width, now.height, (now.hz100 + 50) / 100);
+        vals[0] = val;
+        vals[1] = "max";
+    }
+    if (scale) {
+        vals[nk] = strcmp(scale, "auto") == 0 ? NULL : scale;
+        keys[nk] = "scale=";
+        nk++;
+    }
+    if (save_boot(dir, keys, vals, nk) != 0)
+        printf("Der Modus gilt nur bis zum Neustart.\n");
+    return 0;
 }
 
 void _start(int argc, char **argv)
@@ -66,6 +178,13 @@ void _start(int argc, char **argv)
         else
             list_modes();
         sys_exit(0);
+    }
+    if (mode && nmodes && modes[0].hz100) { /* Intel-Treiber: sofort */
+        if (scale && strcmp(scale, "auto") != 0 && (scale[0] < '1' || scale[0] > '4' || scale[1])) {
+            fprintf(2, "resolution: die Schriftvergroesserung ist 1..4 oder auto\n");
+            sys_exit(2);
+        }
+        sys_exit(set_live(mode, scale, dir));
     }
 
     /* Wert pruefen */

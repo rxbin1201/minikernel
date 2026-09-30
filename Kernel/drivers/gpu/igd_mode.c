@@ -1,4 +1,5 @@
-/* Intel-Grafik Gen9, Stufe 4: Bildschirmmodi. Teil 1 (igdtest edid): nur lesen. Teil 2 (igdtest scale): kleinere
+/* Intel-Grafik Gen9, Stufe 4: Bildschirmmodi. Fest eingebaut: die Modi des Monitors (EDID) im Betrieb umschalten
+ * (igd_mode_set, SYS_SETMODE, resolution). Die Tests: Teil 1 (igdtest edid): nur lesen. Teil 2 (igdtest scale): kleinere
  * Aufloesung, die der Skalierer der Pipe auf den Bildschirm hochrechnet; Takt und Zeitablauf bleiben. Teil 3
  * (igdtest mode): echter Moduswechsel am HDMI-Anschluss (Pipe/Port aus, DPLL neu, Zeitablauf, wieder an).
  *
@@ -13,6 +14,7 @@
 #include "arch/x86_64/apic.h"
 #include "arch/x86_64/cpu.h"
 #include "console/console.h"
+#include "core/cmdline.h"
 #include "core/sched.h"
 #include "lib/kprintf.h"
 #include "lib/string.h"
@@ -337,6 +339,14 @@ static void edid_cta(const uint8_t *e)
 }
 
 /* ---------- Aktueller Zustand der Pipe ---------- */
+
+static uint32_t cfg_khz(uint32_t cfg1, uint32_t cfg2) /* HDMI-Pixeltakt aus CFGCR1/2, 0 = ungueltig */
+{
+    uint64_t dco = 24000ULL * (cfg1 & 0x1FF) + 24000ULL * ((cfg1 >> 9) & 0x7FFF) / 0x8000; /* kHz */
+    static const uint32_t pd[] = {1, 2, 3, 0, 7, 0, 0, 0}, kd[] = {5, 2, 3, 1};
+    uint32_t p = pd[(cfg2 >> 2) & 7], k = kd[(cfg2 >> 5) & 3], q = (cfg2 & (1u << 7)) ? (cfg2 >> 8) & 0xFF : 1;
+    return p && q && k ? (uint32_t)(dco / (p * q * k) / 5) : 0;
+}
 
 static uint32_t dpll_khz(int id, int *hdmi)
 {
@@ -742,6 +752,13 @@ static int mode_from_timing(const Timing *t, const HwMode *cur, uint32_t surf, u
     return 0;
 }
 
+static void delay_us(uint64_t us)
+{
+    uint64_t end = time_us() + us;
+    while (time_us() < end)
+        ;
+}
+
 static int wait_bits(uint32_t reg, uint32_t mask, uint32_t want, int ms)
 {
     uint64_t end = time_us() + (uint64_t)ms * 1000;
@@ -766,7 +783,7 @@ static void mode_off(const HwFixed *f)
     igd_wr(TRANS_DDI_FUNC_CTL(p), igd_rd(TRANS_DDI_FUNC_CTL(p)) & ~((1u << 31) | (7u << 28)));
     igd_wr(TRANS_CLK_SEL(p), 0);
     igd_wr(DDI_BUF_CTL(f->port), f->buf_ctl & ~(1u << 31));
-    thread_sleep_ms(1);
+    delay_us(1000);
     igd_wr(DPLL_CTRL2, igd_rd(DPLL_CTRL2) | 1u << (f->port + 15)); /* Takt zum Port aus */
     igd_wr(pll_ctl_reg(f->dpll), igd_rd(pll_ctl_reg(f->dpll)) & ~(1u << 31));
     (void)igd_rd(pll_ctl_reg(f->dpll));
@@ -806,7 +823,7 @@ static int mode_on(const HwFixed *f, const HwMode *m)
         rc = -2;
     }
     igd_wr(DDI_BUF_CTL(f->port), f->buf_ctl | 1u << 31);
-    thread_sleep_ms(1);
+    delay_us(1000);
     return rc;
 }
 
@@ -931,4 +948,217 @@ int igd_mode_test(void)
     kprintf("igdmode: %s (%d von %d Modi gezeigt)\n", rc == 0 ? "Moduswechsel funktioniert" : "Moduswechsel fehlgeschlagen",
             shown, nc);
     return rc;
+}
+
+/* ---------- Fest eingebaut: Modi des Monitors im Betrieb umschalten ---------- */
+
+#define MAX_MODES 16
+static Timing   modes[MAX_MODES];     /* nach Flaeche, dann Bildrate absteigend */
+static int      nmodes, cur_idx = -1, boot_idx = -1;
+static HwFixed  live;                 /* Pipe, Port, DPLL und die festen Registerwerte */
+static HwMode   boot_hw, cur_hw;      /* Modus der Firmware / gerade gesetzter */
+
+static int same_timing(const Timing *a, const Timing *b)
+{
+    uint32_t d = a->khz > b->khz ? a->khz - b->khz : b->khz - a->khz;
+    return a->ha == b->ha && a->va == b->va && a->ht == b->ht && a->vt == b->vt && d < 1000;
+}
+
+static void add_mode(const Timing *t)
+{
+    for (int i = 0; i < nmodes; i++)
+        if (same_timing(&modes[i], t))
+            return;
+    if (nmodes >= MAX_MODES)
+        return;
+    int i = nmodes++;
+    uint64_t area = (uint64_t)t->ha * t->va;
+    while (i > 0) {
+        uint64_t a = (uint64_t)modes[i - 1].ha * modes[i - 1].va;
+        if (a > area || (a == area && hz100(&modes[i - 1]) >= hz100(t)))
+            break;
+        modes[i] = modes[i - 1];
+        i--;
+    }
+    modes[i] = *t;
+}
+
+static int find_mode(const Timing *t)
+{
+    for (int i = 0; i < nmodes; i++)
+        if (same_timing(&modes[i], t))
+            return i;
+    return -1;
+}
+
+/* Liest die Modi: den der Firmware und die Detailed Timings aus der EDID, die per HDMI gehen und in den Framebuffer
+ * der Firmware passen (er wird weiterbenutzt, mit gleicher Zeilenlaenge) */
+static void modes_init(void)
+{
+    int p = igd_state.scanout_pipe;
+    uint32_t ddi = igd_rd(TRANS_DDI_FUNC_CTL(p)), c2 = igd_rd(DPLL_CTRL2);
+    live.pipe = p;
+    live.port = (int)((ddi >> 28) & 7);
+    live.dpll = (c2 & (1u << (live.port * 3))) ? (int)((c2 >> (live.port * 3 + 1)) & 3) : -1;
+    if (!(ddi & (1u << 31)) || ((ddi >> 24) & 7) != 0 || live.dpll < 1 ||
+        !((igd_rd(DPLL_CTRL1) >> (live.dpll * 6 + 5)) & 1) || (igd_rd(PS_CTRL(p, 0)) & PS_SCALER_EN)) {
+        kprintf("igd: Moduswechsel nur per HDMI an DPLL1-3: Modus bleibt der der Firmware\n");
+        return;
+    }
+    live.pipeconf = igd_rd(PIPECONF(p));
+    live.plane_ctl = igd_rd(PLANE_CTL(p));
+    live.clk_sel = igd_rd(TRANS_CLK_SEL(p));
+    live.buf_ctl = igd_rd(DDI_BUF_CTL(live.port));
+    mode_read(&live, &boot_hw);
+    cur_hw = boot_hw;
+
+    Timing b = {.khz = cfg_khz(boot_hw.cfgcr1, boot_hw.cfgcr2)};
+    b.ha = (boot_hw.htotal & 0xFFFF) + 1;
+    b.ht = (boot_hw.htotal >> 16) + 1;
+    b.hso = (boot_hw.hsync & 0xFFFF) + 1 - b.ha;
+    b.hsw = (boot_hw.hsync >> 16) - (boot_hw.hsync & 0xFFFF);
+    b.va = (boot_hw.vtotal & 0xFFFF) + 1;
+    b.vt = (boot_hw.vtotal >> 16) + 1;
+    b.vso = (boot_hw.vsync & 0xFFFF) + 1 - b.va;
+    b.vsw = (boot_hw.vsync >> 16) - (boot_hw.vsync & 0xFFFF);
+    b.hpos = (boot_hw.ddi_func >> 16) & 1;
+    b.vpos = (boot_hw.ddi_func >> 17) & 1;
+    if (!b.khz || b.ha != igd_scr_w || b.va != igd_scr_h) {
+        kprintf("igd: Modus der Firmware nicht lesbar: Modus bleibt, wie er ist\n");
+        return;
+    }
+    add_mode(&b);
+
+    static uint8_t edid[256];
+    int blocks = read_edid(live.port, edid, 0);
+    for (int blk = 0; blk < blocks; blk++) {
+        const uint8_t *e = edid + 128 * blk;
+        uint32_t first = blk == 0 ? 54 : e[2], end = blk == 0 ? 126 : 127;
+        if (blk > 0 && (e[0] != 0x02 || first < 4))
+            continue;
+        for (uint32_t i = first; i + 18 <= end; i += 18) {
+            Timing t;
+            if (dtd_parse(e + i, &t) && !t.interlaced && t.khz <= GEN9_HDMI_MAX_KHZ && t.ha <= igd_scr_w &&
+                t.va <= igd_scr_h && t.ha >= 640 && t.va >= 400)
+                add_mode(&t);
+        }
+    }
+    boot_idx = cur_idx = find_mode(&b);
+    char line[256];
+    int n = 0;
+    for (int i = 0; i < nmodes; i++) {
+        uint32_t hz = hz100(&modes[i]);
+        n += ksnprintf(line + n, sizeof(line) - (size_t)n, "%s%ux%u@%u%s", i ? ", " : "", modes[i].ha, modes[i].va,
+                       (hz + 50) / 100, i == boot_idx ? " (jetzt)" : "");
+        if (n >= (int)sizeof(line) - 24)
+            break;
+    }
+    kprintf("igd: Modi zum Umschalten: %s\n", line);
+}
+
+int igd_mode_count(void)
+{
+    return nmodes;
+}
+
+int igd_mode_info(int i, uint32_t *w, uint32_t *h, uint32_t *hz, int *current)
+{
+    if (i < 0 || i >= nmodes)
+        return -1;
+    *w = modes[i].ha;
+    *h = modes[i].va;
+    *hz = hz100(&modes[i]);
+    *current = i == cur_idx;
+    return 0;
+}
+
+int igd_mode_set(uint32_t w, uint32_t h, uint32_t hz)
+{
+    if (!nmodes)
+        return IGD_MODE_NODRIVER;
+    int idx = -1;
+    if (!w) {
+        idx = boot_idx;
+    } else {
+        for (int i = 0; i < nmodes; i++) {
+            if (modes[i].ha != w || modes[i].va != h)
+                continue;
+            uint32_t mh = hz100(&modes[i]), d = mh > hz ? mh - hz : hz - mh;
+            if (hz && d > 100) /* auf 1 Hz genau */
+                continue;
+            if (idx < 0 || (!hz && mh > hz100(&modes[idx])))
+                idx = i;
+        }
+    }
+    if (idx < 0)
+        return IGD_MODE_NOMODE;
+    if (idx == cur_idx)
+        return 0;
+    if (console_gfx_active())
+        return IGD_MODE_BUSY;
+    igd_gfx_end(); /* die Konsole zeigt den Framebuffer der Firmware (A) */
+
+    HwMode m;
+    if (idx == boot_idx)
+        m = boot_hw;
+    else if (mode_from_timing(&modes[idx], &boot_hw, igd_surf_a, igd_scr_stride, &m))
+        return IGD_MODE_FAILED;
+    int p = live.pipe;
+    uint32_t cur = igd_rd(CUR_CTL(p));
+    live.plane_ctl = igd_rd(PLANE_CTL(p));
+    mode_off(&live);
+    if (mode_on(&live, &m)) {
+        kprintf("igd: Modus %ux%u laesst sich nicht setzen, zurueck zum vorigen\n", modes[idx].ha, modes[idx].va);
+        mode_off(&live);
+        if (mode_on(&live, &cur_hw)) {
+            mode_off(&live);
+            mode_on(&live, &boot_hw);
+            cur_hw = boot_hw;
+            cur_idx = boot_idx;
+            igd_scr_w = modes[boot_idx].ha;
+            igd_scr_h = modes[boot_idx].va;
+            console_resize(igd_scr_w, igd_scr_h);
+        }
+        igd_wr(CUR_CTL(p), cur);
+        igd_wr(CUR_BASE(p), igd_rd(CUR_BASE(p)));
+        return IGD_MODE_FAILED;
+    }
+    igd_wr(CUR_CTL(p), cur);
+    igd_wr(CUR_BASE(p), igd_rd(CUR_BASE(p)));
+    cur_hw = m;
+    cur_idx = idx;
+    igd_scr_w = modes[idx].ha;
+    igd_scr_h = modes[idx].va;
+    console_resize(igd_scr_w, igd_scr_h);
+    uint32_t hzv = hz100(&modes[idx]);
+    kprintf("igd: Modus %ux%u @ %u.%02u Hz gesetzt (Pixeltakt %u kHz)\n", modes[idx].ha, modes[idx].va, hzv / 100,
+            hzv % 100, modes[idx].khz);
+    return 0;
+}
+
+/* Beim Start (aus display_init): Modi einsammeln, dann ggf. "igdmode=BxH[@Hz]" aus der Kommandozeile setzen */
+void igd_modes_boot(void)
+{
+    modes_init();
+    const char *want = cmdline_get("igdmode");
+    if (!want || !nmodes)
+        return;
+    uint32_t w = 0, h = 0, hz = 0;
+    const char *s = want;
+    while (*s >= '0' && *s <= '9')
+        w = w * 10 + (uint32_t)(*s++ - '0');
+    if (*s == 'x')
+        s++;
+    while (*s >= '0' && *s <= '9')
+        h = h * 10 + (uint32_t)(*s++ - '0');
+    if (*s == '@') {
+        s++;
+        while (*s >= '0' && *s <= '9')
+            hz = hz * 10 + (uint32_t)(*s++ - '0');
+        hz *= 100;
+    }
+    int rc = w && h ? igd_mode_set(w, h, hz) : IGD_MODE_NOMODE;
+    if (rc)
+        kprintf("igd: igdmode=%s: %s\n", want, rc == IGD_MODE_NOMODE ? "diesen Modus bietet der Monitor nicht an (resolution zeigt die Liste)"
+                                                                    : "Umschalten fehlgeschlagen");
 }

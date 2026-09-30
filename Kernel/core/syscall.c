@@ -312,6 +312,12 @@ static int syscall_unlocked(SyscallFrame *f)
         }
         break;
     }
+    case SYS_SETMODE: {
+        int r = igd_mode_set((uint32_t)f->rdi, (uint32_t)f->rsi, (uint32_t)f->rdx);
+        ret = r == 0 ? 0 : r == IGD_MODE_NODRIVER ? ERR_NOSYS : r == IGD_MODE_NOMODE ? ERR_NOENT
+            : r == IGD_MODE_BUSY ? ERR_AGAIN : ERR_IO;
+        break;
+    }
     case SYS_KLOG: { /* das Log hat seinen eigenen Lock */
         uint64_t max = f->rdx > 65536 ? 65536 : f->rdx;
         if (!process_user_range_ok(p, f->rdi, 8, 1) || !process_user_range_ok(p, f->rsi, max, 1))

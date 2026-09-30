@@ -68,6 +68,7 @@ typedef long long          s64;
 #define SYS_CPUINFO   60
 #define SYS_KLOG      61
 #define SYS_GPU       62
+#define SYS_SETMODE   63
 #define ERR_NOENT     (-2)
 #define ERR_IO        (-5)
 #define ERR_EXIST     (-17)
@@ -126,7 +127,7 @@ typedef struct {
 } MountInfo;
 
 typedef struct {
-    unsigned width, height, current, scale, cols, rows, pad;
+    unsigned width, height, current, scale, cols, rows, hz100; /* hz100: Bildrate in 1/100 Hz, 0 = Modus der Firmware */
     u64      kernel_size;
 } VideoInfo;
 
@@ -248,6 +249,7 @@ static inline s64 sys_spawn(const char *path, const char *cmdline)      { return
 static inline s64 sys_wait(int pid, int *code)                { return syscall3(SYS_WAIT, pid, (u64)code, 0); }
 static inline s64 sys_wait_nohang(int pid, int *code)         { return syscall3(SYS_WAIT, pid, (u64)code, 1); } /* ERR_AGAIN: laeuft noch */
 static inline s64 sys_videoinfo(u64 index, VideoInfo *vi)  { return syscall3(SYS_VIDEOINFO, index, (u64)vi, 0); }
+static inline s64 sys_setmode(u64 w, u64 h, u64 hz100)     { return syscall3(SYS_SETMODE, w, h, hz100); } /* sofort umschalten (Intel-Treiber) */
 static inline s64 sys_keymap(const char *set, char out[16]) { return syscall3(SYS_KEYMAP, (u64)set, (u64)out, 0); } /* set = 0: nur abfragen */
 static inline s64 sys_gfx(int op, const void *arg)          { return syscall3(SYS_GFX, op, (u64)arg, 0); } /* 0 = uebernehmen, 1 = GfxBlit, 2 = freigeben */
 static inline s64 sys_font(unsigned cp, unsigned char out[16]) { return syscall3(SYS_FONT, cp, (u64)out, 0); }
