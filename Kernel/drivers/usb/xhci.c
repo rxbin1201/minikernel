@@ -8,6 +8,7 @@
 #include "drivers/pci.h"
 #include "core/sched.h"
 #include "lib/string.h"
+#include "fs/fs.h"
 
 /* xHCI-Hostcontroller (USB 3.x; behandelt an den Root-Ports auch Low/Full/High-Speed-Geraete). Ein Hintergrund-Thread
  * verarbeitet Ereignisse (Tastatur, Maus) und erkennt Anstecken/Abziehen. Er schlaeft, bis der Controller per MSI-X
@@ -1106,6 +1107,7 @@ static void usb_thread(void *arg)
                 polling = 1;
         }
         usb_hid_tick(); /* gehaltene Tasten wiederholen */
+        fs_rescan();    /* neuer USB-Stick: Dateisysteme einbinden (auf echter Hardware oft erst nach dem Start) */
 
         uint64_t wait = polling ? 10 : scan_every;
         int64_t repeat = usb_hid_next_repeat_ms();

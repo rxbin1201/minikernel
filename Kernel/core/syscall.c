@@ -7,6 +7,7 @@
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/smp.h"
 #include "lib/klog.h"
+#include "drivers/gpu/igd.h"
 #include "drivers/keyboard.h"
 #include "lib/kprintf.h"
 #include "arch/x86_64/power.h"
@@ -388,6 +389,9 @@ static void syscall_do(SyscallFrame *f)
     case SYS_KILL:     ret = process_kill_pid((uint32_t)f->rdi); break;
     case SYS_PROCINFO: ret = sys_procinfo(f->rdi, f->rsi); break;
     case SYS_USBINFO:  ret = sys_usbinfo(f->rdi, f->rsi); break;
+    case SYS_GPU:
+        ret = f->rdi == 1 ? igd_flip_test() : ERR_INVAL;
+        break;
     case SYS_PCIINFO: {
         PciInfo pi;
         if (!process_user_range_ok(process_current(), f->rsi, sizeof(pi), 1))

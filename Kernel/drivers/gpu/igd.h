@@ -24,4 +24,8 @@ typedef struct {
 void igd_init(const BootInfo *info);
 const IgdInfo *igd_info(void);
 
+/* Stufe 2, nur auf Befehl (igdtest): zweiter Bildpuffer ueber die GGTT, Umschalten per PLANE_SURF, zurueck.
+ * Ausgaben ins Kernel-Log. 0 = funktioniert, < 0 = Abbruch oder Fehler. */
+int igd_flip_test(void);
+
 #endif
