@@ -160,9 +160,10 @@ run efi: Build/esp.img Image/disk.img $(if $(STICK),Build/stick-$(STICK).img)
 .PHONY: test
 test:
 	@$(MAKE) --no-print-directory run TESTS=$(or $(TESTS),1)
-	@ok=$$(grep -a -c ': OK' $(LOG)); bad=$$(grep -a -c 'FEHLER' $(LOG)); \
-	    grep -a 'FEHLER' $(LOG) || true; \
-	    echo "Selbsttests: $$ok OK, $$bad FEHLER (Protokoll: $(LOG))"; test $$bad -eq 0
+	@sed 's/\x1b\[[0-9;]*m//g' $(LOG) | grep -a ': FEHLER' || true
+	@sum=$$(grep -a '^Selbsttests: .* OK, .* FEHLER' $(LOG)); \
+	    if [ -z "$$sum" ]; then echo "Selbsttests nicht vollstaendig durchgelaufen (Protokoll: $(LOG))"; exit 1; fi; \
+	    echo "$$sum (Protokoll: $(LOG))"; echo "$$sum" | grep -q ' 0 FEHLER'
 
 # Datenplatte auf Konsistenz pruefen
 .PHONY: fatcheck

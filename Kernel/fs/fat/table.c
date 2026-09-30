@@ -1,7 +1,6 @@
 /* FAT/exFAT: Zuordnungstabelle (FAT), exFAT-Belegungs-Bitmap, Cluster belegen und freigeben */
 
 #include "lib/string.h"
-#include "core/syscall.h" /* ERR_* */
 #include "fs/fat/fat_internal.h"
 
 static int fat_store(uint64_t lba, const uint8_t *sec);

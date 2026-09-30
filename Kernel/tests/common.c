@@ -1,4 +1,4 @@
-/* Selbsttests: gemeinsame Helfer der Selbsttests */
+/* Selbsttests: gemeinsame Helfer */
 
 #include "console/console.h"
 #include "lib/kprintf.h"
@@ -11,8 +11,14 @@
 #include "lib/utf8.h"
 #include "tests/selftest.h"
 
+unsigned selftest_ok, selftest_failed;
+
 void check(const char *name, int ok)
 {
+    if (ok)
+        selftest_ok++;
+    else
+        selftest_failed++;
     kprintf("  %s: ", name);
     console_set_color(ok ? COLOR_OK : COLOR_FAIL, 0);
     kprintf("%s\n", ok ? "OK" : "FEHLER");

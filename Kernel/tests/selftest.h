@@ -13,6 +13,7 @@
 #define COLOR_TITLE   0x0060C0FF
 
 /* Gemeinsame Helfer (tests/common.c): check() gibt OK/FEHLER aus, title() eine Ueberschrift */
+extern unsigned selftest_ok, selftest_failed; /* von check() gezaehlt */
 void check(const char *name, int ok);
 void title(const char *name);
 int ieq(const char *a, const char *b);

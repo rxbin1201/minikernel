@@ -45,6 +45,7 @@ void run_selftests(BootInfo *info)
     keymap_set("us");
     test_filter = cmdline_get("selftest");
     uint64_t t_all = time_ms();
+    selftest_ok = selftest_failed = 0;
     RUN("console", test_console());
     RUN("unicode", test_unicode());
     RUN("scrollback", test_scrollback());
@@ -73,6 +74,7 @@ void run_selftests(BootInfo *info)
     RUN("net", test_net());
     if (test_filter && strstr_(test_filter, "netpeer")) /* nur ausdruecklich (braucht die Test-Gegenstelle) */
         RUN("netpeer", test_netpeer());
-    kprintf("\nSelbsttests: %lu ms\n", (unsigned long)(time_ms() - t_all));
+    /* Diese Zeile wertet "make test" aus */
+    kprintf("\nSelbsttests: %u OK, %u FEHLER, %lu ms\n", selftest_ok, selftest_failed, (unsigned long)(time_ms() - t_all));
     keymap_set(layout);
 }
