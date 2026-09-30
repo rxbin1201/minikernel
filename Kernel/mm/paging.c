@@ -140,6 +140,8 @@ void paging_init(const BootInfo *info)
 
 /* ---------- Stufe 2: 4-KiB-Verwaltung ---------- */
 
+static uint64_t table_frames; /* Frames, die gerade als Page Table dienen (fuer paging_table_frames) */
+
 /* Frischer, genullter Frame fuer eine Page Table (PMM-Frames sind identity-mapped). */
 static uint64_t *table_alloc(void)
 {
@@ -147,7 +149,19 @@ static uint64_t *table_alloc(void)
     if (!frame)
         return 0;
     memset((void *)frame, 0, SIZE_4K);
+    table_frames++;
     return (uint64_t *)frame;
+}
+
+static void table_free(uint64_t *t)
+{
+    pmm_free_frame((uint64_t)t);
+    table_frames--;
+}
+
+uint64_t paging_table_frames(void)
+{
+    return table_frames;
 }
 
 /* Folgt einem Eintrag zur naechsten Tabelle, legt sie bei Bedarf an. */
@@ -260,13 +274,13 @@ void as_destroy(AddressSpace *as)
                 for (unsigned k = 0; k < 512; k++)
                     if (pt[k] & PTE_PRESENT)
                         pmm_free_frame(pt[k] & ADDR_MASK_4K);
-                pmm_free_frame((uint64_t)pt);
+                table_free(pt);
             }
-            pmm_free_frame((uint64_t)t2);
+            table_free(t2);
         }
-        pmm_free_frame((uint64_t)t3);
+        table_free(t3);
     }
-    pmm_free_frame((uint64_t)root);
+    table_free(root);
 }
 
 /* Kopiert alle User-Seiten (fuer fork): gleiche Adressen und Rechte, aber eigene Frames mit kopiertem Inhalt. */

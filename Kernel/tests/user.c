@@ -4,6 +4,7 @@
 #include "lib/kprintf.h"
 #include "mm/pmm.h"
 #include "mm/heap.h"
+#include "mm/paging.h"
 #include "lib/string.h"
 #include "arch/x86_64/apic.h"
 #include "drivers/keyboard.h"
@@ -111,7 +112,8 @@ void test_user(BootInfo *info)
 
     check("hello: Exit-Code 42", run_user("/bin/hello", "hello eins zwei", &code, &faulted) == 0 && code == 42 && !faulted);
     thread_sleep_ms(50); /* Idle-Thread raeumt Adressraum und Stack auf */
-    uint64_t frames_before = pmm_free_frame_count();
+    /* Kernel-Heap und Kernel-Page-Tables wachsen beim ersten Gebrauch und geben nichts zurueck: das ist kein Leck */
+    uint64_t frames_before = pmm_free_frame_count(), heap_before = heap_total_bytes(), tables_before = paging_table_frames();
 
     check("crash null -> Prozess beendet", run_user("/bin/crash", "crash null", &code, &faulted) == 0 && faulted);
     check("crash kread -> Prozess beendet", run_user("/bin/crash", "crash kread", &code, &faulted) == 0 && faulted);
@@ -270,7 +272,11 @@ void test_user(BootInfo *info)
                                           !dir_has("/disk", "O9.TXT", 0) && !dir_has("/disk", "O11.TXT", 0));
 
     thread_sleep_ms(100);
-    check("Keine Frames verloren (Adressraeume/Stacks freigegeben)", pmm_free_frame_count() == frames_before);
+    uint64_t grown = (heap_total_bytes() - heap_before) / 4096 + (paging_table_frames() - tables_before);
+    uint64_t used = frames_before - pmm_free_frame_count();
+    if (used != grown)
+        kprintf("  (%ld Frames weniger frei, davon %lu fuer Heap und Kernel-Page-Tables)\n", (long)used, (unsigned long)grown);
+    check("Keine Frames verloren (Adressraeume/Stacks freigegeben)", used == grown);
     check("Kernel-Heap konsistent", heap_check());
 }
 

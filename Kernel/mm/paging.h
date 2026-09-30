@@ -59,4 +59,7 @@ int paging_map_mmio(uint64_t phys, uint64_t size);
 /* 1 = gemappt (phys/flags werden gefuellt, beide duerfen NULL sein), 0 = nicht gemappt. */
 int paging_translate(uint64_t virt, uint64_t *phys, uint64_t *flags);
 
+/* Frames, die gerade als Page Table dienen (Kernel-Tabellen bleiben, die von Adressraeumen gibt as_destroy frei) */
+uint64_t paging_table_frames(void);
+
 #endif
