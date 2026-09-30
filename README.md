@@ -59,8 +59,11 @@ In der Shell: `burn 5000 & burn 5000 & cpus` zeigt zwei ausgelastete CPUs.
 - **Doppelpufferung:** ganze Bilder von Grafikprogrammen (`gfx_present_all`) kommen in einen verdeckten Puffer und
   werden beim Bildwechsel umgeschaltet (kein Tearing). Der Puffer liegt im RAM und wird mit Non-Temporal-Stores
   beschrieben (am CPU-Cache vorbei, den die Display-Engine nicht sieht); bei 3440x1440 ca. 4 ms je Bild
-- **Moduswechsel im Betrieb** (`igd_mode.c`, nur HDMI): die Modi aus den Monitordaten (EDID), die per HDMI gehen
-  (Gen9: hoechstens 300 MHz Pixeltakt) und in den Framebuffer der Firmware passen. `resolution` listet sie mit
+- **Moduswechsel im Betrieb** (`igd_mode.c`, `igd_dp.c`): die Modi aus den Monitordaten (EDID), die ueber den
+  Anschluss gehen und in den Framebuffer der Firmware passen. HDMI: hoechstens 300 MHz Pixeltakt (Gen9), Pipe und
+  Port werden mit neu berechnetem DPLL neu gestartet. DisplayPort: die von der Firmware eingemessene Verbindung
+  bleibt (z.B. 4 Lanes x 5,4 GBit/s), neu gesetzt werden Zeitablauf, M/N und Watermarks; so gehen z.B.
+  3440x1440 mit 100 Hz. `resolution` listet sie mit
   Bildrate und schaltet sofort um (`resolution 2560x1440@60`), die Konsole passt sich an. Fuer den naechsten Start
   speichert es `igdmode=2560x1440@60` und `mode=max` (der Framebuffer der Firmware muss gross genug sein)
 
@@ -68,7 +71,7 @@ In der Shell: `burn 5000 & burn 5000 & cpus` zeigt zwei ausgelastete CPUs.
 Page-Flipping, Mauszeiger und Blitter einzeln und schreiben Messwerte ins Kernel-Log (`dmesg`). `igdtest info`
 zeigt, wie viele Bild-Updates es seit dem Start gab und was sie gekostet haben, und vergleicht die Kopierwege fuer
 ganze Bilder. `igdtest edid`, `igdtest scale` und `igdtest mode` pruefen Monitordaten, Skalierer und
-Moduswechsel. QEMU emuliert keine Intel-GPU: getestet wird
+Moduswechsel (HDMI), `igdtest dp` und `igdtest dpmode` dasselbe per DisplayPort. QEMU emuliert keine Intel-GPU: getestet wird
 auf echter Hardware (bisher i5-8400T, UHD 630, 3440x1440 ueber HDMI).
 
 ## Fehlersuche

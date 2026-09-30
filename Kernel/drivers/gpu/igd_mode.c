@@ -982,219 +982,6 @@ int igd_mode_test(void)
     return rc;
 }
 
-/* ---------- Fest eingebaut: Modi des Monitors im Betrieb umschalten ---------- */
-
-#define MAX_MODES 16
-static Timing   modes[MAX_MODES];     /* nach Flaeche, dann Bildrate absteigend */
-static int      nmodes, cur_idx = -1, boot_idx = -1;
-static HwFixed  live;                 /* Pipe, Port, DPLL und die festen Registerwerte */
-static HwMode   boot_hw, cur_hw;      /* Modus der Firmware / gerade gesetzter */
-
-static int same_timing(const Timing *a, const Timing *b)
-{
-    uint32_t d = a->khz > b->khz ? a->khz - b->khz : b->khz - a->khz;
-    return a->ha == b->ha && a->va == b->va && a->ht == b->ht && a->vt == b->vt && d < 1000;
-}
-
-static void add_mode(const Timing *t)
-{
-    for (int i = 0; i < nmodes; i++)
-        if (same_timing(&modes[i], t))
-            return;
-    if (nmodes >= MAX_MODES)
-        return;
-    int i = nmodes++;
-    uint64_t area = (uint64_t)t->ha * t->va;
-    while (i > 0) {
-        uint64_t a = (uint64_t)modes[i - 1].ha * modes[i - 1].va;
-        if (a > area || (a == area && hz100(&modes[i - 1]) >= hz100(t)))
-            break;
-        modes[i] = modes[i - 1];
-        i--;
-    }
-    modes[i] = *t;
-}
-
-static int find_mode(const Timing *t)
-{
-    for (int i = 0; i < nmodes; i++)
-        if (same_timing(&modes[i], t))
-            return i;
-    return -1;
-}
-
-/* Liest die Modi: den der Firmware und die Detailed Timings aus der EDID, die per HDMI gehen und in den Framebuffer
- * der Firmware passen (er wird weiterbenutzt, mit gleicher Zeilenlaenge) */
-static void modes_init(void)
-{
-    int p = igd_state.scanout_pipe;
-    uint32_t ddi = igd_rd(TRANS_DDI_FUNC_CTL(p)), c2 = igd_rd(DPLL_CTRL2);
-    live.pipe = p;
-    live.port = (int)((ddi >> 28) & 7);
-    live.dpll = (c2 & (1u << (live.port * 3))) ? (int)((c2 >> (live.port * 3 + 1)) & 3) : -1;
-    if (!(ddi & (1u << 31)) || ((ddi >> 24) & 7) != 0 || live.dpll < 1 ||
-        !((igd_rd(DPLL_CTRL1) >> (live.dpll * 6 + 5)) & 1) || (igd_rd(PS_CTRL(p, 0)) & PS_SCALER_EN)) {
-        kprintf("igd: Moduswechsel nur per HDMI an DPLL1-3: Modus bleibt der der Firmware\n");
-        return;
-    }
-    live.pipeconf = igd_rd(PIPECONF(p));
-    live.plane_ctl = igd_rd(PLANE_CTL(p));
-    live.clk_sel = igd_rd(TRANS_CLK_SEL(p));
-    live.buf_ctl = igd_rd(DDI_BUF_CTL(live.port));
-    mode_read(&live, &boot_hw);
-    cur_hw = boot_hw;
-
-    Timing b = {.khz = cfg_khz(boot_hw.cfgcr1, boot_hw.cfgcr2)};
-    b.ha = (boot_hw.htotal & 0xFFFF) + 1;
-    b.ht = (boot_hw.htotal >> 16) + 1;
-    b.hso = (boot_hw.hsync & 0xFFFF) + 1 - b.ha;
-    b.hsw = (boot_hw.hsync >> 16) - (boot_hw.hsync & 0xFFFF);
-    b.va = (boot_hw.vtotal & 0xFFFF) + 1;
-    b.vt = (boot_hw.vtotal >> 16) + 1;
-    b.vso = (boot_hw.vsync & 0xFFFF) + 1 - b.va;
-    b.vsw = (boot_hw.vsync >> 16) - (boot_hw.vsync & 0xFFFF);
-    b.hpos = (boot_hw.ddi_func >> 16) & 1;
-    b.vpos = (boot_hw.ddi_func >> 17) & 1;
-    if (!b.khz || b.ha != igd_scr_w || b.va != igd_scr_h) {
-        kprintf("igd: Modus der Firmware nicht lesbar: Modus bleibt, wie er ist\n");
-        return;
-    }
-    add_mode(&b);
-
-    static uint8_t edid[256];
-    int blocks = read_edid(live.port, edid, 0);
-    for (int blk = 0; blk < blocks; blk++) {
-        const uint8_t *e = edid + 128 * blk;
-        uint32_t first = blk == 0 ? 54 : e[2], end = blk == 0 ? 126 : 127;
-        if (blk > 0 && (e[0] != 0x02 || first < 4))
-            continue;
-        for (uint32_t i = first; i + 18 <= end; i += 18) {
-            Timing t;
-            if (dtd_parse(e + i, &t) && !t.interlaced && t.khz <= GEN9_HDMI_MAX_KHZ && t.ha <= igd_scr_w &&
-                t.va <= igd_scr_h && t.ha >= 640 && t.va >= 400)
-                add_mode(&t);
-        }
-    }
-    boot_idx = cur_idx = find_mode(&b);
-    char line[256];
-    int n = 0;
-    for (int i = 0; i < nmodes; i++) {
-        uint32_t hz = hz100(&modes[i]);
-        n += ksnprintf(line + n, sizeof(line) - (size_t)n, "%s%ux%u@%u%s", i ? ", " : "", modes[i].ha, modes[i].va,
-                       (hz + 50) / 100, i == boot_idx ? " (jetzt)" : "");
-        if (n >= (int)sizeof(line) - 24)
-            break;
-    }
-    kprintf("igd: Modi zum Umschalten: %s\n", line);
-}
-
-int igd_mode_count(void)
-{
-    return nmodes;
-}
-
-int igd_mode_info(int i, uint32_t *w, uint32_t *h, uint32_t *hz, int *current)
-{
-    if (i < 0 || i >= nmodes)
-        return -1;
-    *w = modes[i].ha;
-    *h = modes[i].va;
-    *hz = hz100(&modes[i]);
-    *current = i == cur_idx;
-    return 0;
-}
-
-int igd_mode_set(uint32_t w, uint32_t h, uint32_t hz)
-{
-    if (!nmodes)
-        return IGD_MODE_NODRIVER;
-    int idx = -1;
-    if (!w) {
-        idx = boot_idx;
-    } else {
-        for (int i = 0; i < nmodes; i++) {
-            if (modes[i].ha != w || modes[i].va != h)
-                continue;
-            uint32_t mh = hz100(&modes[i]), d = mh > hz ? mh - hz : hz - mh;
-            if (hz && d > 100) /* auf 1 Hz genau */
-                continue;
-            if (idx < 0 || (!hz && mh > hz100(&modes[idx])))
-                idx = i;
-        }
-    }
-    if (idx < 0)
-        return IGD_MODE_NOMODE;
-    if (idx == cur_idx)
-        return 0;
-    if (console_gfx_active())
-        return IGD_MODE_BUSY;
-    igd_gfx_end(); /* die Konsole zeigt den Framebuffer der Firmware (A) */
-
-    HwMode m;
-    if (idx == boot_idx)
-        m = boot_hw;
-    else if (mode_from_timing(&modes[idx], &boot_hw, igd_surf_a, igd_scr_stride, &m))
-        return IGD_MODE_FAILED;
-    int p = live.pipe;
-    uint32_t cur = igd_rd(CUR_CTL(p));
-    live.plane_ctl = igd_rd(PLANE_CTL(p));
-    mode_off(&live);
-    if (mode_on(&live, &m)) {
-        kprintf("igd: Modus %ux%u laesst sich nicht setzen, zurueck zum vorigen\n", modes[idx].ha, modes[idx].va);
-        mode_off(&live);
-        if (mode_on(&live, &cur_hw)) {
-            mode_off(&live);
-            mode_on(&live, &boot_hw);
-            cur_hw = boot_hw;
-            cur_idx = boot_idx;
-            igd_scr_w = modes[boot_idx].ha;
-            igd_scr_h = modes[boot_idx].va;
-            console_resize(igd_scr_w, igd_scr_h);
-        }
-        igd_wr(CUR_CTL(p), cur);
-        igd_wr(CUR_BASE(p), igd_rd(CUR_BASE(p)));
-        return IGD_MODE_FAILED;
-    }
-    igd_wr(CUR_CTL(p), cur);
-    igd_wr(CUR_BASE(p), igd_rd(CUR_BASE(p)));
-    cur_hw = m;
-    cur_idx = idx;
-    igd_scr_w = modes[idx].ha;
-    igd_scr_h = modes[idx].va;
-    console_resize(igd_scr_w, igd_scr_h);
-    uint32_t hzv = hz100(&modes[idx]);
-    kprintf("igd: Modus %ux%u @ %u.%02u Hz gesetzt (Pixeltakt %u kHz)\n", modes[idx].ha, modes[idx].va, hzv / 100,
-            hzv % 100, modes[idx].khz);
-    return 0;
-}
-
-/* Beim Start (aus display_init): Modi einsammeln, dann ggf. "igdmode=BxH[@Hz]" aus der Kommandozeile setzen */
-void igd_modes_boot(void)
-{
-    modes_init();
-    const char *want = cmdline_get("igdmode");
-    if (!want || !nmodes)
-        return;
-    uint32_t w = 0, h = 0, hz = 0;
-    const char *s = want;
-    while (*s >= '0' && *s <= '9')
-        w = w * 10 + (uint32_t)(*s++ - '0');
-    if (*s == 'x')
-        s++;
-    while (*s >= '0' && *s <= '9')
-        h = h * 10 + (uint32_t)(*s++ - '0');
-    if (*s == '@') {
-        s++;
-        while (*s >= '0' && *s <= '9')
-            hz = hz * 10 + (uint32_t)(*s++ - '0');
-        hz *= 100;
-    }
-    int rc = w && h ? igd_mode_set(w, h, hz) : IGD_MODE_NOMODE;
-    if (rc)
-        kprintf("igd: igdmode=%s: %s\n", want, rc == IGD_MODE_NOMODE ? "diesen Modus bietet der Monitor nicht an (resolution zeigt die Liste)"
-                                                                    : "Umschalten fehlgeschlagen");
-}
-
 /* Fuer igd_dp.c: EDID (blocks Bloecke, schon gelesen) auswerten, Zeitablaeufe ueber limit_khz mit note markieren */
 void igd_edid_dump(const uint8_t *e, int blocks, uint32_t limit_khz, const char *note)
 {
@@ -1282,8 +1069,7 @@ static int dp_switch(const DpLink *l, const HwMode *m, uint32_t khz)
     igd_wr(CUR_BASE(p), igd_rd(CUR_BASE(p)));
     wait_frame(p);
     igd_wr(DP_TP_CTL(l->f.port), (l->tp_ctl & ~DP_TP_TRAIN_MASK) | DP_TP_TRAIN_IDLE);
-    if (wait_bits(DP_TP_STATUS(l->f.port), DP_TP_IDLE_DONE, DP_TP_IDLE_DONE, 2))
-        kprintf("igdmode:   Leerlauf-Muster nicht bestaetigt (DP_TP_STATUS %#x)\n", igd_rd(DP_TP_STATUS(l->f.port)));
+    wait_bits(DP_TP_STATUS(l->f.port), DP_TP_IDLE_DONE, DP_TP_IDLE_DONE, 1); /* SST: Bit bleibt hier 0; 1 ms Leerlauf genuegt */
     igd_wr(PIPECONF(p), l->f.pipeconf & ~(1u << 31));
     if (wait_bits(PIPECONF(p), 1u << 30, 0, 100))
         kprintf("igdmode:   Pipe geht nicht aus (PIPECONF %#x)\n", igd_rd(PIPECONF(p)));
@@ -1316,6 +1102,56 @@ static int dp_switch(const DpLink *l, const HwMode *m, uint32_t khz)
     return rc;
 }
 
+/* Laufende DP-Verbindung der Pipe einlesen: Port, Lanes, Linktakt, Watermarks; orig = Modus jetzt. 0 = ok */
+static int dp_link_init(DpLink *l, HwMode *orig, int verbose)
+{
+    int p = igd_state.scanout_pipe;
+    *l = (DpLink){.f = {.pipe = p}};
+    uint32_t ddi = igd_rd(TRANS_DDI_FUNC_CTL(p)), c1 = igd_rd(DPLL_CTRL1), c2 = igd_rd(DPLL_CTRL2);
+    l->f.port = (int)((ddi >> 28) & 7);
+    l->f.dpll = (c2 & (1u << (l->f.port * 3))) ? (int)((c2 >> (l->f.port * 3 + 1)) & 3) : -1;
+    if (!(ddi & (1u << 31)) || ((ddi >> 24) & 7) != 2 || l->f.dpll < 0) {
+        if (verbose)
+            kprintf("igdmode: die Anzeige laeuft nicht per DisplayPort (SST), TRANS_DDI_FUNC_CTL %#x\n", ddi);
+        return -1;
+    }
+    static const uint32_t rate[] = {540000, 270000, 162000, 324000, 216000, 432000}; /* Linktakt (Symbole) in kHz */
+    uint32_t code = (c1 >> (l->f.dpll * 6 + 1)) & 7;
+    l->link_khz = code < 6 ? rate[code] : 0;
+    l->lanes = ((ddi >> 1) & 7) + 1;
+    l->tp_ctl = igd_rd(DP_TP_CTL(l->f.port));
+    l->f.pipeconf = igd_rd(PIPECONF(p));
+    l->f.plane_ctl = igd_rd(PLANE_CTL(p));
+    l->f.cur_ctl = igd_rd(CUR_CTL(p));
+    uint32_t pb = igd_rd(PLANE_BUF_CFG(p)), cb = igd_rd(CUR_BUF_CFG(p));
+    l->ddb = ((pb >> 16) & 0x3FF) - (pb & 0x3FF) + 1;
+    l->cddb = ((cb >> 16) & 0x3FF) - (cb & 0x3FF) + 1;
+    for (int lvl = 0; lvl < 8; lvl++) {
+        l->wm[lvl] = igd_rd(PLANE_WM(p, lvl));
+        l->cwm[lvl] = igd_rd(CUR_WM(p, lvl));
+    }
+    mode_read(&l->f, orig);
+    if (!l->link_khz || !orig->link_n) {
+        if (verbose)
+            kprintf("igdmode: Linkrate unbekannt (DPLL_CTRL1 %#x)\n", c1);
+        return -1;
+    }
+    l->base_khz = (uint32_t)((uint64_t)l->link_khz * orig->link_m / orig->link_n);
+    return 0;
+}
+
+/* Hoechster Pixeltakt: Verbindung (24 Bit je Pixel), CDCLK und der Pipe-Takt (= Linktakt, ein Pixel je Takt) */
+static uint32_t dp_limit(const DpLink *l)
+{
+    uint32_t cd = (igd_rd(CDCLK_CTL) & 0x7FF), cdclk = (cd + 2) * 500;
+    uint32_t limit = (uint32_t)((uint64_t)l->link_khz * 8 * l->lanes / 24);
+    if (cdclk < limit)
+        limit = cdclk;
+    if (l->link_khz < limit)
+        limit = l->link_khz;
+    return limit;
+}
+
 /* Zustand der Verbindung beim Monitor (DPCD 0x202-0x205): je Lane Takt/Entzerrung/Symbole, Lanes ausgerichtet */
 static int dp_link_ok(const DpLink *l, char *out, int size)
 {
@@ -1337,41 +1173,15 @@ int igd_dpmode_test(void)
     int pre = igd_preflight("DisplayPort Teil 2 - Moduswechsel");
     if (pre)
         return pre;
-    DpLink l = {.f = {.pipe = igd_state.scanout_pipe}};
-    int p = l.f.pipe;
-    uint32_t ddi = igd_rd(TRANS_DDI_FUNC_CTL(p)), c1 = igd_rd(DPLL_CTRL1), c2 = igd_rd(DPLL_CTRL2);
-    l.f.port = (int)((ddi >> 28) & 7);
-    l.f.dpll = (c2 & (1u << (l.f.port * 3))) ? (int)((c2 >> (l.f.port * 3 + 1)) & 3) : -1;
-    if (!(ddi & (1u << 31)) || ((ddi >> 24) & 7) != 2 || l.f.dpll < 0) {
-        kprintf("igdmode: die Anzeige laeuft nicht per DisplayPort (SST), TRANS_DDI_FUNC_CTL %#x, Abbruch\n", ddi);
+    DpLink l;
+    HwMode orig;
+    int p = igd_state.scanout_pipe;
+    if (dp_link_init(&l, &orig, 1))
         return -4;
-    }
     if (!igd_flip_ready || (igd_rd(PS_CTRL(p, 0)) & PS_SCALER_EN)) {
         kprintf("igdmode: kein zweiter Puffer oder Skalierer an, Abbruch\n");
         return -4;
     }
-    static const uint32_t rate[] = {540000, 270000, 162000, 324000, 216000, 432000}; /* Linktakt (Symbole) in kHz */
-    uint32_t rc_code = (c1 >> (l.f.dpll * 6 + 1)) & 7;
-    l.link_khz = rc_code < 6 ? rate[rc_code] : 0;
-    l.lanes = ((ddi >> 1) & 7) + 1;
-    l.tp_ctl = igd_rd(DP_TP_CTL(l.f.port));
-    l.f.pipeconf = igd_rd(PIPECONF(p));
-    l.f.plane_ctl = igd_rd(PLANE_CTL(p));
-    l.f.cur_ctl = igd_rd(CUR_CTL(p));
-    uint32_t pb = igd_rd(PLANE_BUF_CFG(p)), cb = igd_rd(CUR_BUF_CFG(p));
-    l.ddb = ((pb >> 16) & 0x3FF) - (pb & 0x3FF) + 1;
-    l.cddb = ((cb >> 16) & 0x3FF) - (cb & 0x3FF) + 1;
-    for (int lvl = 0; lvl < 8; lvl++) {
-        l.wm[lvl] = igd_rd(PLANE_WM(p, lvl));
-        l.cwm[lvl] = igd_rd(CUR_WM(p, lvl));
-    }
-    HwMode orig;
-    mode_read(&l.f, &orig);
-    if (!l.link_khz || !orig.link_n) {
-        kprintf("igdmode: Linkrate unbekannt (DPLL_CTRL1 %#x), Abbruch\n", c1);
-        return -4;
-    }
-    l.base_khz = (uint32_t)((uint64_t)l.link_khz * orig.link_m / orig.link_n);
     char st[96];
     dp_link_ok(&l, st, sizeof(st));
     kprintf("igdmode: DP an Port %s: %u Lanes, Linktakt %u MHz, DPLL%d; Pixeltakt jetzt %u kHz; %s\n",
@@ -1382,13 +1192,7 @@ int igd_dpmode_test(void)
             orig.data_m, orig.data_n, orig.link_m, orig.link_n, chk.data_m, chk.data_n, chk.link_m, chk.link_n);
     kprintf("igdmode:   DP_TP_CTL %#x, DDB Ebene %u / Zeiger %u Bloecke, WM0 %#x\n", l.tp_ctl, l.ddb, l.cddb, l.wm[0]);
 
-    /* Grenze: Verbindung (24 Bit je Pixel), CDCLK und der Pipe-Takt (= Linktakt, ein Pixel je Takt) */
-    uint32_t cd = (igd_rd(CDCLK_CTL) & 0x7FF), cdclk = (cd + 2) * 500;
-    uint32_t limit = (uint32_t)((uint64_t)l.link_khz * 8 * l.lanes / 24);
-    if (cdclk < limit)
-        limit = cdclk;
-    if (l.link_khz < limit)
-        limit = l.link_khz;
+    uint32_t limit = dp_limit(&l);
     static uint8_t edid[256];
     int blocks = igd_dp_edid(l.f.port, edid);
     if (!blocks) {
@@ -1408,7 +1212,8 @@ int igd_dpmode_test(void)
             Timing t;
             if (!dtd_parse(e + i, &t) || t.interlaced || t.khz > limit)
                 continue;
-            int dup = t.ha == cur_ha && t.va == cur_va && t.ht == cur_ht && t.vt == cur_vt;
+            uint32_t dk = t.khz > l.base_khz ? t.khz - l.base_khz : l.base_khz - t.khz;
+            int dup = t.ha == cur_ha && t.va == cur_va && t.ht == cur_ht && t.vt == cur_vt && dk < 1000;
             for (int k = 0; k < nc; k++)
                 dup |= cand[k].ha == t.ha && cand[k].va == t.va && cand[k].khz == t.khz;
             uint32_t stride = (t.ha * 4 + 63) & ~63u;
@@ -1471,4 +1276,252 @@ int igd_dpmode_test(void)
     kprintf("igdmode: %s (%d von %d Modi gezeigt%s)\n", rc == 0 ? "DP-Moduswechsel funktioniert" : "DP-Moduswechsel fehlgeschlagen",
             shown, nc, bad ? ", mit Stoerungen" : "");
     return rc;
+}
+
+/* ---------- Fest eingebaut: Modi des Monitors im Betrieb umschalten ---------- */
+
+#define MAX_MODES 16
+static Timing   modes[MAX_MODES];     /* nach Flaeche, dann Bildrate absteigend */
+static int      nmodes, cur_idx = -1, boot_idx = -1;
+static HwFixed  live;                 /* Pipe, Port, DPLL und die festen Registerwerte */
+static DpLink   dpl;                  /* bei DisplayPort: die Verbindung der Firmware */
+static int      is_dp;
+static HwMode   boot_hw, cur_hw;      /* Modus der Firmware / gerade gesetzter */
+
+static int same_timing(const Timing *a, const Timing *b)
+{
+    uint32_t d = a->khz > b->khz ? a->khz - b->khz : b->khz - a->khz;
+    return a->ha == b->ha && a->va == b->va && a->ht == b->ht && a->vt == b->vt && d < 1000;
+}
+
+static void add_mode(const Timing *t)
+{
+    for (int i = 0; i < nmodes; i++)
+        if (same_timing(&modes[i], t))
+            return;
+    if (nmodes >= MAX_MODES)
+        return;
+    int i = nmodes++;
+    uint64_t area = (uint64_t)t->ha * t->va;
+    while (i > 0) {
+        uint64_t a = (uint64_t)modes[i - 1].ha * modes[i - 1].va;
+        if (a > area || (a == area && hz100(&modes[i - 1]) >= hz100(t)))
+            break;
+        modes[i] = modes[i - 1];
+        i--;
+    }
+    modes[i] = *t;
+}
+
+static int find_mode(const Timing *t)
+{
+    for (int i = 0; i < nmodes; i++)
+        if (same_timing(&modes[i], t))
+            return i;
+    return -1;
+}
+
+/* Liest die Modi: den der Firmware und die Detailed Timings aus der EDID, die per HDMI gehen und in den Framebuffer
+ * der Firmware passen (er wird weiterbenutzt, mit gleicher Zeilenlaenge) */
+static void modes_init(void)
+{
+    int p = igd_state.scanout_pipe;
+    uint32_t ddi = igd_rd(TRANS_DDI_FUNC_CTL(p)), c2 = igd_rd(DPLL_CTRL2);
+    live.pipe = p;
+    live.port = (int)((ddi >> 28) & 7);
+    live.dpll = (c2 & (1u << (live.port * 3))) ? (int)((c2 >> (live.port * 3 + 1)) & 3) : -1;
+    uint32_t limit = GEN9_HDMI_MAX_KHZ, khz;
+    if (igd_rd(PS_CTRL(p, 0)) & PS_SCALER_EN) {
+        kprintf("igd: Skalierer ist an: Modus bleibt der der Firmware\n");
+        return;
+    }
+    if ((ddi & (1u << 31)) && ((ddi >> 24) & 7) == 2) { /* DisplayPort: auf der Verbindung der Firmware */
+        if (dp_link_init(&dpl, &boot_hw, 0)) {
+            kprintf("igd: DisplayPort-Verbindung nicht lesbar: Modus bleibt der der Firmware\n");
+            return;
+        }
+        is_dp = 1;
+        limit = dp_limit(&dpl);
+        khz = dpl.base_khz;
+    } else if ((ddi & (1u << 31)) && ((ddi >> 24) & 7) == 0 && live.dpll >= 1 &&
+               ((igd_rd(DPLL_CTRL1) >> (live.dpll * 6 + 5)) & 1)) { /* HDMI */
+        live.pipeconf = igd_rd(PIPECONF(p));
+        live.plane_ctl = igd_rd(PLANE_CTL(p));
+        live.clk_sel = igd_rd(TRANS_CLK_SEL(p));
+        live.buf_ctl = igd_rd(DDI_BUF_CTL(live.port));
+        mode_read(&live, &boot_hw);
+        khz = cfg_khz(boot_hw.cfgcr1, boot_hw.cfgcr2);
+    } else {
+        kprintf("igd: Moduswechsel nur per HDMI (DPLL1-3) oder DisplayPort: Modus bleibt der der Firmware\n");
+        return;
+    }
+    cur_hw = boot_hw;
+
+    Timing b = {.khz = khz};
+    b.ha = (boot_hw.htotal & 0xFFFF) + 1;
+    b.ht = (boot_hw.htotal >> 16) + 1;
+    b.hso = (boot_hw.hsync & 0xFFFF) + 1 - b.ha;
+    b.hsw = (boot_hw.hsync >> 16) - (boot_hw.hsync & 0xFFFF);
+    b.va = (boot_hw.vtotal & 0xFFFF) + 1;
+    b.vt = (boot_hw.vtotal >> 16) + 1;
+    b.vso = (boot_hw.vsync & 0xFFFF) + 1 - b.va;
+    b.vsw = (boot_hw.vsync >> 16) - (boot_hw.vsync & 0xFFFF);
+    b.hpos = (boot_hw.ddi_func >> 16) & 1;
+    b.vpos = (boot_hw.ddi_func >> 17) & 1;
+    if (!b.khz || b.ha != igd_scr_w || b.va != igd_scr_h) {
+        kprintf("igd: Modus der Firmware nicht lesbar: Modus bleibt, wie er ist\n");
+        return;
+    }
+    add_mode(&b);
+
+    static uint8_t edid[256];
+    int blocks = is_dp ? igd_dp_edid(live.port, edid) : read_edid(live.port, edid, 0);
+    for (int blk = 0; blk < blocks; blk++) {
+        const uint8_t *e = edid + 128 * blk;
+        uint32_t first = blk == 0 ? 54 : e[2], end = blk == 0 ? 126 : 127;
+        if (blk > 0 && (e[0] != 0x02 || first < 4))
+            continue;
+        for (uint32_t i = first; i + 18 <= end; i += 18) {
+            Timing t;
+            if (dtd_parse(e + i, &t) && !t.interlaced && t.khz <= limit && t.ha <= igd_scr_w &&
+                t.va <= igd_scr_h && t.ha >= 640 && t.va >= 400)
+                add_mode(&t);
+        }
+    }
+    boot_idx = cur_idx = find_mode(&b);
+    char line[256];
+    int n = 0;
+    for (int i = 0; i < nmodes; i++) {
+        uint32_t hz = hz100(&modes[i]);
+        n += ksnprintf(line + n, sizeof(line) - (size_t)n, "%s%ux%u@%u%s", i ? ", " : "", modes[i].ha, modes[i].va,
+                       (hz + 50) / 100, i == boot_idx ? " (jetzt)" : "");
+        if (n >= (int)sizeof(line) - 24)
+            break;
+    }
+    kprintf("igd: Modi zum Umschalten (%s): %s\n", is_dp ? "DisplayPort" : "HDMI", line);
+}
+
+int igd_mode_count(void)
+{
+    return nmodes;
+}
+
+int igd_mode_info(int i, uint32_t *w, uint32_t *h, uint32_t *hz, int *current)
+{
+    if (i < 0 || i >= nmodes)
+        return -1;
+    *w = modes[i].ha;
+    *h = modes[i].va;
+    *hz = hz100(&modes[i]);
+    *current = i == cur_idx;
+    return 0;
+}
+
+int igd_mode_set(uint32_t w, uint32_t h, uint32_t hz)
+{
+    if (!nmodes)
+        return IGD_MODE_NODRIVER;
+    int idx = -1;
+    if (!w) {
+        idx = boot_idx;
+    } else {
+        for (int i = 0; i < nmodes; i++) {
+            if (modes[i].ha != w || modes[i].va != h)
+                continue;
+            uint32_t mh = hz100(&modes[i]), d = mh > hz ? mh - hz : hz - mh;
+            if (hz && d > 100) /* auf 1 Hz genau */
+                continue;
+            if (idx < 0 || (!hz && mh > hz100(&modes[idx])))
+                idx = i;
+        }
+    }
+    if (idx < 0)
+        return IGD_MODE_NOMODE;
+    if (idx == cur_idx)
+        return 0;
+    if (console_gfx_active())
+        return IGD_MODE_BUSY;
+    igd_gfx_end(); /* die Konsole zeigt den Framebuffer der Firmware (A) */
+
+    HwMode m;
+    if (idx == boot_idx) {
+        m = boot_hw;
+    } else if (is_dp) {
+        fill_timing(&modes[idx], &boot_hw, igd_surf_a, igd_scr_stride, &m);
+        dp_mn(modes[idx].khz, dpl.link_khz, dpl.lanes, &m);
+    } else if (mode_from_timing(&modes[idx], &boot_hw, igd_surf_a, igd_scr_stride, &m)) {
+        return IGD_MODE_FAILED;
+    }
+    int p = live.pipe;
+    uint32_t cur = igd_rd(CUR_CTL(p));
+    if (is_dp) { /* die Verbindung bleibt, nur Zeitablauf, M/N und Watermarks wechseln */
+        dpl.f.plane_ctl = igd_rd(PLANE_CTL(p));
+        if (dp_switch(&dpl, &m, idx == boot_idx ? dpl.base_khz : modes[idx].khz)) {
+            kprintf("igd: Modus %ux%u laesst sich nicht setzen, zurueck zum vorigen\n", modes[idx].ha, modes[idx].va);
+            dp_switch(&dpl, &cur_hw, cur_idx == boot_idx ? dpl.base_khz : modes[cur_idx].khz);
+            igd_wr(CUR_CTL(p), cur);
+            igd_wr(CUR_BASE(p), igd_rd(CUR_BASE(p)));
+            return IGD_MODE_FAILED;
+        }
+        char st[96];
+        if (!dp_link_ok(&dpl, st, sizeof(st)))
+            kprintf("igd: DisplayPort nach dem Wechsel: %s\n", st);
+    } else { /* HDMI: Pipe und Port aus, DPLL neu, wieder an */
+        live.plane_ctl = igd_rd(PLANE_CTL(p));
+        mode_off(&live);
+        if (mode_on(&live, &m)) {
+            kprintf("igd: Modus %ux%u laesst sich nicht setzen, zurueck zum vorigen\n", modes[idx].ha, modes[idx].va);
+            mode_off(&live);
+            if (mode_on(&live, &cur_hw)) {
+                mode_off(&live);
+                mode_on(&live, &boot_hw);
+                cur_hw = boot_hw;
+                cur_idx = boot_idx;
+                igd_scr_w = modes[boot_idx].ha;
+                igd_scr_h = modes[boot_idx].va;
+                console_resize(igd_scr_w, igd_scr_h);
+            }
+            igd_wr(CUR_CTL(p), cur);
+            igd_wr(CUR_BASE(p), igd_rd(CUR_BASE(p)));
+            return IGD_MODE_FAILED;
+        }
+    }
+    igd_wr(CUR_CTL(p), cur);
+    igd_wr(CUR_BASE(p), igd_rd(CUR_BASE(p)));
+    cur_hw = m;
+    cur_idx = idx;
+    igd_scr_w = modes[idx].ha;
+    igd_scr_h = modes[idx].va;
+    console_resize(igd_scr_w, igd_scr_h);
+    uint32_t hzv = hz100(&modes[idx]);
+    kprintf("igd: Modus %ux%u @ %u.%02u Hz gesetzt (Pixeltakt %u kHz)\n", modes[idx].ha, modes[idx].va, hzv / 100,
+            hzv % 100, modes[idx].khz);
+    return 0;
+}
+
+/* Beim Start (aus display_init): Modi einsammeln, dann ggf. "igdmode=BxH[@Hz]" aus der Kommandozeile setzen */
+void igd_modes_boot(void)
+{
+    modes_init();
+    const char *want = cmdline_get("igdmode");
+    if (!want || !nmodes)
+        return;
+    uint32_t w = 0, h = 0, hz = 0;
+    const char *s = want;
+    while (*s >= '0' && *s <= '9')
+        w = w * 10 + (uint32_t)(*s++ - '0');
+    if (*s == 'x')
+        s++;
+    while (*s >= '0' && *s <= '9')
+        h = h * 10 + (uint32_t)(*s++ - '0');
+    if (*s == '@') {
+        s++;
+        while (*s >= '0' && *s <= '9')
+            hz = hz * 10 + (uint32_t)(*s++ - '0');
+        hz *= 100;
+    }
+    int rc = w && h ? igd_mode_set(w, h, hz) : IGD_MODE_NOMODE;
+    if (rc)
+        kprintf("igd: igdmode=%s: %s\n", want, rc == IGD_MODE_NOMODE ? "diesen Modus bietet der Monitor nicht an (resolution zeigt die Liste)"
+                                                                    : "Umschalten fehlgeschlagen");
 }
