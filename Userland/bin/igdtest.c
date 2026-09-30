@@ -1,6 +1,6 @@
 #include "libc.h"
 
-/* igdtest [cursor|blit|info|edid|scale|mode|dp]: testet den Intel-Grafiktreiber auf echter Hardware.
+/* igdtest [cursor|blit|info|edid|scale|mode|dp|dpmode]: testet den Intel-Grafiktreiber auf echter Hardware.
  *   igdtest         Page-Flipping: das Bild ist etwa 2 Sekunden invertiert, flackert dann kurz und kommt zurueck
  *   igdtest cursor  Hardware-Mauszeiger: ein Pfeil kreist 3 Sekunden um die Bildmitte und verschwindet wieder
  *   igdtest blit    Blitter: farbige Rechtecke erscheinen nacheinander, dann scrollt das Bild fuenfmal nach oben;
@@ -12,6 +12,7 @@
  *   igdtest mode    echter Moduswechsel: jeden per HDMI moeglichen Modus des Monitors ca. 8 s mit Testbild, dann
  *                   zurueck (der Monitor wird bei jedem Wechsel kurz schwarz)
  *   igdtest dp      nichts Sichtbares: DisplayPort-Geraete an den Anschluessen suchen, Faehigkeiten und EDID lesen
+ *   igdtest dpmode  Moduswechsel per DisplayPort: die Modi des Monitors (hoechste Bildrate zuerst) je ca. 8 s, dann zurueck
  * Die Messwerte stehen im Kernel-Log: danach "dmesg > /disk/igd.txt" und die Datei schicken. */
 void _start(int argc, char **argv)
 {
@@ -23,6 +24,9 @@ void _start(int argc, char **argv)
     } else if (argc > 1 && strcmp(argv[1], "scale") == 0) {
         op = 6;
         what = "zwei Testbilder, vom Skalierer hochgerechnet";
+    } else if (argc > 1 && strcmp(argv[1], "dpmode") == 0) {
+        op = 9;
+        what = "Moduswechsel per DisplayPort, der Monitor wird dabei eventuell kurz schwarz";
     } else if (argc > 1 && strcmp(argv[1], "mode") == 0) {
         op = 7;
         what = "Moduswechsel, der Monitor wird dabei jeweils kurz schwarz";
@@ -36,7 +40,7 @@ void _start(int argc, char **argv)
                info ? "igdinfo" : dp ? "igd" : "igdmode");
         sys_exit(r == 0 ? 0 : 1);
     } else if (argc > 1) {
-        fprintf(2, "Aufruf: igdtest [cursor|blit|info|edid|scale|mode|dp]\n");
+        fprintf(2, "Aufruf: igdtest [cursor|blit|info|edid|scale|mode|dp|dpmode]\n");
         sys_exit(2);
     }
     printf("igdtest: startet in 1 s (%s) ...\n", what);

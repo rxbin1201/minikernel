@@ -223,6 +223,16 @@ static int probe_port(int port)
     return 1;
 }
 
+int igd_dpcd_read(int port, uint32_t addr, uint8_t *buf, int len)
+{
+    return dpcd_read(port, addr, buf, len);
+}
+
+int igd_dp_edid(int port, uint8_t *edid)
+{
+    return edid_read_aux(port, edid);
+}
+
 int igd_dp_test(void)
 {
     if (!igd_state.gen9 || !igd_regs) {

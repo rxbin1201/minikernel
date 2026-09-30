@@ -43,6 +43,20 @@
 #define PLANE_SURF(p)         (0x7019C + PIPE_OFF(p))
 #define PLANE_SURFLIVE(p)     (0x701AC + PIPE_OFF(p))
 #define PIPECONF(p)           (0x70008 + PIPE_OFF(p))   /* Bit 31 an, Bit 30 laeuft */
+#define PIPE_DATA_M1(t)       (0x60030 + PIPE_OFF(t))   /* DP: TU-Groesse << 25 | Daten-M */
+#define PIPE_DATA_N1(t)       (0x60034 + PIPE_OFF(t))
+#define PIPE_LINK_M1(t)       (0x60040 + PIPE_OFF(t))   /* DP: Pixeltakt : Linktakt */
+#define PIPE_LINK_N1(t)       (0x60044 + PIPE_OFF(t))
+#define DP_TP_CTL(port)       (0x64040 + 0x100u * (uint32_t)(port)) /* DP-Linkschicht: Bits 10:8 Muster */
+#define DP_TP_STATUS(port)    (0x64044 + 0x100u * (uint32_t)(port))
+#define DP_TP_TRAIN_MASK      (7u << 8)
+#define DP_TP_TRAIN_IDLE      (2u << 8)
+#define DP_TP_TRAIN_NORMAL    (3u << 8)
+#define DP_TP_IDLE_DONE       (1u << 25)
+#define PLANE_WM(p, lvl)      (0x70240 + PIPE_OFF(p) + 4u * (uint32_t)(lvl))
+#define CUR_WM(p, lvl)        (0x70140 + PIPE_OFF(p) + 4u * (uint32_t)(lvl))
+#define PLANE_BUF_CFG(p)      (0x7027C + PIPE_OFF(p))
+#define CUR_BUF_CFG(p)        (0x7017C + PIPE_OFF(p))
 #define PLANE_CTL(p)          (0x70180 + PIPE_OFF(p))
 #define VSYNCSHIFT(t)         (0x60028 + PIPE_OFF(t))
 #define TRANS_CLK_SEL(t)      (0x46140 + 4u * (uint32_t)(t)) /* Takt des Transcoders: (Port + 1) << 29, 0 = aus */
@@ -705,6 +719,7 @@ typedef struct {
     uint32_t htotal, hblank, hsync, vtotal, vblank, vsync, vsyncshift, pipesrc;
     uint32_t ddi_func, cfgcr1, cfgcr2;
     uint32_t plane_stride, plane_size, plane_surf;
+    uint32_t data_m, data_n, link_m, link_n; /* nur DisplayPort */
 } HwMode;
 
 typedef struct {
@@ -729,18 +744,20 @@ static void mode_read(const HwFixed *f, HwMode *m)
     m->vsyncshift = igd_rd(VSYNCSHIFT(p));
     m->pipesrc = igd_rd(PIPESRC(p));
     m->ddi_func = igd_rd(TRANS_DDI_FUNC_CTL(p));
-    m->cfgcr1 = igd_rd(DPLL_CFGCR1(f->dpll));
-    m->cfgcr2 = igd_rd(DPLL_CFGCR2(f->dpll));
+    m->cfgcr1 = f->dpll >= 1 ? igd_rd(DPLL_CFGCR1(f->dpll)) : 0;
+    m->cfgcr2 = f->dpll >= 1 ? igd_rd(DPLL_CFGCR2(f->dpll)) : 0;
+    m->data_m = igd_rd(PIPE_DATA_M1(p));
+    m->data_n = igd_rd(PIPE_DATA_N1(p));
+    m->link_m = igd_rd(PIPE_LINK_M1(p));
+    m->link_n = igd_rd(PIPE_LINK_N1(p));
     m->plane_stride = igd_rd(PLANE_STRIDE(p));
     m->plane_size = igd_rd(PLANE_SIZE(p));
     m->plane_surf = igd_rd(PLANE_SURF(p)) & ~0xFFFu;
 }
 
 /* Modus aus einem Zeitablauf; Ebene: Bild w x h aus surf, Zeile stride Byte */
-static int mode_from_timing(const Timing *t, const HwMode *cur, uint32_t surf, uint32_t stride, HwMode *m)
+static void fill_timing(const Timing *t, const HwMode *cur, uint32_t surf, uint32_t stride, HwMode *m)
 {
-    if (skl_hdmi_dpll(t->khz, &m->cfgcr1, &m->cfgcr2))
-        return -1;
     m->htotal = (t->ht - 1) << 16 | (t->ha - 1);
     m->hblank = (t->ht - 1) << 16 | (t->ha - 1);
     m->hsync = (t->ha + t->hso + t->hsw - 1) << 16 | (t->ha + t->hso - 1);
@@ -753,6 +770,17 @@ static int mode_from_timing(const Timing *t, const HwMode *cur, uint32_t surf, u
     m->plane_stride = stride / 64;
     m->plane_size = (t->va - 1) << 16 | (t->ha - 1);
     m->plane_surf = surf;
+    m->data_m = cur->data_m;
+    m->data_n = cur->data_n;
+    m->link_m = cur->link_m;
+    m->link_n = cur->link_n;
+}
+
+static int mode_from_timing(const Timing *t, const HwMode *cur, uint32_t surf, uint32_t stride, HwMode *m)
+{
+    if (skl_hdmi_dpll(t->khz, &m->cfgcr1, &m->cfgcr2))
+        return -1;
+    fill_timing(t, cur, surf, stride, m);
     return 0;
 }
 
@@ -1181,4 +1209,266 @@ void igd_edid_dump(const uint8_t *e, int blocks, uint32_t limit_khz, const char 
         kprintf("igdmode: Erweiterungsblock Typ %#x (nicht ausgewertet)\n", e[128]);
     dtd_limit = l;
     dtd_note = n;
+}
+
+/* ---------- DisplayPort: Moduswechsel auf der bestehenden Verbindung ---------- */
+
+/* Die Firmware hat die Verbindung schon eingemessen (Lanes, Linkrate). Solange die Linkrate fuer den neuen Modus
+ * reicht, bleibt sie, wie sie ist: die Linkschicht sendet waehrenddessen Leerlauf-Muster, der Monitor bleibt
+ * synchron. Neu gesetzt werden Zeitablauf und die M/N-Werte, aus denen der Transcoder die Fuellsymbole berechnet
+ * (Daten: Bits pro Pixel x Pixeltakt : Linktakt x Lanes x 8; Link: Pixeltakt : Linktakt). */
+
+static void compute_mn(uint64_t m, uint64_t n, uint32_t *rm, uint32_t *rn) /* wie i915 compute_m_n */
+{
+    uint64_t N = 1;
+    while (N < n)
+        N <<= 1;
+    if (N > 0x800000)
+        N = 0x800000;
+    uint64_t M = m * N / n;
+    while (M > 0xFFFFFF) {
+        M >>= 1;
+        N >>= 1;
+    }
+    *rm = (uint32_t)M;
+    *rn = (uint32_t)N;
+}
+
+static void dp_mn(uint32_t px_khz, uint32_t link_khz, uint32_t lanes, HwMode *m)
+{
+    uint32_t dm, dn;
+    compute_mn(24ULL * px_khz, (uint64_t)link_khz * lanes * 8, &dm, &dn);
+    m->data_m = (63u << 25) | dm; /* TU-Groesse 64 */
+    m->data_n = dn;
+    compute_mn(px_khz, link_khz, &m->link_m, &m->link_n);
+}
+
+typedef struct {
+    HwFixed  f;
+    uint32_t link_khz, lanes, tp_ctl;
+    uint32_t wm[8], cwm[8];   /* Watermarks der Firmware */
+    uint32_t ddb, cddb;       /* Bloecke im Display-Puffer: Ebene, Mauszeiger */
+    uint32_t base_khz;        /* Pixeltakt, fuer den die Watermarks der Firmware gelten */
+} DpLink;
+
+/* Watermarks fuer einen hoeheren Pixeltakt: die Blockzahl waechst mit dem Datenstrom. Was nicht in den
+ * Display-Puffer passt, wird abgeschaltet (die Stufen >0 sind nur fuer Stromsparzustaende). */
+static void dp_watermarks(const DpLink *l, uint32_t khz)
+{
+    int p = l->f.pipe;
+    for (int lvl = 0; lvl < 8; lvl++) {
+        uint32_t w[2] = {l->wm[lvl], l->cwm[lvl]}, room[2] = {l->ddb, l->cddb};
+        for (int k = 0; k < 2; k++) {
+            uint32_t v = w[k];
+            if (khz > l->base_khz && (v & (1u << 31))) {
+                uint32_t blocks = (uint32_t)(((uint64_t)(v & 0x3FF) * khz + l->base_khz - 1) / l->base_khz) + 1;
+                uint32_t lines = (uint32_t)(((uint64_t)((v >> 14) & 0x1F) * khz + l->base_khz - 1) / l->base_khz);
+                v = (v & ~(0x1Fu << 14)) | (lines > 31 ? 31u : lines) << 14; /* Zeilen werden kuerzer */
+                v = blocks >= room[k] ? (lvl == 0 ? (v & ~0x3FFu) | (room[k] - 1) : v & ~(1u << 31))
+                                      : (v & ~0x3FFu) | blocks;
+            }
+            igd_wr(k == 0 ? PLANE_WM(p, lvl) : CUR_WM(p, lvl), v);
+        }
+    }
+}
+
+/* Anzeige auf den Modus m umstellen, die DP-Verbindung bleibt stehen */
+static int dp_switch(const DpLink *l, const HwMode *m, uint32_t khz)
+{
+    int p = l->f.pipe, rc = 0;
+    igd_wr(PLANE_CTL(p), l->f.plane_ctl & ~(1u << 31));
+    igd_wr(PLANE_SURF(p), igd_rd(PLANE_SURF(p)));
+    igd_wr(CUR_CTL(p), 0);
+    igd_wr(CUR_BASE(p), igd_rd(CUR_BASE(p)));
+    wait_frame(p);
+    igd_wr(DP_TP_CTL(l->f.port), (l->tp_ctl & ~DP_TP_TRAIN_MASK) | DP_TP_TRAIN_IDLE);
+    if (wait_bits(DP_TP_STATUS(l->f.port), DP_TP_IDLE_DONE, DP_TP_IDLE_DONE, 2))
+        kprintf("igdmode:   Leerlauf-Muster nicht bestaetigt (DP_TP_STATUS %#x)\n", igd_rd(DP_TP_STATUS(l->f.port)));
+    igd_wr(PIPECONF(p), l->f.pipeconf & ~(1u << 31));
+    if (wait_bits(PIPECONF(p), 1u << 30, 0, 100))
+        kprintf("igdmode:   Pipe geht nicht aus (PIPECONF %#x)\n", igd_rd(PIPECONF(p)));
+    igd_wr(TRANS_DDI_FUNC_CTL(p), igd_rd(TRANS_DDI_FUNC_CTL(p)) & ~((1u << 31) | (7u << 28)));
+
+    igd_wr(HTOTAL(p), m->htotal);
+    igd_wr(HBLANK(p), m->hblank);
+    igd_wr(HSYNC(p), m->hsync);
+    igd_wr(VTOTAL(p), m->vtotal);
+    igd_wr(VBLANK(p), m->vblank);
+    igd_wr(VSYNC(p), m->vsync);
+    igd_wr(VSYNCSHIFT(p), m->vsyncshift);
+    igd_wr(PIPESRC(p), m->pipesrc);
+    igd_wr(PIPE_DATA_M1(p), m->data_m);
+    igd_wr(PIPE_DATA_N1(p), m->data_n);
+    igd_wr(PIPE_LINK_M1(p), m->link_m);
+    igd_wr(PIPE_LINK_N1(p), m->link_n);
+    igd_wr(TRANS_DDI_FUNC_CTL(p), m->ddi_func);
+    dp_watermarks(l, khz);
+    igd_wr(PLANE_STRIDE(p), m->plane_stride);
+    igd_wr(PLANE_SIZE(p), m->plane_size);
+    igd_wr(PLANE_CTL(p), l->f.plane_ctl);
+    igd_wr(PLANE_SURF(p), m->plane_surf);
+    igd_wr(PIPECONF(p), l->f.pipeconf | 1u << 31);
+    if (wait_bits(PIPECONF(p), 1u << 30, 1u << 30, 100)) {
+        kprintf("igdmode:   Pipe laeuft nicht an (PIPECONF %#x)\n", igd_rd(PIPECONF(p)));
+        rc = -2;
+    }
+    igd_wr(DP_TP_CTL(l->f.port), (l->tp_ctl & ~DP_TP_TRAIN_MASK) | DP_TP_TRAIN_NORMAL);
+    return rc;
+}
+
+/* Zustand der Verbindung beim Monitor (DPCD 0x202-0x205): je Lane Takt/Entzerrung/Symbole, Lanes ausgerichtet */
+static int dp_link_ok(const DpLink *l, char *out, int size)
+{
+    uint8_t st[4] = {0};
+    if (igd_dpcd_read(l->f.port, 0x202, st, 4) != 4) {
+        ksnprintf(out, (size_t)size, "Status nicht lesbar");
+        return 0;
+    }
+    int ok = (st[2] & 1) != 0;
+    for (uint32_t lane = 0; lane < l->lanes; lane++)
+        ok &= ((st[lane / 2] >> (4 * (lane % 2))) & 7) == 7;
+    ksnprintf(out, (size_t)size, "Lanes %02x %02x, ausgerichtet %u, Sink %02x -> %s", st[0], st[1], st[2] & 1, st[3],
+              ok ? "Verbindung steht" : "VERBINDUNG GESTOERT");
+    return ok;
+}
+
+int igd_dpmode_test(void)
+{
+    int pre = igd_preflight("DisplayPort Teil 2 - Moduswechsel");
+    if (pre)
+        return pre;
+    DpLink l = {.f = {.pipe = igd_state.scanout_pipe}};
+    int p = l.f.pipe;
+    uint32_t ddi = igd_rd(TRANS_DDI_FUNC_CTL(p)), c1 = igd_rd(DPLL_CTRL1), c2 = igd_rd(DPLL_CTRL2);
+    l.f.port = (int)((ddi >> 28) & 7);
+    l.f.dpll = (c2 & (1u << (l.f.port * 3))) ? (int)((c2 >> (l.f.port * 3 + 1)) & 3) : -1;
+    if (!(ddi & (1u << 31)) || ((ddi >> 24) & 7) != 2 || l.f.dpll < 0) {
+        kprintf("igdmode: die Anzeige laeuft nicht per DisplayPort (SST), TRANS_DDI_FUNC_CTL %#x, Abbruch\n", ddi);
+        return -4;
+    }
+    if (!igd_flip_ready || (igd_rd(PS_CTRL(p, 0)) & PS_SCALER_EN)) {
+        kprintf("igdmode: kein zweiter Puffer oder Skalierer an, Abbruch\n");
+        return -4;
+    }
+    static const uint32_t rate[] = {540000, 270000, 162000, 324000, 216000, 432000}; /* Linktakt (Symbole) in kHz */
+    uint32_t rc_code = (c1 >> (l.f.dpll * 6 + 1)) & 7;
+    l.link_khz = rc_code < 6 ? rate[rc_code] : 0;
+    l.lanes = ((ddi >> 1) & 7) + 1;
+    l.tp_ctl = igd_rd(DP_TP_CTL(l.f.port));
+    l.f.pipeconf = igd_rd(PIPECONF(p));
+    l.f.plane_ctl = igd_rd(PLANE_CTL(p));
+    l.f.cur_ctl = igd_rd(CUR_CTL(p));
+    uint32_t pb = igd_rd(PLANE_BUF_CFG(p)), cb = igd_rd(CUR_BUF_CFG(p));
+    l.ddb = ((pb >> 16) & 0x3FF) - (pb & 0x3FF) + 1;
+    l.cddb = ((cb >> 16) & 0x3FF) - (cb & 0x3FF) + 1;
+    for (int lvl = 0; lvl < 8; lvl++) {
+        l.wm[lvl] = igd_rd(PLANE_WM(p, lvl));
+        l.cwm[lvl] = igd_rd(CUR_WM(p, lvl));
+    }
+    HwMode orig;
+    mode_read(&l.f, &orig);
+    if (!l.link_khz || !orig.link_n) {
+        kprintf("igdmode: Linkrate unbekannt (DPLL_CTRL1 %#x), Abbruch\n", c1);
+        return -4;
+    }
+    l.base_khz = (uint32_t)((uint64_t)l.link_khz * orig.link_m / orig.link_n);
+    char st[96];
+    dp_link_ok(&l, st, sizeof(st));
+    kprintf("igdmode: DP an Port %s: %u Lanes, Linktakt %u MHz, DPLL%d; Pixeltakt jetzt %u kHz; %s\n",
+            port_name(l.f.port), l.lanes, l.link_khz / 1000, l.f.dpll, l.base_khz, st);
+    HwMode chk = orig;
+    dp_mn(l.base_khz, l.link_khz, l.lanes, &chk);
+    kprintf("igdmode:   M/N der Firmware: Daten %#x/%#x Link %#x/%#x; nachgerechnet: Daten %#x/%#x Link %#x/%#x\n",
+            orig.data_m, orig.data_n, orig.link_m, orig.link_n, chk.data_m, chk.data_n, chk.link_m, chk.link_n);
+    kprintf("igdmode:   DP_TP_CTL %#x, DDB Ebene %u / Zeiger %u Bloecke, WM0 %#x\n", l.tp_ctl, l.ddb, l.cddb, l.wm[0]);
+
+    /* Grenze: Verbindung (24 Bit je Pixel), CDCLK und der Pipe-Takt (= Linktakt, ein Pixel je Takt) */
+    uint32_t cd = (igd_rd(CDCLK_CTL) & 0x7FF), cdclk = (cd + 2) * 500;
+    uint32_t limit = (uint32_t)((uint64_t)l.link_khz * 8 * l.lanes / 24);
+    if (cdclk < limit)
+        limit = cdclk;
+    if (l.link_khz < limit)
+        limit = l.link_khz;
+    static uint8_t edid[256];
+    int blocks = igd_dp_edid(l.f.port, edid);
+    if (!blocks) {
+        kprintf("igdmode: EDID ueber AUX nicht lesbar\n");
+        return -2;
+    }
+    Timing cand[4];
+    int nc = 0;
+    uint32_t cur_ha = (orig.htotal & 0xFFFF) + 1, cur_va = (orig.vtotal & 0xFFFF) + 1;
+    uint32_t cur_ht = (orig.htotal >> 16) + 1, cur_vt = (orig.vtotal >> 16) + 1;
+    for (int b = 0; b < blocks && nc < 4; b++) {
+        const uint8_t *e = edid + 128 * b;
+        uint32_t first = b == 0 ? 54 : e[2], end = b == 0 ? 126 : 127;
+        if (b > 0 && (e[0] != 0x02 || first < 4))
+            continue;
+        for (uint32_t i = first; i + 18 <= end && nc < 4; i += 18) {
+            Timing t;
+            if (!dtd_parse(e + i, &t) || t.interlaced || t.khz > limit)
+                continue;
+            int dup = t.ha == cur_ha && t.va == cur_va && t.ht == cur_ht && t.vt == cur_vt;
+            for (int k = 0; k < nc; k++)
+                dup |= cand[k].ha == t.ha && cand[k].va == t.va && cand[k].khz == t.khz;
+            uint32_t stride = (t.ha * 4 + 63) & ~63u;
+            if (!dup && (uint64_t)stride * t.va <= (uint64_t)igd_scr_stride * igd_scr_h)
+                cand[nc++] = t;
+        }
+    }
+    for (int i = 1; i < nc; i++) /* hoechste Bildrate zuerst: das ist der interessante Fall */
+        for (int k = i; k > 0 && hz100(&cand[k]) > hz100(&cand[k - 1]); k--) {
+            Timing x = cand[k];
+            cand[k] = cand[k - 1];
+            cand[k - 1] = x;
+        }
+    if (!nc) {
+        kprintf("igdmode: kein anderer Modus passt (Grenze %u kHz)\n", limit);
+        return -9;
+    }
+
+    int rc = 0, shown = 0, bad = 0;
+    static const uint32_t tints[] = {0x102040, 0x204010, 0x401020, 0x303010};
+    for (int i = 0; i < nc && rc == 0; i++) {
+        Timing *t = &cand[i];
+        uint32_t stride = (t->ha * 4 + 63) & ~63u, hz = hz100(t);
+        HwMode m;
+        fill_timing(t, &orig, igd_surf_b, stride, &m);
+        dp_mn(t->khz, l.link_khz, l.lanes, &m);
+        kprintf("igdmode: Modus %ux%u @ %u.%02u Hz, Pixeltakt %u kHz, gesamt %ux%u: M/N Daten %#x/%#x Link %#x/%#x\n",
+                t->ha, t->va, hz / 100, hz % 100, t->khz, t->ht, t->vt, m.data_m, m.data_n, m.link_m, m.link_n);
+        test_image(igd_buf_b, stride, t->ha, t->va, tints[i % 4]);
+        uint32_t imr = igd_underrun_begin(p);
+        if (dp_switch(&l, &m, t->khz)) {
+            igd_underrun_end(p, imr);
+            rc = -10;
+            break;
+        }
+        shown++;
+        thread_sleep_ms(300);
+        int ok = dp_link_ok(&l, st, sizeof(st));
+        uint32_t meas = measure_hz100(p);
+        int under = igd_underrun_end(p, imr);
+        bad += !ok || under;
+        kprintf("igdmode:   laeuft: gemessen %u.%02u Hz, %s, %s, WM0 %#x\n", meas / 100, meas % 100, st,
+                under ? "FIFO-UNTERLAUF" : "kein Unterlauf", igd_rd(PLANE_WM(p, 0)));
+        thread_sleep_ms(6000);
+    }
+
+    /* zurueck: Zeitablauf, M/N und Watermarks der Firmware */
+    int back = dp_switch(&l, &orig, l.base_khz);
+    igd_wr(CUR_CTL(p), l.f.cur_ctl);
+    igd_wr(CUR_BASE(p), igd_rd(CUR_BASE(p)));
+    thread_sleep_ms(300);
+    int ok = dp_link_ok(&l, st, sizeof(st));
+    uint32_t meas = measure_hz100(p);
+    kprintf("igdmode: zurueck%s: %ux%u, gemessen %u.%02u Hz, %s, PLANE_SURFLIVE %#x\n", back ? " MIT FEHLER" : "",
+            (igd_rd(PIPESRC(p)) >> 16) + 1, (igd_rd(PIPESRC(p)) & 0xFFFF) + 1, meas / 100, meas % 100, st,
+            igd_rd(PLANE_SURFLIVE(p)));
+    console_repaint();
+    if (rc == 0 && (back || !ok))
+        rc = -11;
+    kprintf("igdmode: %s (%d von %d Modi gezeigt%s)\n", rc == 0 ? "DP-Moduswechsel funktioniert" : "DP-Moduswechsel fehlgeschlagen",
+            shown, nc, bad ? ", mit Stoerungen" : "");
+    return rc;
 }
