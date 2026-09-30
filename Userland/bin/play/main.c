@@ -1,7 +1,10 @@
 #include "libc.h"
+#include "play.h"
 
 /* play DATEI.wav     spielt eine WAV-Datei ab (PCM 8/16/24/32 Bit oder 32-Bit-Gleitkomma, Mono/Stereo/mehr Kanaele,
  *                    beliebige Abtastrate: was der Codec nicht kann, wird auf 48 kHz umgerechnet)
+ * play DATEI.mp3     spielt eine MP3-Datei ab (MPEG-1/2/2.5, Layer I-III, auch mit ID3-Tag; mp3.c)
+ * play -w ZIEL.wav DATEI.mp3   wandelt eine MP3-Datei in WAV um, statt sie abzuspielen
  * play -t [HZ]       Testton: 2 s Sinus (Standard 440 Hz), abwechselnd links und rechts
  * play -v N          Lautstaerke 0-100 setzen (mit Datei: vor dem Abspielen); ohne alles: Lautstaerke anzeigen
  * Abbrechen mit Strg+C. Der Kernel spielt immer 16 Bit Stereo; alles andere rechnet play um (ohne Gleitkomma). */
@@ -151,12 +154,14 @@ static int test_tone(unsigned hz)
 
 void _start(int argc, char **argv)
 {
-    const char *file = 0;
+    const char *file = 0, *wav_out = 0;
     int vol = -1, tone = 0;
     unsigned tone_hz = 440;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-v") && i + 1 < argc)
             vol = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-w") && i + 1 < argc)
+            wav_out = argv[++i];
         else if (!strcmp(argv[i], "-t")) {
             tone = 1;
             if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9')
@@ -164,7 +169,7 @@ void _start(int argc, char **argv)
         } else if (argv[i][0] != '-')
             file = argv[i];
         else {
-            fprintf(2, "Aufruf: play [-v 0-100] DATEI.wav | play -t [HZ] | play -v N\n");
+            fprintf(2, "Aufruf: play [-v 0-100] DATEI.wav|DATEI.mp3 | play -w ZIEL.wav DATEI.mp3 | play -t [HZ] | play -v N\n");
             sys_exit(2);
         }
     }
@@ -186,6 +191,15 @@ void _start(int argc, char **argv)
     if (fd < 0) {
         fprintf(2, "play: %s nicht gefunden\n", file);
         sys_exit(1);
+    }
+    if (is_mp3(fd)) {
+        int rc = play_mp3(file, fd, wav_out);
+        sys_close(fd);
+        sys_exit(rc);
+    }
+    if (wav_out) {
+        fprintf(2, "play: -w wandelt nur MP3-Dateien um\n");
+        sys_exit(2);
     }
     WavInfo w = {0};
     int pr = parse_wav(fd, &w);

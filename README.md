@@ -96,8 +96,18 @@ gefuellt. Ohne Ton ist der Stream aus und der Thread schlaeft.
 
 - `play datei.wav` spielt WAV-Dateien: PCM mit 8/16/24/32 Bit oder 32-Bit-Gleitkomma, Mono oder Stereo, jede
   Abtastrate (kann der Codec sie nicht, rechnet `play` auf 48 kHz um). Beispiel: `play /share/klang.wav`
+- `play lied.mp3` spielt MP3-Dateien (MPEG-1/2/2.5, Layer I-III, mit ID3-Tag), `play -w lied.wav lied.mp3` wandelt
+  sie in WAV um. Dekodiert wird mit [minimp3](https://github.com/lieff/minimp3) (CC0, unveraendert in
+  `Userland/include/minimp3.h`); die ISO-Testdateien ergeben im System bitgenau dieselben Werte wie auf dem Host
 - `play -t [Hz]` spielt einen Testton (links, rechts, beide), `play -v 0-100` setzt die Lautstaerke
 - In QEMU: `make run SOUND=pa` (hoerbar) oder `SOUND=wav` (Aufnahme in `Build/sound.wav`)
+
+## Gleitkomma in Programmen
+
+Programme duerfen mit `float`/`double` und SSE rechnen (das Userland wird ohne `-mno-sse` uebersetzt). Der Kernel
+selbst nutzt FPU/SSE nicht; beim Threadwechsel sichert er die Register des alten Threads (`fxsave`) und laedt die des
+neuen (`fxrstor`), `fork` gibt sie ans Kind weiter, `exec` setzt sie zurueck. Selbsttest: acht `fputest` rechnen
+gleichzeitig (mehr Programme als CPUs) und muessen dasselbe Ergebnis erhalten wie ohne Unterbrechung.
 
 ## Fehlersuche
 
