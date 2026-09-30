@@ -425,7 +425,8 @@ static void syscall_do(SyscallFrame *f)
             : f->rdi == 8 ? igd_dp_test()
             : f->rdi == 9 ? igd_dpmode_test()
             : f->rdi == 10 ? igd_dptrain_test()
-            : (f->rdi & 0xFF) == 11 ? igd_output_test((int)(f->rdi >> 8)) : ERR_INVAL;
+            : (f->rdi & 0xFF) == 11 ? igd_output_test((int)(f->rdi >> 8))
+            : f->rdi == 12 ? igd_vblank_test() : ERR_INVAL;
         break;
     case SYS_PCIINFO: {
         PciInfo pi;
@@ -589,6 +590,13 @@ static void syscall_do(SyscallFrame *f)
                     console_gfx_blit((const uint32_t *)b.buf, b.pitch, b.x, b.y, b.w, b.h);
                     ret = 0;
                 }
+            }
+        } else if (f->rdi == 4) { /* auf den naechsten Bildwechsel warten -> Zaehler der Bildwechsel */
+            if (!igd_vblank_ok())
+                ret = ERR_NOSYS;
+            else {
+                igd_wait_vblank(50);
+                ret = (int64_t)igd_vblank_count();
             }
         } else if (f->rdi == 3) { /* Hardware-Mauszeiger: rsi = x | y << 16 | sichtbar << 32 */
             if (!console_gfx_owner(pid))

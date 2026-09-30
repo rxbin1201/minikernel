@@ -152,6 +152,6 @@ void _start(int argc, char **argv)
             step();
             draw();
         }
-        sys_sleep_ms(10);
+        gfx_vsync(); /* im Takt der Anzeige */
     }
 }

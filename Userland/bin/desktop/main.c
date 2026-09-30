@@ -278,7 +278,7 @@ void _start(int argc, char **argv)
     damage_all();
     draw_all();
 
-    s64 last_draw = 0, last_sec = -1, last_min = -1;
+    s64 last_sec = -1, last_min = -1;
     Win *last_focus = focused();
     while (!quit) {
         Event e;
@@ -322,13 +322,8 @@ void _start(int argc, char **argv)
                 damage(W - 60, H - TASKBAR_H, 60, TASKBAR_H);
             }
         }
-        s64 t = sys_ticks();
-        if (t - last_draw >= 2) { /* hoechstens etwa 50 Bilder pro Sekunde */
-            draw_all();
-            last_draw = t;
-        }
-        if (!n)
-            sys_sleep_ms(10);
+        draw_all(); /* direkt nach dem Bildwechsel: was sich geaendert hat, steht bis zum naechsten Bild */
+        gfx_vsync();
     }
     for (int i = 0; i < MAXW; i++)
         if (wins[i].used)

@@ -67,6 +67,9 @@ In der Shell: `burn 5000 & burn 5000 & cpus` zeigt zwei ausgelastete CPUs.
   3440x1440 mit 100 Hz. `resolution` listet sie mit
   Bildrate und schaltet sofort um (`resolution 2560x1440@60`), die Konsole passt sich an. Fuer den naechsten Start
   speichert es `igdmode=2560x1440@60` und `mode=max` (der Framebuffer der Firmware muss gross genug sein)
+- **Bildwechsel-Interrupt** (`igd_irq.c`): die Pipe meldet jeden Bildwechsel per MSI. Grafikprogramme warten mit
+  `gfx_vsync()` darauf und laufen so genau im Takt des Monitors (Tetris, Snake, Desktop; `anim` zeigt es), die
+  Doppelpufferung wartet darauf statt nachzusehen. Ohne Interrupt (QEMU) ersetzt eine 10-ms-Pause den Takt
 - **Anschluss wechseln im Betrieb:** ein Thread prueft jede Sekunde den aktiven Anschluss. Wird der Monitor
   abgezogen, legt der Treiber das Bild auf einen anderen angeschlossenen Monitor (DisplayPort bevorzugt) und schaltet
   diesen Anschluss ganz ohne Firmware ein (Strom, Pegel, DPLL, bei DP Link-Training); wird DP neu eingesteckt, misst

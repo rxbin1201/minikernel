@@ -59,6 +59,12 @@ int igd_dptrain_test(void);
 /* Anschluesse (igdtest output [b|c|d]): anzeigen; mit Port das Bild von Grund auf dorthin legen, 12 s, zurueck */
 int igd_output_test(int port);
 
+/* Bildwechsel-Interrupt (igd_irq.c): zaehlt die Bildwechsel der angezeigten Pipe und weckt Wartende */
+int      igd_vblank_ok(void);
+uint64_t igd_vblank_count(void);
+int      igd_wait_vblank(int timeout_ms); /* 1 = Bildwechsel kam, 0 = Zeit abgelaufen oder kein Interrupt */
+int      igd_vblank_test(void);           /* igdtest vblank */
+
 /* Fest eingebaut: Modi des Monitors (EDID, per HDMI moeglich, hoechstens so gross wie der Framebuffer der Firmware)
  * im Betrieb umschalten; die Konsole passt sich an. hz in 1/100 Hz (0 = hoechste Bildrate bzw. beim Setzen egal);
  * w = 0 setzt den Modus der Firmware. */

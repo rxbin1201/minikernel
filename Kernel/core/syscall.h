@@ -66,7 +66,7 @@
 #define SYS_NTP       58 /* (server oder 0, NtpResult*, uhr_stellen) -> 0 oder Fehler */
 #define SYS_SOCKPORT  59 /* (fd) -> lokaler Port des Sockets */
 #define SYS_CPUINFO   60 /* (index, CpuInfo*) -> 0 oder ERR_NOENT am Ende */
-#define SYS_GPU       62 /* (op): Intel-Grafik-Tests: 1 = Page-Flipping, 2 = Hardware-Mauszeiger, 3 = Blitter, 4 = Zaehler/Messung, 5 = EDID, 6 = Skalierer, 7 = Moduswechsel, 8 = DisplayPort, 9 = DP-Moduswechsel, 10 = DP-Link-Training, 11 | port << 8 = Anschluss (igdtest) -> 0 ok, < 0 Fehler (Details im Kernel-Log) */
+#define SYS_GPU       62 /* (op): Intel-Grafik-Tests: 1 = Page-Flipping, 2 = Hardware-Mauszeiger, 3 = Blitter, 4 = Zaehler/Messung, 5 = EDID, 6 = Skalierer, 7 = Moduswechsel, 8 = DisplayPort, 9 = DP-Moduswechsel, 10 = DP-Link-Training, 11 | port << 8 = Anschluss, 12 = Bildwechsel-Interrupt (igdtest) -> 0 ok, < 0 Fehler (Details im Kernel-Log) */
 #define SYS_AUDIO     64 /* (op, a, b): 0 oeffnen (rate, kanaele; 16 Bit), 1 schreiben (buf, len) -> Bytes, 2 ausspielen lassen,
                             3 schliessen, 4 Gesamtlautstaerke (0-100, -1 = abfragen) -> jetzt, 5 gemischte Bytes,
                             6 Lautstaerke der eigenen Stimme. Bis zu 8 Programme gleichzeitig (Mischer).

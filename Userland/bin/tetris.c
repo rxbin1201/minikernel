@@ -252,6 +252,6 @@ void _start(int argc, char **argv)
         }
         if (changed)
             draw();
-        sys_sleep_ms(10);
+        gfx_vsync(); /* im Takt der Anzeige */
     }
 }

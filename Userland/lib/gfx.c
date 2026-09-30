@@ -680,3 +680,11 @@ int bmp_save(const char *path, const Surface *s, int x, int y, int w, int h)
     gfx_free(d, size);
     return rc;
 }
+
+int gfx_vsync(void)
+{
+    if (sys_gfx(4, 0) >= 0)
+        return 1;
+    sys_sleep_ms(10);
+    return 0;
+}

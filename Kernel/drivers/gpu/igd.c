@@ -249,6 +249,7 @@ void igd_init(const BootInfo *bi)
         return;
     }
     display_init(bi);
+    igd_irq_init(&d);
 }
 
 /* ---------- Stufe 2: Page-Flipping (nur auf Befehl: igdtest) ---------- */
@@ -717,7 +718,8 @@ static void wait_flip(void)
         return;
     int p = igd_state.scanout_pipe;
     for (int i = 0; i < 20 && (igd_rd(PLANE_SURFLIVE(p)) & ~0xFFFu) != pending; i++)
-        thread_sleep_ms(2); /* hoechstens ein Bild (20 ms bei 50 Hz); schlafend, damit andere CPUs weiterkommen */
+        if (!igd_wait_vblank(30)) /* der Wechsel passiert beim naechsten Bildwechsel: darauf warten */
+            thread_sleep_ms(2);   /* ohne Interrupt: nachsehen, hoechstens ein Bild lang */
     pending = 0;
 }
 

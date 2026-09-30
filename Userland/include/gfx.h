@@ -78,6 +78,9 @@ void gfx_show_cursor(int visible);
 int gfx_poll(Event *e);
 /* Wartet hoechstens timeout_ms auf ein Ereignis (-1 = ohne Grenze). 0 = keins */
 int gfx_wait(Event *e, int timeout_ms);
+/* Wartet auf den naechsten Bildwechsel des Monitors (z.B. 100 Hz): damit laeuft eine Programmschleife genau im Takt der
+ * Anzeige. Ohne Bildwechsel-Interrupt (z.B. in QEMU) 10 ms. Ergebnis: 1 = echter Bildwechsel, 0 = Ersatz */
+int gfx_vsync(void);
 int gfx_open(void);
 void gfx_close(void);
 /* Bildschirm voruebergehend abgeben (z.B. um ein anderes Grafikprogramm zu starten) und wieder uebernehmen */
