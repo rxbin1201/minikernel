@@ -26,6 +26,11 @@ isr\n:
 .endr
 
 isr_common:
+    /* Aus dem User-Mode: GS-Basis auf die Per-CPU-Daten umschalten (Stack: vector, error, rip, cs, ...) */
+    testb $3, 24(%rsp)
+    jz 1f
+    swapgs
+1:
     pushq %rax
     pushq %rbx
     pushq %rcx
@@ -69,6 +74,7 @@ isr_common:
     jz 1f
     movq $0x23, 8(%rsp)
     movq $0x1B, 32(%rsp)
+    swapgs
 1:
     iretq
 

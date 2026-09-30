@@ -164,6 +164,14 @@ uint64_t paging_table_frames(void)
     return table_frames;
 }
 
+/* Zaehlt Aenderungen, nach denen andere CPUs ihren TLB leeren muessen (siehe bkl_acquire) */
+static volatile uint64_t kernel_gen;
+
+uint64_t paging_kernel_gen(void)
+{
+    return kernel_gen;
+}
+
 /* Folgt einem Eintrag zur naechsten Tabelle, legt sie bei Bedarf an. */
 static uint64_t *next_table(uint64_t *entry, int create, uint64_t user)
 {
@@ -344,6 +352,8 @@ int as_unmap(AddressSpace *as, uint64_t virt)
         return -1;
     *pte = 0;
     invlpg(virt);
+    if ((virt >> 39) != (USER_BASE >> 39))
+        kernel_gen++; /* Kernel-Bereich: gilt fuer alle CPUs */
     return 0;
 }
 
@@ -354,6 +364,8 @@ int as_set_flags(AddressSpace *as, uint64_t virt, uint64_t flags)
         return -1;
     *pte = (*pte & ADDR_MASK_4K) | PTE_PRESENT | sanitize(flags);
     invlpg(virt);
+    if ((virt >> 39) != (USER_BASE >> 39))
+        kernel_gen++;
     return 0;
 }
 

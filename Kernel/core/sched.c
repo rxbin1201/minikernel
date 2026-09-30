@@ -7,6 +7,7 @@
 #include "mm/kstack.h"
 #include "mm/paging.h"
 #include "lib/string.h"
+#include "arch/x86_64/smp.h"
 
 typedef enum { T_READY, T_RUNNING, T_SLEEPING, T_BLOCKED, T_DEAD } ThreadState;
 
@@ -29,9 +30,11 @@ struct Thread {
 extern void switch_context(uint64_t *old_rsp, uint64_t new_rsp);
 extern void thread_trampoline(void);
 
+/* Laufender Thread und Idle-Thread gehoeren zur CPU (smp.h). Run-Queue, Listen und Zaehler sind gemeinsam; sie
+ * werden nur unter dem Big Kernel Lock und mit ausgeschalteten Interrupts benutzt. */
+static inline Thread *cur_thread(void) { return this_cpu()->current; }
+
 static Thread  main_thread;
-static Thread *current;
-static Thread *idle;
 static Thread *rq_head, *rq_tail;
 static Thread *all_list;
 static Thread *dead_list;
@@ -67,22 +70,23 @@ static Thread *dequeue(void)
  * wenn der aufrufende Thread wieder an der Reihe ist. */
 static void schedule(void)
 {
-    Thread *prev = current;
+    Cpu *c = this_cpu();
+    Thread *prev = c->current;
 
     if (prev->state == T_RUNNING) {
         prev->state = T_READY;
-        if (prev != idle)
+        if (prev != c->idle)
             enqueue(prev);
     }
 
     Thread *next = dequeue();
     if (!next)
-        next = idle;
+        next = c->idle;
     next->state = T_RUNNING;
     if (next == prev)
         return;
 
-    current = next;
+    c->current = next;
     switches++;
 
     /* Stack fuer Ring-3-Interrupts/Syscalls und Adressraum des neuen Threads. Der Kernel-Teil ist in allen
@@ -187,13 +191,47 @@ Thread *thread_create(const char *name, ThreadEntry entry, void *arg)
     return thread_create_in(name, entry, arg, 0);
 }
 
+/* Idle-Thread jeder CPU: waehrend er auf den naechsten Interrupt wartet, haelt die CPU den Big Kernel Lock nicht.
+ * Der Timer-Interrupt holt ihn wieder (bkl_enter) und wechselt ueber sched_tick zu bereiten Threads. */
+static void __attribute__((noreturn)) idle_loop(void)
+{
+    for (;;) {
+        reap_dead();
+        cpu_cli();
+        bkl_release();
+        cpu_wait_for_interrupt(); /* sti; hlt */
+        cpu_cli();
+        bkl_acquire();
+        cpu_sti();
+    }
+}
+
 static void idle_main(void *arg)
 {
     (void)arg;
-    for (;;) {
-        reap_dead();
-        cpu_wait_for_interrupt();
-    }
+    idle_loop();
+}
+
+/* Legt den Idle-Thread einer weiteren CPU an; die CPU laeuft spaeter mit sched_ap_run auf seinem Stack los. */
+Thread *sched_ap_idle(void)
+{
+    return create("idle", idle_main, 0, 0, 0);
+}
+
+uint64_t sched_thread_stack(const Thread *t)
+{
+    return t->kstack_top;
+}
+
+/* Erster Code einer weiteren CPU mit Scheduler (auf dem Stack ihres Idle-Threads, BKL gehalten, IF = 0) */
+void sched_ap_run(void)
+{
+    Cpu *c = this_cpu();
+    c->current = c->idle;
+    c->idle->state = T_RUNNING;
+    gdt_set_kernel_stack(c->idle->kstack_top);
+    cpu_sti();
+    idle_loop();
 }
 
 void sched_init(void)
@@ -205,10 +243,10 @@ void sched_init(void)
     memcpy(main_thread.name, "main", 5);
     main_thread.state = T_RUNNING;
     all_list = &main_thread;
-    current  = &main_thread;
+    this_cpu()->current = &main_thread;
 
     irq_restore(f); /* create() nimmt selbst kmalloc/irq_save */
-    idle = create("idle", idle_main, 0, 0, 0);
+    this_cpu()->idle = create("idle", idle_main, 0, 0, 0);
 
     f = irq_save();
     sched_on = 1;
@@ -218,9 +256,9 @@ void sched_init(void)
 void thread_exit(void)
 {
     irq_save(); /* bewusst kein Restore: dieser Thread laeuft nie wieder */
-    current->state = T_DEAD;
-    current->next = dead_list;
-    dead_list = current;
+    cur_thread()->state = T_DEAD;
+    cur_thread()->next = dead_list;
+    dead_list = cur_thread();
     schedule();
     for (;;)
         cpu_hlt(); /* unerreichbar */
@@ -242,8 +280,8 @@ void thread_sleep_ms(uint64_t ms)
         ticks = 1;
 
     uint64_t f = irq_save();
-    current->wake_tick = apic_ticks() + ticks;
-    current->state = T_SLEEPING;
+    cur_thread()->wake_tick = apic_ticks() + ticks;
+    cur_thread()->state = T_SLEEPING;
     schedule();
     irq_restore(f);
 }
@@ -252,17 +290,17 @@ void mutex_lock(Mutex *m)
 {
     uint64_t f = irq_save();
     while (m->locked) {
-        current->next = 0;
+        cur_thread()->next = 0;
         if (m->waiters_tail)
-            m->waiters_tail->next = current;
+            m->waiters_tail->next = cur_thread();
         else
-            m->waiters_head = current;
-        m->waiters_tail = current;
-        current->state = T_BLOCKED;
+            m->waiters_head = cur_thread();
+        m->waiters_tail = cur_thread();
+        cur_thread()->state = T_BLOCKED;
         schedule();
     }
     m->locked = 1;
-    m->owner  = current;
+    m->owner  = cur_thread();
     irq_restore(f);
 }
 
@@ -290,7 +328,8 @@ void sched_tick(void)
         return;
 
     uint64_t now = apic_ticks();
-    current->cpu_ticks++;
+    Thread *cur = cur_thread();
+    cur->cpu_ticks++;
 
     for (Thread *t = all_list; t; t = t->all_next) {
         if (t->state == T_SLEEPING && t->wake_tick <= now) {
@@ -306,7 +345,7 @@ void sched_tick(void)
 void        thread_set_data(Thread *t, void *data) { t->data = data; }
 void        thread_set_as(Thread *t, AddressSpace *as) { t->as = as; }
 void       *thread_data(const Thread *t)        { return t->data; }
-Thread     *thread_current(void)                { return current; }
+Thread     *thread_current(void)                { return cur_thread(); }
 uint32_t    thread_id(const Thread *t)          { return t->id; }
 const char *thread_name(const Thread *t)        { return t->name; }
 uint64_t    sched_switch_count(void)            { return switches; }

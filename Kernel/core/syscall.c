@@ -5,6 +5,7 @@
 #include "core/fdobj.h"
 #include "fs/fs.h"
 #include "arch/x86_64/gdt.h"
+#include "arch/x86_64/smp.h"
 #include "drivers/keyboard.h"
 #include "lib/kprintf.h"
 #include "arch/x86_64/power.h"
@@ -274,8 +275,18 @@ static void sys_sleep(uint64_t ms)
     }
 }
 
-/* Wird von syscall_entry auf dem Kernel-Stack des Threads aufgerufen (IF = 0). */
+static void syscall_do(SyscallFrame *f);
+
+/* Wird von syscall_entry auf dem Kernel-Stack des Threads aufgerufen (IF = 0). Aus dem User-Mode kommend haelt die
+ * CPU den Big Kernel Lock nie (smp.h). */
 void syscall_dispatch(SyscallFrame *f)
+{
+    bkl_acquire();
+    syscall_do(f);
+    bkl_release();
+}
+
+static void syscall_do(SyscallFrame *f)
 {
     process_check_killed(); /* schon gekillt: gar nicht erst ausfuehren */
 

@@ -3,6 +3,7 @@
 #include "arch/x86_64/apic.h"
 #include "lib/kprintf.h"
 #include "lib/ksyms.h"
+#include "arch/x86_64/smp.h"
 #include "core/process.h"
 
 #define IDT_ENTRIES    256
@@ -54,6 +55,12 @@ void idt_init(void)
     for (int i = 0; i < ISR_STUBS; i++)
         set_gate(i, isr_stub_table[i], i == 8 ? IST_DOUBLE_FAULT : 0);
 
+    idt_load();
+}
+
+/* Alle CPUs teilen sich eine IDT */
+void idt_load(void)
+{
     Idtr idtr = {sizeof(idt) - 1, (uint64_t)&idt};
     __asm__ __volatile__("lidt %0" : : "m"(idtr));
 }
@@ -65,8 +72,19 @@ void idt_set_handler(uint8_t vector, IdtHandler handler)
     handlers[vector] = handler;
 }
 
-/* Wird von isr_common (isr.S) aufgerufen */
+static void isr_dispatch(InterruptFrame *f);
+
+/* Wird von isr_common (isr.S) aufgerufen. Kam der Interrupt aus dem User-Mode oder dem Idle-Warten, haelt diese
+ * CPU den Big Kernel Lock noch nicht (smp.h). Wechselt der Handler den Thread, gehoert "taken" zum unterbrochenen
+ * Kontext: er wird beim Fortsetzen (vielleicht auf einer anderen CPU) wieder richtig freigegeben. */
 void isr_handler(InterruptFrame *f)
+{
+    int taken = bkl_enter();
+    isr_dispatch(f);
+    bkl_leave(taken);
+}
+
+static void isr_dispatch(InterruptFrame *f)
 {
     /* Externe Interrupts (APIC-Timer, IOAPIC ...) */
     if (f->vector >= 32) {

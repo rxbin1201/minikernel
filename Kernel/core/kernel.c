@@ -12,6 +12,7 @@
 #include "arch/x86_64/acpi.h"
 #include "arch/x86_64/apic.h"
 #include "arch/x86_64/ioapic.h"
+#include "arch/x86_64/smp.h"
 #include "drivers/keyboard.h"
 #include "core/sched.h"
 #include "mm/kstack.h"
@@ -93,11 +94,12 @@ static void init_storage(BootInfo *info)
 /* Aufgerufen von entry.S auf dem eigenen Kernel-Stack. */
 void kmain(BootInfo *info)
 {
+    smp_early_init(); /* Per-CPU-Daten der Boot-CPU (GS), Big Kernel Lock */
     serial_init();
     console_init(&info->fb);
     kprintf("Kernel gestartet (Framebuffer %ux%u @ %#lx)\n", info->fb.width, info->fb.height, (unsigned long)info->fb.base);
 
-    gdt_init();
+    gdt_init(smp_cpu(0));
     kprintf("GDT + TSS geladen\n");
 
     idt_init();

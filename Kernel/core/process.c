@@ -1,5 +1,6 @@
 #include "core/process.h"
 #include "arch/x86_64/cpu.h"
+#include "arch/x86_64/smp.h"
 #include "core/fdobj.h"
 #include "fs/fs.h"
 #include "mm/heap.h"
@@ -304,11 +305,19 @@ static void inherit_from(Process *child, const Process *parent)
     child->pgid = parent->pgid;
 }
 
+/* Nach Ring 3: ab dort haelt die CPU den Big Kernel Lock nicht mehr (smp.h). Bis zum iretq bleiben Interrupts aus. */
+static void __attribute__((noreturn)) to_user(uint64_t rip, uint64_t rsp, uint64_t arg1, uint64_t arg2)
+{
+    cpu_cli();
+    bkl_release();
+    enter_user(rip, rsp, arg1, arg2);
+}
+
 static void process_main(void *arg)
 {
     Process *p = arg;
     thread_set_data(thread_current(), p);
-    enter_user(p->entry, p->user_rsp, (uint64_t)p->argc, p->argv);
+    to_user(p->entry, p->user_rsp, (uint64_t)p->argc, p->argv);
 }
 
 int process_spawn(const char *path, const char *cmdline, uint32_t parent)
@@ -370,6 +379,8 @@ static void fork_child_main(void *arg)
     kfree(ctx);
     thread_set_data(thread_current(), p);
     regs.rax = 0; /* fork liefert im Kind 0 */
+    cpu_cli();
+    bkl_release();
     enter_user_regs(&regs);
 }
 
@@ -460,7 +471,7 @@ int process_exec(const char *path, const char *cmdline)
     thread_set_as(thread_current(), new_as); /* beim naechsten Threadwechsel gilt der neue Adressraum */
     as_switch(new_as);
     as_destroy(old_as);
-    enter_user(p->entry, p->user_rsp, (uint64_t)p->argc, p->argv);
+    to_user(p->entry, p->user_rsp, (uint64_t)p->argc, p->argv);
 }
 
 /* ---------- Warten, Beenden, Kill ---------- */

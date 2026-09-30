@@ -5,6 +5,7 @@
 #include "lib/kprintf.h"
 #include "mm/paging.h"
 #include "core/sched.h"
+#include "arch/x86_64/smp.h"
 
 #define MSR_APIC_BASE     0x1B
 #define APIC_BASE_ENABLE  (1ULL << 11)
@@ -80,8 +81,15 @@ static int pit_wait_10ms(void)
 
 static void timer_handler(InterruptFrame *f)
 {
-    (void)f;
-    ticks++;
+    Cpu *c = this_cpu();
+    if (f->cs & 3)
+        c->ticks_user++;
+    else if (c->current == c->idle)
+        c->ticks_idle++;
+    else
+        c->ticks_kernel++;
+    if (c->index == 0)
+        ticks++; /* jede CPU hat ihren Timer, die Uhrzeit zaehlt nur die Boot-CPU */
     sched_tick(); /* kann zu einem anderen Thread wechseln und kehrt erst spaeter zurueck */
 }
 

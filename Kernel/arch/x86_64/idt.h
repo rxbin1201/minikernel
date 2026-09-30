@@ -12,6 +12,7 @@ typedef struct {
 } __attribute__((packed)) InterruptFrame;
 
 void idt_init(void);
+void idt_load(void); /* die (gemeinsame) IDT auf dieser CPU laden */
 
 /* Handler fuer Vektoren >= 32. Das EOI an den Local APIC sendet der Dispatcher. */
 typedef void (*IdtHandler)(InterruptFrame *frame);

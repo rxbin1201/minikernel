@@ -3,8 +3,9 @@
 
 #include <stdint.h>
 
-/* Praeemptiver Round-Robin-Scheduler fuer Kernel-Threads auf einem CPU. Zeitscheibe = 1 APIC-Timer-Tick
- * (10 ms). Braucht Heap, laufenden APIC-Timer (apic_init) und aktivierte Interrupts. */
+/* Praeemptiver Round-Robin-Scheduler mit einer gemeinsamen Run-Queue fuer alle CPUs. Zeitscheibe = 1 APIC-Timer-Tick
+ * (10 ms). Braucht Heap, laufenden APIC-Timer (apic_init) und aktivierte Interrupts. Alle Funktionen setzen den Big
+ * Kernel Lock voraus (siehe smp.h); jede CPU hat ihren eigenen laufenden Thread und Idle-Thread. */
 
 typedef struct Thread Thread;
 typedef void (*ThreadEntry)(void *arg);
@@ -46,6 +47,11 @@ void mutex_unlock(Mutex *m);
 void sched_tick(void);
 
 uint64_t sched_switch_count(void);
+
+/* Fuer smp.c: Idle-Thread einer weiteren CPU anlegen, sein Stack-Ende, und auf der CPU den Scheduler starten */
+Thread  *sched_ap_idle(void);
+uint64_t sched_thread_stack(const Thread *t);
+void     sched_ap_run(void) __attribute__((noreturn));
 void     sched_dump(void); /* Threadliste mit Zustand und CPU-Ticks auf die Konsole */
 
 #endif

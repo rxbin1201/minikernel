@@ -4,16 +4,18 @@
 
 /* syscall_entry: von der CPU per LSTAR angesprungen.
  *   rax = Nummer, Argumente rdi, rsi, rdx, r10, r8, r9 (wie unter Linux); rcx = Ruecksprung-RIP, r11 = RFLAGS.
- * IF ist durch SFMASK aus. Es wird noch der User-Stack benutzt, deshalb sofort auf den Kernel-Stack des laufenden
- * Threads (syscall_kernel_rsp, vom Scheduler gepflegt) wechseln. Alle Register werden als SyscallFrame gesichert
- * (Layout siehe syscall.h; fork kopiert ihn fuer das Kind); zurueck kommen alle unveraendert ausser rax
- * (Rueckgabewert), rcx und r11 (wie ueblich zerstoert). */
+ * IF ist durch SFMASK aus. Es wird noch der User-Stack benutzt: swapgs holt die Per-CPU-Daten dieser CPU (smp.h),
+ * dann auf den Kernel-Stack des laufenden Threads (Cpu.kernel_rsp, vom Scheduler gepflegt) wechseln. Alle Register
+ * werden als SyscallFrame gesichert (Layout siehe syscall.h; fork kopiert ihn fuer das Kind); zurueck kommen alle
+ * unveraendert ausser rax (Rueckgabewert), rcx und r11 (wie ueblich zerstoert).
+ * Der Syscall kann den Thread wechseln und auf einer anderen CPU zurueckkehren: das zweite swapgs gilt dann dort. */
 .global syscall_entry
 syscall_entry:
-    movq %rsp, syscall_user_rsp(%rip)
-    movq syscall_kernel_rsp(%rip), %rsp
+    swapgs
+    movq %rsp, %gs:16      /* Cpu.user_rsp */
+    movq %gs:8, %rsp       /* Cpu.kernel_rsp */
 
-    pushq syscall_user_rsp(%rip)
+    pushq %gs:16
     pushq %r11
     pushq %rcx
     pushq %rax
@@ -50,6 +52,7 @@ syscall_entry:
     popq %rcx
     popq %r11
     popq %rsp              /* User-Stack */
+    swapgs
     sysretq
 
 /* void enter_user(uint64_t rip, uint64_t rsp, uint64_t arg1, uint64_t arg2)   [noreturn]
@@ -81,6 +84,7 @@ enter_user:
     xorl %r13d, %r13d
     xorl %r14d, %r14d
     xorl %r15d, %r15d
+    swapgs                 /* GS-Basis fuer den User-Mode */
     iretq
 
 /* void enter_user_regs(const SyscallFrame *r)   [noreturn]
@@ -117,12 +121,7 @@ enter_user_regs:
     xorl %ecx, %ecx
     xorl %r11d, %r11d
     movq 88(%rdi), %rdi    /* rdi zuletzt: es zeigte auf den Frame */
+    swapgs
     iretq
-
-.section .bss
-.balign 8
-.global syscall_user_rsp
-syscall_user_rsp:
-    .skip 8
 
 .section .note.GNU-stack,"",@progbits

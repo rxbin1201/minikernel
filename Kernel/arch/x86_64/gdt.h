@@ -11,7 +11,8 @@
 
 #define IST_DOUBLE_FAULT 1
 
-void gdt_init(void);
+struct Cpu;
+void gdt_init(struct Cpu *c); /* GDT und TSS dieser CPU laden, GS-Basis auf c setzen */
 void gdt_dump(void); /* Diagnose */
 
 /* Setzt TSS.rsp0 und den Stack fuer syscall_entry auf den Kernel-Stack des laufenden Threads. */
