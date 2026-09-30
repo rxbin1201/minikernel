@@ -60,7 +60,9 @@ int  usb_alive(const UsbDevice *d);
 
 /* ---- Klassentreiber (von der Enumeration aufgerufen) ---- */
 int usb_hid_probe(UsbDevice *d, const UsbIface *iface);
-void usb_hid_tick(void); /* Tastenwiederholung (vom USB-Thread alle 10 ms) */
+void    usb_hid_tick(void);           /* Tastenwiederholung (vom USB-Thread) */
+int64_t usb_hid_next_repeat_ms(void); /* ms bis zur naechsten faelligen Wiederholung, -1 = keine Taste gehalten */
+uint64_t usb_irq_count(void);         /* empfangene xHCI-Interrupts (MSI-X/MSI) */
 int usb_mouse_probe(UsbDevice *d, const UsbIface *iface);
 int usb_msc_probe(UsbDevice *d, const UsbIface *iface, const char *name_hint);
 

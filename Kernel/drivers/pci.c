@@ -1,6 +1,7 @@
 #include "drivers/pci.h"
 #include "arch/x86_64/io.h"
 #include "lib/kprintf.h"
+#include "mm/paging.h"
 
 #define CONFIG_ADDRESS 0xCF8
 #define CONFIG_DATA    0xCFC
@@ -154,6 +155,77 @@ uint64_t pci_bar_mem(const PciDevice *d, int bar)
     if (((lo >> 1) & 3) == 2 && bar < 5) /* 64-Bit-BAR: obere Haelfte im naechsten Register */
         base |= (uint64_t)d->bar[bar + 1] << 32;
     return base;
+}
+
+/* ---------- Capabilities, MSI-X und MSI ---------- */
+
+uint8_t pci_find_cap(const PciDevice *d, uint8_t id)
+{
+    if (!(pci_read32(d, 0x04) & (1u << 20))) /* Status: Capability-Liste vorhanden */
+        return 0;
+    uint8_t off = pci_read32(d, 0x34) & 0xFC;
+    for (int guard = 0; off && guard < 48; guard++) {
+        uint32_t c = pci_read32(d, off);
+        if ((c & 0xFF) == id)
+            return off;
+        off = (c >> 8) & 0xFC;
+    }
+    return 0;
+}
+
+/* Nachricht an den Local APIC: Adresse 0xFEE00000 mit der Ziel-APIC-ID, Daten = Vektor (Fixed, flankengesteuert) */
+static uint32_t msi_address(uint32_t apic_id) { return 0xFEE00000u | ((apic_id & 0xFF) << 12); }
+
+/* MSI-X: Eintrag 0 der Tabelle auf den Vektor, alle anderen maskiert */
+static int enable_msix(const PciDevice *d, uint8_t cap, uint8_t vector, uint32_t apic_id)
+{
+    uint32_t ctrl = pci_read32(d, cap);
+    unsigned entries = ((ctrl >> 16) & 0x7FF) + 1;
+    uint32_t tab = pci_read32(d, cap + 4);
+    uint64_t base = pci_bar_mem(d, tab & 7);
+    if (!base)
+        return -1;
+    uint64_t table = base + (tab & ~7u);
+    if (paging_map_mmio(table, entries * 16ULL) != 0)
+        return -1;
+    volatile uint32_t *e = (volatile uint32_t *)table;
+    pci_write32(d, cap, ctrl | (1u << 30));     /* Function Mask, solange die Tabelle beschrieben wird */
+    for (unsigned i = 0; i < entries; i++)
+        e[i * 4 + 3] = 1;                        /* Vector Control: maskiert */
+    e[0] = msi_address(apic_id);
+    e[1] = 0;
+    e[2] = vector;
+    e[3] = 0;                                    /* Eintrag 0 frei */
+    pci_write32(d, cap, (ctrl | (1u << 31)) & ~(1u << 30)); /* MSI-X an, Function Mask aus */
+    return 0;
+}
+
+static int enable_msi(const PciDevice *d, uint8_t cap, uint8_t vector, uint32_t apic_id)
+{
+    uint32_t ctrl = pci_read32(d, cap);
+    int is64 = (ctrl >> 23) & 1;
+    pci_write32(d, cap + 4, msi_address(apic_id));
+    if (is64) {
+        pci_write32(d, cap + 8, 0);
+        pci_write32(d, cap + 12, vector);
+    } else {
+        pci_write32(d, cap + 8, vector);
+    }
+    pci_write32(d, cap, (ctrl & ~(7u << 20)) | (1u << 16)); /* ein Vektor (Multiple Message Enable = 0), MSI an */
+    return 0;
+}
+
+int pci_enable_msi(const PciDevice *d, uint8_t vector, uint32_t apic_id)
+{
+    int kind = 0;
+    uint8_t cap = pci_find_cap(d, 0x11);
+    if (cap && enable_msix(d, cap, vector, apic_id) == 0)
+        kind = 2;
+    else if ((cap = pci_find_cap(d, 0x05)) && enable_msi(d, cap, vector, apic_id) == 0)
+        kind = 1;
+    if (kind) /* Kommando-Register: klassische Interrupt-Leitung (INTx) aus */
+        pci_write32(d, 0x04, (pci_read32(d, 0x04) & 0xFFFF) | (1u << 10));
+    return kind;
 }
 
 int pci_find(uint16_t vendor, uint16_t device, PciDevice *out)

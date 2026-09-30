@@ -43,6 +43,14 @@ void pci_enable(const PciDevice *d, int io, int mem, int bus_master);
 /* Vermerkt, welcher Treiber das Geraet benutzt (fuer lspci) */
 void pci_set_driver(const PciDevice *d, const char *name);
 
+/* Offset der Capability mit dieser ID im Konfigurationsraum, 0 = nicht vorhanden */
+uint8_t pci_find_cap(const PciDevice *d, uint8_t id);
+
+/* Nachrichten-Interrupts: das Geraet schickt seinen Interrupt direkt als Vektor an den Local APIC mit apic_id.
+ * Bevorzugt MSI-X (Eintrag 0), sonst MSI; die Interrupt-Leitung (INTx) wird abgeschaltet.
+ * 2 = MSI-X, 1 = MSI, 0 = keins von beiden (dann weiter pollen). */
+int pci_enable_msi(const PciDevice *d, uint8_t vector, uint32_t apic_id);
+
 /* index-tes Geraet fuer SYS_PCIINFO; 0 = ok, -1 = Ende */
 int pci_info(unsigned index, PciInfo *out);
 

@@ -19,6 +19,10 @@ void test_usb(void)
         n++;
     }
     kprintf("  %u USB-Geraet(e) erkannt\n", n); /* ohne angeschlossene Geraete/Controller ist 0 in Ordnung */
+    if (n) { /* jedes Kommando beim Erkennen der Geraete loest ein Ereignis und damit einen Interrupt aus */
+        kprintf("  (%lu xHCI-Interrupts per MSI-X/MSI)\n", (unsigned long)usb_irq_count());
+        check("xHCI meldet Ereignisse per Interrupt (MSI-X/MSI)", usb_irq_count() > 0);
+    }
     for (unsigned i = 0; i < n; i++) {
         usb_device_info(i, &info);
         check(info.name, info.driver != 0 || info.cls == 9); /* jedes Geraet hat einen Treiber (Hubs sind bekannt unbenutzt) */

@@ -106,6 +106,21 @@ void usb_hid_tick(void)
     }
 }
 
+int64_t usb_hid_next_repeat_ms(void)
+{
+    int64_t next = -1;
+    uint64_t now = time_ms();
+    for (int i = 0; i < state_count; i++) {
+        HidState *s = states[i];
+        if (!s->repeat_key)
+            continue;
+        int64_t in = s->next_ms > now ? (int64_t)(s->next_ms - now) : 0;
+        if (next < 0 || in < next)
+            next = in;
+    }
+    return next;
+}
+
 int usb_hid_probe(UsbDevice *d, const UsbIface *iface)
 {
     const UsbEpDesc *in = 0;

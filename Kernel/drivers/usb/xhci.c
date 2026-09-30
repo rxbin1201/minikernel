@@ -9,8 +9,10 @@
 #include "core/sched.h"
 #include "lib/string.h"
 
-/* xHCI-Hostcontroller (USB 3.x; behandelt an den Root-Ports auch Low/Full/High-Speed-Geraete). Reines Polling, keine
- * Interrupts: ein Hintergrund-Thread verarbeitet Ereignisse und erkennt Anstecken/Abziehen. */
+/* xHCI-Hostcontroller (USB 3.x; behandelt an den Root-Ports auch Low/Full/High-Speed-Geraete). Ein Hintergrund-Thread
+ * verarbeitet Ereignisse (Tastatur, Maus) und erkennt Anstecken/Abziehen. Er schlaeft, bis der Controller per MSI-X
+ * (oder MSI) einen Interrupt schickt; ohne beides fragt er alle 10 ms nach. Kommandos und Transfers warten dagegen
+ * selbst auf ihr Ende (process_events in einer Schleife). */
 
 #define RING_TRBS 256
 
@@ -126,6 +128,8 @@ typedef struct Xhci {
     Mutex    lock;
     uint64_t last_scan_ms;
     PciDevice pci;
+    int      msi;               /* 2 = MSI-X, 1 = MSI, 0 = nur Polling */
+    volatile uint64_t irqs;     /* empfangene Interrupts (Diagnose) */
 } Xhci;
 
 static Xhci       *controllers[MAX_XHCI];
@@ -133,6 +137,15 @@ static int         controller_count;
 static UsbDevice  *all_devices[MAX_DEVICES];
 static int         device_total;
 static int         thread_started;
+static Event       usb_ev = EVENT_INIT; /* weckt den USB-Thread (Interrupt eines Controllers) */
+
+/* Interrupter-Register (Interrupter 0, relativ zu rt) */
+#define RT_IMAN     0x20
+#define RT_IMOD     0x24
+#define IMAN_IP     (1u << 0)
+#define IMAN_IE     (1u << 1)
+#define CMD_INTE    (1u << 2)
+#define STS_EINT    (1u << 3)
 
 /* ---------- Register und Hilfen ---------- */
 
@@ -999,26 +1012,91 @@ static int init_controller(Xhci *x, const PciDevice *pci)
     return 0;
 }
 
+/* ---------- Interrupts ---------- */
+
+/* MSI-X/MSI-Interrupt eines Controllers: nur quittieren und den USB-Thread wecken; die Ereignisse holt der Thread
+ * (unter der Sperre des Controllers) ab. */
+static void xhci_irq(InterruptFrame *f)
+{
+    int i = (int)f->vector - VECTOR_XHCI;
+    Xhci *x = i >= 0 && i < controller_count ? controllers[i] : 0;
+    if (x) {
+        x->irqs++;
+        wr32(x->op, OP_USBSTS, STS_EINT);          /* write 1 to clear */
+        wr32(x->rt, RT_IMAN, IMAN_IE | IMAN_IP);   /* IP quittieren, IE bleibt an */
+    }
+    event_signal(&usb_ev);
+}
+
+static void enable_interrupts(Xhci *x, int index)
+{
+    uint8_t vector = (uint8_t)(VECTOR_XHCI + index);
+    idt_set_handler(vector, xhci_irq);
+    x->msi = pci_enable_msi(&x->pci, vector, apic_id());
+    if (!x->msi) {
+        kprintf("xhci: weder MSI-X noch MSI, frage alle 10 ms nach\n");
+        return;
+    }
+    wr32(x->rt, RT_IMOD, 4000);                    /* hoechstens ein Interrupt pro ms (4000 x 250 ns) */
+    wr32(x->rt, RT_IMAN, IMAN_IE | IMAN_IP);
+    wr32(x->op, OP_USBCMD, rd32(x->op, OP_USBCMD) | CMD_INTE);
+    kprintf("xhci: Interrupts per %s (Vektor %#x)\n", x->msi == 2 ? "MSI-X" : "MSI", vector);
+}
+
 /* ---------- Hintergrund-Thread ---------- */
 
+static int any_hub(void)
+{
+    for (int i = 0; i < MAX_DEVICES; i++)
+        if (all_devices[i] && all_devices[i]->alive && all_devices[i]->is_hub)
+            return 1;
+    return 0;
+}
+
+/* Wartet auf Interrupts statt im 10-ms-Takt nachzusehen. Ohne Interrupt wacht er nur auf, um gehaltene Tasten zu
+ * wiederholen (usb_hid_next_repeat_ms), und in groesseren Abstaenden fuer Hubs: deren Ports fragt der Treiber per
+ * Control-Transfer ab, ihr Status-Endpunkt meldet sich nicht von selbst. */
 static void usb_thread(void *arg)
 {
     (void)arg;
     for (;;) {
+        int polling = 0;
+        uint64_t scan_every = any_hub() ? 300 : 2000;
         for (int i = 0; i < controller_count; i++) {
             Xhci *x = controllers[i];
             mutex_lock(&x->lock);
             process_events(x);
+            int changed = 0;
+            for (int p = 1; p <= x->ports; p++)
+                if (x->port_changed[p]) {
+                    x->port_changed[p] = 0;
+                    changed = 1;
+                }
             uint64_t now = time_ms();
-            if (now - x->last_scan_ms >= 300) { /* Anstecken/Abziehen erkennen */
+            if (changed || now - x->last_scan_ms >= (x->msi ? scan_every : 300)) { /* Anstecken/Abziehen erkennen */
                 x->last_scan_ms = now;
                 scan_ports(x, 0);
             }
             mutex_unlock(&x->lock);
+            if (!x->msi)
+                polling = 1;
         }
         usb_hid_tick(); /* gehaltene Tasten wiederholen */
-        thread_sleep_ms(10);
+
+        uint64_t wait = polling ? 10 : scan_every;
+        int64_t repeat = usb_hid_next_repeat_ms();
+        if (repeat >= 0 && (uint64_t)repeat < wait)
+            wait = repeat ? (uint64_t)repeat : 1;
+        event_wait(&usb_ev, wait);
     }
+}
+
+uint64_t usb_irq_count(void)
+{
+    uint64_t n = 0;
+    for (int i = 0; i < controller_count; i++)
+        n += controllers[i]->irqs;
+    return n;
 }
 
 int usb_init(void)
@@ -1033,6 +1111,7 @@ int usb_init(void)
             continue;
         }
         controllers[controller_count++] = x;
+        enable_interrupts(x, controller_count - 1);
         mutex_lock(&x->lock);
         scan_ports(x, 1);
         mutex_unlock(&x->lock);
