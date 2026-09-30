@@ -109,8 +109,13 @@ static int gmbus_wait(uint32_t bits, int us)
     }
 }
 
+/* Controller zuruecksetzen (loescht auch ein NAK). Erst warten, bis der Bus frei ist: sonst bleibt er belegt und die
+ * naechsten Zugriffe scheitern (i915: "Wait for bus to IDLE before clearing NAK") */
 static void gmbus_reset(void)
 {
+    uint64_t end = time_us() + 10000;
+    while ((igd_rd(GMBUS2) & GMBUS_ACTIVE) && time_us() < end)
+        ;
     igd_wr(GMBUS1, GMBUS_SW_CLR_INT);
     igd_wr(GMBUS1, 0);
     igd_wr(GMBUS0, 0);
@@ -1755,10 +1760,14 @@ int igd_mode_set(uint32_t w, uint32_t h, uint32_t hz)
 /* Beim Start (aus display_init): Modi einsammeln, dann ggf. "igdmode=BxH[@Hz]" aus der Kommandozeile setzen */
 static void out_init(void);
 
+static void hotplug_start(void);
+
 void igd_modes_boot(void)
 {
     out_init();
     modes_init();
+    if (nmodes)
+        hotplug_start();
     const char *want = cmdline_get("igdmode");
     if (!want || !nmodes)
         return;
@@ -1811,8 +1820,11 @@ static int port_detect(int port, uint8_t *cap)
         return 2;
     uint8_t probe[8];
     int pin = ddc_pin(port);
-    if (pin && gmbus_read(pin, 0x50, 0, probe, 8) == 0 && probe[0] == 0 && probe[1] == 0xFF)
-        return 1;
+    for (int tries = 0; pin && tries < 3; tries++) { /* DDC antwortet nicht immer beim ersten Mal */
+        if (gmbus_read(pin, 0x50, 0, probe, 8) == 0 && probe[0] == 0 && probe[1] == 0xFF)
+            return 1;
+        delay_us(5000);
+    }
     return 0;
 }
 
@@ -2073,4 +2085,84 @@ int igd_output_test(int port)
     }
     console_repaint();
     return rc;
+}
+
+/* ---------- Hotplug: Ab- und Anstecken im Betrieb ---------- */
+
+/* Ein Thread prueft jede Sekunde, ob der Monitor am aktiven Anschluss noch da ist (DP: Verbindungsstatus ueber AUX,
+ * HDMI: EDID ueber DDC). Fehlt er dreimal hintereinander (DDC antwortet nicht immer), oder ist die DP-Verbindung
+ * gestoert (Kabel kurz gezogen), sucht er einen Monitor an den Ports B-D und schaltet das Bild dorthin (DP bevorzugt)
+ * bzw. misst die Verbindung neu ein. */
+
+static int active_state(int p, int *port_out)
+{
+    uint32_t ddi = igd_rd(TRANS_DDI_FUNC_CTL(p));
+    if (!(ddi >> 31) || !(igd_rd(PIPECONF(p)) & (1u << 30)))
+        return -1; /* nichts aktiv */
+    int port = (int)((ddi >> 28) & 7);
+    *port_out = port;
+    if (((ddi >> 24) & 7) == 2) {
+        uint8_t st[3];
+        if (igd_dpcd_read(port, 0x202, st, 3) != 3)
+            return 0; /* keine Antwort: abgezogen */
+        uint32_t lanes = ((ddi >> 1) & 7) + 1;
+        int ok = (st[2] & 1) != 0;
+        for (uint32_t lane = 0; lane < lanes; lane++)
+            ok &= ((st[lane / 2] >> (4 * (lane % 2))) & 7) == 7;
+        return ok ? 1 : 2; /* 2: Monitor da, Verbindung gestoert */
+    }
+    uint8_t cap[16];
+    return port_detect(port, cap) == 1 ? 1 : 0;
+}
+
+static void hotplug_thread(void *arg)
+{
+    (void)arg;
+    int p = igd_state.scanout_pipe, misses = 0;
+    for (;;) {
+        thread_sleep_ms(1000);
+        int port = -1, st = active_state(p, &port);
+        if (st == 1) {
+            misses = 0;
+            continue;
+        }
+        if (st == 2) { /* DP-Monitor wieder da (oder Stoerung): neu einmessen */
+            kprintf("igd: DisplayPort an Port %s: Verbindung gestoert, messe neu ein\n", port_letter(port));
+            if (out_on(port) == 0) {
+                misses = 0;
+                continue;
+            }
+        } else if (st == 0 && ++misses < 3) {
+            continue;
+        }
+        if (st == 0 && misses == 3)
+            kprintf("igd: Monitor an Port %s getrennt\n", port_letter(port));
+        /* anderen Monitor suchen: erst DisplayPort, dann HDMI */
+        int best = -1, best_kind = 0;
+        for (int q = 1; q <= 3; q++) {
+            uint8_t cap[16];
+            int k = port_detect(q, cap);
+            if (k > best_kind) {
+                best = q;
+                best_kind = k;
+            }
+        }
+        if (best < 0) {
+            misses = 3; /* weiter suchen, aber nicht jedes Mal melden */
+            continue;
+        }
+        kprintf("igd: Monitor an Port %s (%s) gefunden, lege das Bild dorthin\n", port_letter(best),
+                best_kind == 2 ? "DisplayPort" : "HDMI");
+        if (out_on(best) == 0)
+            misses = 0;
+    }
+}
+
+static void hotplug_start(void)
+{
+    if (cmdline_has("nohotplug")) {
+        kprintf("igd: 'nohotplug': Anschluesse werden nicht ueberwacht\n");
+        return;
+    }
+    thread_create("igd-hotplug", hotplug_thread, 0);
 }
