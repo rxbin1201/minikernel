@@ -124,6 +124,8 @@ CMDLINE ?=
 NET ?= e1000
 STICK ?=
 QEMU_EXTRA ?=
+QEMU_GDB ?=
+HEADLESS ?=
 OVMF ?= /usr/share/ovmf/OVMF.fd
 # KVM: automatisch, wenn /dev/kvm fuer den Benutzer beschreibbar ist (sonst reine Emulation); KVM=0 schaltet es ab
 KVM ?= $(shell test -w /dev/kvm && echo 1)
@@ -155,6 +157,8 @@ QEMU_DISK_usb    = -device qemu-xhci,id=xhci -device usb-storage,bus=xhci.0,driv
 
 QEMU_ACCEL := $(if $(filter 1,$(KVM)),-enable-kvm -cpu host)
 QEMU_NET   := $(if $(filter none,$(NET)),,-netdev user,id=net0 -device $(NET),netdev=net0,romfile=)
+# HEADLESS=1: ohne Fenster (Ausgabe nur in $(LOG)), z.B. fuer Tests im Hintergrund oder in CI
+QEMU_DISPLAY := $(if $(filter 1,$(HEADLESS)),-display none)
 ,          := ,
 QEMU_XHCI  := $(if $(filter usb,$(DISK)),,-device qemu-xhci$(,)id=xhci)
 QEMU_STICK := $(if $(STICK),$(QEMU_XHCI) -drive file=Build/stick-$(STICK).img$(,)format=raw$(,)if=none$(,)id=stick \
@@ -162,10 +166,20 @@ QEMU_STICK := $(if $(STICK),$(QEMU_XHCI) -drive file=Build/stick-$(STICK).img$(,
 
 .PHONY: run efi
 run efi: Build/esp.img Image/disk.img $(if $(STICK),Build/stick-$(STICK).img)
-	qemu-system-x86_64 -bios $(OVMF) $(QEMU_ACCEL) -m 512 -rtc base=localtime -serial file:$(LOG) \
+	qemu-system-x86_64 -bios $(OVMF) $(QEMU_ACCEL) -m 512 -rtc base=localtime -serial file:$(LOG) $(QEMU_DISPLAY) \
 	    -drive file=Build/esp.img,format=raw,index=0,media=disk \
 	    -drive file=Image/disk.img,format=raw,if=none,id=hd0 $(QEMU_DISK_$(DISK)) \
-	    $(QEMU_NET) $(QEMU_STICK) $(QEMU_EXTRA)
+	    $(QEMU_NET) $(QEMU_STICK) $(QEMU_GDB) $(QEMU_EXTRA)
+
+# Debuggen mit gdb: 'make debug' startet QEMU angehalten mit gdb-Server auf Port 1234 (ohne KVM, damit normale
+# Breakpoints gehen), 'make gdb' in einem zweiten Terminal verbindet sich (tools/gdbinit: Symbole, Breakpoint kmain).
+.PHONY: debug gdb
+debug:
+	@echo "QEMU wartet auf gdb (Port 1234): in einem zweiten Terminal 'make gdb'"
+	@$(MAKE) --no-print-directory run KVM=0 QEMU_GDB="-s -S"
+
+gdb: Build/kernel.debug.elf
+	gdb -q -x tools/gdbinit
 
 # Selbsttests starten und das Ergebnis zusammenfassen (Exit-Code 1 bei Fehlern)
 .PHONY: test
@@ -236,6 +250,7 @@ help:
 	@echo "  make              Bootloader, Kernel und initrd bauen (Image/)"
 	@echo "  make run          bauen und in QEMU starten (Log der seriellen Schnittstelle: $(LOG))"
 	@echo "  make test         Selbsttests in QEMU, danach Zusammenfassung (TESTS=disk,net: nur diese Gruppen)"
+	@echo "  make debug        QEMU angehalten mit gdb-Server starten; 'make gdb' im zweiten Terminal verbindet sich"
 	@echo "  make fatcheck     Datenplatte Image/disk.img pruefen"
 	@echo "  make usb          Image fuer einen USB-Stick (Image/usb/minikernel-usb.img, mit Rufus/Etcher schreiben)"
 	@echo "  make usbfiles     Dateien zum Kopieren auf einen FAT32-Stick (Image/usbfiles/)"
@@ -252,6 +267,7 @@ help:
 	@echo "  TESTS=1 | TESTS=disk,user   Selbsttests beim Start; KEEP=1 bleibt danach im System"
 	@echo "  CMDLINE=\"mode=1600x900\"     weitere Kernel-Kommandozeile (mode=, scale=, kbd=, init=, ...)"
 	@echo "  KVM=0                       Hardware-Virtualisierung abschalten (Standard: an, wenn /dev/kvm nutzbar)"
+	@echo "  HEADLESS=1                  ohne Fenster (Ausgabe nur in $(LOG))"
 	@echo "  QEMU_EXTRA=\"...\"            weitere QEMU-Argumente"
 
 .PHONY: FORCE

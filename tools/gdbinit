@@ -1,0 +1,11 @@
+# gdb-Einstellungen fuer 'make gdb' (QEMU laeuft mit 'make debug' angehalten und wartet auf Port 1234).
+# Der Kernel liegt identity-mapped bei 0x100000, die Symbole aus Build/kernel.debug.elf passen also direkt.
+# Die UEFI-Firmware und der Bootloader laufen vorher ohne Symbole; 'continue' laeuft bis kmain.
+
+set confirm off
+set pagination off
+set disassembly-flavor intel
+file Build/kernel.debug.elf
+target remote localhost:1234
+break kmain
+echo \n'continue' startet das System bis kmain. Weitere Breakpoints z.B.: break process_spawn, break fat_scan\n
