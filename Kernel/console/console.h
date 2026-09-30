@@ -31,6 +31,7 @@ uint32_t console_scale(void);
 void     console_start_thread(void);
 void     console_scroll_request(int lines);
 void     console_live_request(void);  /* zurueck zum Ende (bei einem Tastendruck), aus Interrupts aufrufbar */
+void     console_kick(void);          /* Konsolen-Thread wecken (z.B. Mauszeiger neu zeichnen), aus Interrupts aufrufbar */
 void     console_view_scroll(int64_t delta); /* sofort blaettern (nicht aus Interrupts) */
 void     console_view_live(void);
 uint32_t console_history_lines(void);

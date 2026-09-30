@@ -45,6 +45,7 @@ static void handle(uint8_t b, int moved, int wheel)
         wheel_acc += wheel;
         events++;
         dirty = 1;
+        console_kick(); /* Zeiger neu zeichnen (Konsolen-Thread) */
         return;
     }
     if ((buttons & 1) && !(old & 1)) {        /* linke Taste gedrueckt */
@@ -72,6 +73,7 @@ static void handle(uint8_t b, int moved, int wheel)
         console_scroll_request(3 * wheel); /* Mausrad blaettert im Verlauf */
     events++;
     dirty = 1;
+    console_kick();
 }
 
 void mouse_report(uint8_t b, int dx, int dy, int wheel)

@@ -596,18 +596,29 @@ void console_view_scroll(int64_t delta)
 }
 
 static volatile int live_req;
+static Event        console_ev = EVENT_INIT; /* weckt den Konsolen-Thread: es gibt etwas zu tun */
 
 void console_live_request(void)
 {
-    if (view_off)
+    if (view_off) {
         live_req = 1;
+        event_signal(&console_ev);
+    }
 }
 
 void console_scroll_request(int lines)
 {
     __atomic_fetch_add(&view_req, lines, __ATOMIC_RELAXED);
+    event_signal(&console_ev);
 }
 
+void console_kick(void)
+{
+    event_signal(&console_ev);
+}
+
+/* Arbeitet Blaetter-Anforderungen ab und ruft den Tick-Hook (Mauszeiger). Wartet auf console_ev statt im 10-ms-Takt
+ * nachzusehen; alle 500 ms laeuft der Hook trotzdem (erkennt z.B. eine neu angesteckte Maus). */
 static void console_thread(void *arg)
 {
     (void)arg;
@@ -625,7 +636,7 @@ static void console_thread(void *arg)
         }
         if (tick_hook)
             tick_hook();
-        thread_sleep_ms(10);
+        event_wait(&console_ev, 500);
     }
 }
 

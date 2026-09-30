@@ -238,8 +238,7 @@ static void ip_in(Iface *f, const uint8_t *h, uint32_t len, const uint8_t *src_m
 static void frame_in(Iface *f, const uint8_t *p, uint32_t len)
 {
     f->rx_packets++;
-    f->rx_bytes += len;
-    if (memcmp(p, f->dev.mac, 6) != 0 && memcmp(p, BCAST_MAC, 6) != 0)
+    f->rx_bytes += len;    if (memcmp(p, f->dev.mac, 6) != 0 && memcmp(p, BCAST_MAC, 6) != 0)
         return;
     uint16_t type = be16(p + 12);
     if (type == 0x0806)
@@ -297,10 +296,13 @@ static void periodic_locked(uint64_t now)
     }
 }
 
+/* Die Karten melden Pakete nicht per Interrupt, der Thread fragt sie ab: alle 10 ms, solange in der letzten Sekunde
+ * Pakete kamen, sonst alle 100 ms (so oft laeuft ohnehin das Zeitgesteuerte). Wer auf eine Antwort wartet (ping,
+ * DNS, UDP-Empfang), fragt waehrenddessen selbst ab (net_wait_step), dem schadet der langsamere Takt nicht. */
 static void net_thread(void *arg)
 {
     (void)arg;
-    uint64_t last = 0;
+    uint64_t last = 0, last_rx = 0;
     for (;;) {
         mutex_lock(&net_lock);
         int n = net_poll_locked();
@@ -310,10 +312,12 @@ static void net_thread(void *arg)
             last = now;
         }
         mutex_unlock(&net_lock);
-        if (n)
+        if (n) {
+            last_rx = now;
             thread_yield();
-        else
-            thread_sleep_ms(10);
+        } else {
+            thread_sleep_ms(now - last_rx < 1000 ? 10 : 100);
+        }
     }
 }
 

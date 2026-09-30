@@ -19,6 +19,7 @@ struct Thread {
     ThreadState state;
     uint64_t    wake_tick;  /* fuer T_SLEEPING */
     uint64_t    cpu_ticks;  /* Timer-Ticks, waehrend der Thread lief */
+    uint64_t    wakeups;    /* wie oft er aus dem Schlaf/Warten geweckt wurde */
     uint64_t    kstack_top; /* oberes Ende des Kernel-Stacks (0 beim Boot-Thread) */
     AddressSpace *as;       /* eigener Adressraum (User-Prozess) oder NULL = Kernel-Adressraum */
     void       *data;       /* frei nutzbar, z.B. Zeiger auf den Prozess */
@@ -49,6 +50,7 @@ static Thread *all_list;
 static Thread *dead_list;
 static uint32_t next_id = 1;
 static uint64_t switches;
+static uint64_t wakeups_total; /* alle Aufweckvorgaenge (Diagnose: wer pollt zu oft?) */
 static int      sched_on;
 
 /* ---------- Run-Queue (nur unter sched_lock) ---------- */
@@ -340,6 +342,46 @@ void mutex_unlock(Mutex *m)
     spin_unlock(&sched_lock, f);
 }
 
+/* ---------- Events ---------- */
+
+/* Wartet auf event_signal, hoechstens timeout_ms (0 = ohne Grenze). 1 = Signal, 0 = Zeit abgelaufen. Ein Signal,
+ * das vor dem Warten kam, geht nicht verloren. Pro Event wartet hoechstens ein Thread. */
+int event_wait(Event *e, uint64_t timeout_ms)
+{
+    uint64_t f = spin_lock(&sched_lock);
+    if (!e->pending) {
+        Thread *cur = cur_thread();
+        uint64_t ticks = (timeout_ms * APIC_TIMER_HZ + 999) / 1000;
+        cur->wake_tick = timeout_ms ? apic_ticks() + (ticks ? ticks : 1) : ~0ULL;
+        cur->state = T_SLEEPING;
+        e->waiter = cur;
+        schedule_locked();
+        spin_lock(&sched_lock);
+        if (e->waiter == cur)
+            e->waiter = 0;
+    }
+    int got = e->pending;
+    e->pending = 0;
+    spin_unlock(&sched_lock, f);
+    return got;
+}
+
+/* Weckt den wartenden Thread (oder merkt sich das Signal). Auch aus Interrupt-Handlern und ohne BKL aufrufbar. */
+void event_signal(Event *e)
+{
+    uint64_t f = spin_lock(&sched_lock);
+    e->pending = 1;
+    Thread *t = e->waiter;
+    if (t && t->state == T_SLEEPING) {
+        t->state = T_READY;
+        t->wakeups++;
+        wakeups_total++;
+        enqueue(t);
+    }
+    e->waiter = 0;
+    spin_unlock(&sched_lock, f);
+}
+
 /* ---------- Timer ---------- */
 
 /* Tick-Buchhaltung und Aufwecken faelliger Threads; 1 = es wartet ein Thread, ein Wechsel steht an. Braucht keinen
@@ -355,6 +397,8 @@ int sched_tick_prepare(void)
     for (Thread *t = all_list; t; t = t->all_next) {
         if (t->state == T_SLEEPING && t->wake_tick <= now) {
             t->state = T_READY;
+            t->wakeups++;
+            wakeups_total++;
             enqueue(t);
         }
     }
@@ -389,13 +433,14 @@ Thread     *thread_current(void)                { return cur_thread(); }
 uint32_t    thread_id(const Thread *t)          { return t->id; }
 const char *thread_name(const Thread *t)        { return t->name; }
 uint64_t    sched_switch_count(void)            { return switches; }
+uint64_t    sched_wakeup_count(void)            { return wakeups_total; }
 
 void sched_dump(void)
 {
     static const char *names[] = {"bereit", "laeuft", "schlaeft", "blockiert", "beendet"};
     uint64_t f = spin_lock(&sched_lock);
-    kprintf("  %3s %-10s %-10s %s\n", "ID", "Name", "Zustand", "CPU-Ticks");
+    kprintf("  %3s %-10s %-10s %9s %s\n", "ID", "Name", "Zustand", "CPU-Ticks", "Geweckt");
     for (Thread *t = all_list; t; t = t->all_next)
-        kprintf("  %3u %-10s %-10s %lu\n", t->id, t->name, names[t->state], t->cpu_ticks);
+        kprintf("  %3u %-10s %-10s %9lu %lu\n", t->id, t->name, names[t->state], t->cpu_ticks, t->wakeups);
     spin_unlock(&sched_lock, f);
 }

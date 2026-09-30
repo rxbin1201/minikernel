@@ -13,6 +13,7 @@
 #include "arch/x86_64/cpu.h"
 #include "mm/paging.h"
 #include "drivers/rtc.h"
+#include "net/net.h"
 #include "tests/selftest.h"
 
 void test_paging(void)
@@ -224,6 +225,25 @@ void test_sched(void)
         thread_create("quick", quick, 0);
     thread_sleep_ms(100); /* Idle-Thread raeumt auf */
     check("Threads beendet und aufgeraeumt", heap_used_bytes() == heap_before && heap_check());
+
+    /* 5. Leerlauf: Kernel-Threads sollen auf Ereignisse warten statt im 10-ms-Takt nachzusehen. Erst abwarten, bis
+     * DHCP fertig ist und der Netz-Thread nach dem letzten Paket wieder in den langsamen Takt faellt. */
+    NetInfo ni;
+    for (int w = 0; w < 50; w++) {
+        int busy = 0;
+        for (unsigned i = 0; net_info(i, &ni) == 0; i++)
+            if (ni.dhcp == 1 && ni.link)
+                busy = 1;
+        if (!busy)
+            break;
+        thread_sleep_ms(100);
+    }
+    thread_sleep_ms(1100);
+    uint64_t w0 = sched_wakeup_count();
+    thread_sleep_ms(1000);
+    uint64_t idle_wakeups = sched_wakeup_count() - w0 - 1; /* ohne das eigene Aufwachen */
+    kprintf("  Leerlauf: %lu Aufweckvorgaenge in 1 s\n", (unsigned long)idle_wakeups);
+    check("Leerlauf: Kernel-Threads pollen nicht staendig (hoechstens 30 Aufweckvorgaenge/s)", idle_wakeups <= 30);
 
     kprintf("  Kontextwechsel bisher: %lu\n", sched_switch_count());
     sched_dump();

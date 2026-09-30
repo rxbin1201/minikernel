@@ -43,6 +43,17 @@ typedef struct {
 void mutex_lock(Mutex *m);
 void mutex_unlock(Mutex *m);
 
+/* Event: ein Thread wartet (event_wait, mit Timeout), bis ein anderer oder ein Interrupt-Handler event_signal ruft.
+ * Statt in einer Schleife kurz zu schlafen und nachzusehen, ob es etwas zu tun gibt. */
+typedef struct {
+    volatile int pending;
+    Thread      *waiter;
+} Event;
+#define EVENT_INIT {0, 0}
+
+int  event_wait(Event *e, uint64_t timeout_ms); /* 1 = Signal, 0 = Zeit abgelaufen; timeout 0 = ohne Grenze */
+void event_signal(Event *e);
+
 /* Wird vom Timer-Interrupt aufgerufen: weckt Schlafende und wechselt ggf. den Thread. */
 void sched_tick(void); /* mit BKL */
 
@@ -52,6 +63,7 @@ int  sched_tick_prepare(void);
 void sched_preempt(void);
 
 uint64_t sched_switch_count(void);
+uint64_t sched_wakeup_count(void); /* Aufweckvorgaenge insgesamt (Schlaf-Ende und Events) */
 
 /* Fuer smp.c: Idle-Thread einer weiteren CPU anlegen, sein Stack-Ende, und auf der CPU den Scheduler starten */
 Thread  *sched_ap_idle(void);
