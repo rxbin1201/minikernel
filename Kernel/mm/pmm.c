@@ -14,6 +14,7 @@ static uint64_t  frame_count;   /* Frames, die die Bitmap abdeckt */
 static uint64_t  managed;       /* tatsaechlich nutzbare Frames */
 static uint64_t  free_count;
 static uint64_t  search_hint;   /* Wort-Index, ab dem die naechste Suche beginnt */
+static uint64_t  low_page;      /* freie Seite unter 1 MiB (Startcode weiterer CPUs), 0 = keine */
 
 static inline int  frame_used(uint64_t f) { return (bitmap[f / 64] >> (f % 64)) & 1; }
 static inline void frame_set(uint64_t f)  { bitmap[f / 64] |=  (1ULL << (f % 64)); }
@@ -47,6 +48,14 @@ void pmm_init(const BootInfo *info)
 {
     const BootMemoryDescriptor *d;
     uint64_t s, e, max_end = 0;
+
+    /* 0. Eine freie Seite unter 1 MiB merken (nicht Seite 0): dort startet smp.c die weiteren CPUs im Real Mode */
+    FOR_EACH_DESCRIPTOR(info, d) {
+        uint64_t ls = d->physical_start < 0x1000 ? 0x1000 : d->physical_start;
+        uint64_t le = d->physical_start + d->page_count * PMM_FRAME_SIZE;
+        if (d->type == EFI_CONVENTIONAL_MEMORY && !low_page && ls < le && ls + PMM_FRAME_SIZE <= 0x9F000)
+            low_page = ls;
+    }
 
     /* 1. Groesse der Bitmap bestimmen */
     FOR_EACH_DESCRIPTOR(info, d) {
@@ -192,5 +201,6 @@ void pmm_free_frames(uint64_t addr, uint64_t count)
     irq_restore(f);
 }
 
+uint64_t pmm_low_page(void)          { return low_page; }
 uint64_t pmm_total_frames(void)      { return managed; }
 uint64_t pmm_free_frame_count(void)  { return free_count; }

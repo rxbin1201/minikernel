@@ -133,6 +133,7 @@ void kmain(BootInfo *info)
         halt_forever();
     }
     sched_init();
+    smp_init(); /* weitere CPUs: laufen ab jetzt Threads aus der gemeinsamen Run-Queue */
     console_start_thread(); /* blaettert im Verlauf (Shift+Bild hoch/runter), zeichnet den Mauszeiger */
     mouse_init();
     rtc_init();

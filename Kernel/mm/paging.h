@@ -62,6 +62,9 @@ int paging_translate(uint64_t virt, uint64_t *phys, uint64_t *flags);
 /* Frames, die gerade als Page Table dienen (Kernel-Tabellen bleiben, die von Adressraeumen gibt as_destroy frei) */
 uint64_t paging_table_frames(void);
 
+/* Auf einer weiteren CPU: PAT wie auf der Boot-CPU einstellen */
+void paging_ap_init(void);
+
 /* Zaehler, der bei jedem Ausblenden/Umstellen einer Kernel-Seite steigt: andere CPUs leeren dann ihren TLB */
 uint64_t paging_kernel_gen(void);
 

@@ -158,6 +158,49 @@ int apic_init(uint64_t lapic_base)
     return 0;
 }
 
+/* Local APIC einer weiteren CPU einschalten, Timer wie auf der Boot-CPU (deren Kalibrierung gilt fuer alle) */
+void apic_ap_init(void)
+{
+    if (x2apic)
+        wrmsr(MSR_APIC_BASE, rdmsr(MSR_APIC_BASE) | APIC_BASE_ENABLE | APIC_BASE_X2APIC);
+    else
+        wrmsr(MSR_APIC_BASE, rdmsr(MSR_APIC_BASE) | APIC_BASE_ENABLE);
+    lapic_write(LAPIC_TPR, 0);
+    lapic_write(LAPIC_LVT_LINT0, LVT_MASKED);
+    lapic_write(LAPIC_LVT_LINT1, LVT_MASKED);
+    lapic_write(LAPIC_LVT_ERROR, LVT_MASKED | 0xFE);
+    lapic_write(LAPIC_SVR, SVR_ENABLE | VECTOR_SPURIOUS);
+    lapic_write(LAPIC_TIMER_DIV, TIMER_DIVIDE_16);
+    lapic_write(LAPIC_LVT_TIMER, LVT_PERIODIC | VECTOR_TIMER);
+    lapic_write(LAPIC_TIMER_INIT, (uint32_t)(ticks_per_ms * (1000 / APIC_TIMER_HZ)));
+}
+
+#define LAPIC_ICR_LOW  0x300
+#define LAPIC_ICR_HIGH 0x310
+#define ICR_PENDING    (1u << 12)
+
+/* Interprozessor-Interrupt an die CPU mit dieser APIC-ID */
+static void send_ipi(uint32_t apic_id, uint32_t low)
+{
+    if (x2apic) {
+        wrmsr(0x830, ((uint64_t)apic_id << 32) | low); /* x2APIC: ICR ist ein 64-Bit-MSR */
+        return;
+    }
+    lapic_write(LAPIC_ICR_HIGH, apic_id << 24);
+    lapic_write(LAPIC_ICR_LOW, low);
+    WAIT_UNTIL(!(lapic_read(LAPIC_ICR_LOW) & ICR_PENDING), 10);
+}
+
+void apic_send_init(uint32_t apic_id)
+{
+    send_ipi(apic_id, 0x00004500); /* INIT, Level assert */
+}
+
+void apic_send_startup(uint32_t apic_id, uint64_t page)
+{
+    send_ipi(apic_id, 0x00004600 | (uint32_t)(page >> 12)); /* STARTUP: die CPU beginnt bei page (unter 1 MiB) */
+}
+
 void apic_eoi(void)
 {
     if (lapic || x2apic)

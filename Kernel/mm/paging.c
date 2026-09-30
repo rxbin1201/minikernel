@@ -67,6 +67,13 @@ static void setup_pat(void)
     pat_wc = 1;
 }
 
+/* Weitere CPUs: gleiche PAT wie die Boot-CPU (EFER.NXE, CR0.WP und CR3 setzt schon der Startcode) */
+void paging_ap_init(void)
+{
+    if (pat_wc)
+        wrmsr(MSR_PAT, (rdmsr(MSR_PAT) & ~(0xFFULL << 32)) | (0x01ULL << 32));
+}
+
 static void enable_nx(void)
 {
     uint32_t eax = 0x80000000, ebx, ecx, edx;
@@ -239,14 +246,18 @@ static uint64_t sanitize(uint64_t flags)
 
 /* ---------- Adressraeume ---------- */
 
-static uint64_t *loaded_root = pml4; /* aktuell in CR3 */
-
 AddressSpace *as_kernel(void)  { return (AddressSpace *)pml4; }
-AddressSpace *as_current(void) { return (AddressSpace *)loaded_root; }
+
+/* Direkt aus CR3: jede CPU hat ihren eigenen geladenen Adressraum */
+AddressSpace *as_current(void)
+{
+    uint64_t cr3;
+    __asm__ __volatile__("mov %%cr3, %0" : "=r"(cr3));
+    return (AddressSpace *)(cr3 & ADDR_MASK_4K);
+}
 
 void as_switch(AddressSpace *as)
 {
-    loaded_root = (uint64_t *)as;
     __asm__ __volatile__("mov %0, %%cr3" : : "r"((uint64_t)as) : "memory");
 }
 

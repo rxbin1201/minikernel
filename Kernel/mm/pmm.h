@@ -21,4 +21,7 @@ void pmm_free_frames(uint64_t addr, uint64_t count);
 uint64_t pmm_total_frames(void); /* vom PMM verwaltete Frames (ohne reservierte) */
 uint64_t pmm_free_frame_count(void);
 
+/* Eine freie RAM-Seite unter 1 MiB (vom PMM nie vergeben), z.B. fuer den Real-Mode-Start weiterer CPUs; 0 = keine */
+uint64_t pmm_low_page(void);
+
 #endif

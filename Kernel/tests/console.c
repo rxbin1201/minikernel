@@ -5,6 +5,7 @@
 #include "lib/kprintf.h"
 #include "lib/string.h"
 #include "arch/x86_64/apic.h"
+#include "arch/x86_64/cpu.h"
 #include "core/sched.h"
 #include "lib/utf8.h"
 #include "drivers/video.h"
@@ -84,6 +85,9 @@ void test_console(void)
     title("Konsole");
     uint32_t col, row;
 
+    /* Jeder Abschnitt (loeschen, schreiben, auslesen) laeuft mit ausgeschalteten Interrupts: sonst kann eine Meldung
+     * eines anderen Threads (z.B. "net: eth0: Verbindung hergestellt") dazwischen die gepruefte Zelle ueberschreiben */
+    uint64_t f = irq_save();
     console_clear(); /* oben anfangen: sonst kann die Ausgabe unten scrollen und das Glyph verschieben (haengt von der Zahl der Boot-Zeilen ab) */
     title("Konsole");
     console_get_cursor(&col, &row);
@@ -96,9 +100,11 @@ void test_console(void)
         serial_puts("\n");
     }
     int glyph_ok = cell_has_ink(col, row);
+    irq_restore(f);
 
     /* Scrolling: bis zum unteren Rand und darueber hinaus schreiben. Ergebnisse erst nach dem
      * Auslesen ausgeben, weil die Ausgabe selbst wieder scrollt. */
+    f = irq_save();
     console_clear();
     for (uint32_t i = 0; i < console_rows() + 3; i++)
         console_putc('\n');
@@ -107,8 +113,10 @@ void test_console(void)
     console_get_cursor(&scol, &srow);
     int last_ok  = srow > 0 && cell_has_ink(0, srow);
     int above_ok = srow > 0 && !cell_has_ink(0, srow - 1);
+    irq_restore(f);
 
     /* ANSI-Farben: X hellrot, Y auf blauem Grund, Z wieder in der Standardfarbe; die Escape-Folgen belegen keine Zellen */
+    f = irq_save();
     console_clear();
     for (const char *c = "\x1b[1;31mX\x1b[0m\x1b[44mY\x1b[0mZ"; *c; c++)
         console_putc(*c);
@@ -118,6 +126,7 @@ void test_console(void)
     int red_ok = cell_has_color(0, 0, 0xF14C4C);
     int blue_ok = cell_has_color(1, 0, 0x2472C8);
     int default_ok = cell_has_color(2, 0, 0xC0C0C0) && !cell_has_color(2, 0, 0xF14C4C);
+    irq_restore(f);
 
     console_clear();
     title("Konsole");

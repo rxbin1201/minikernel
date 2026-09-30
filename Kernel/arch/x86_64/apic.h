@@ -20,6 +20,11 @@ int apic_init(uint64_t lapic_base);
 void     apic_eoi(void);
 uint32_t apic_id(void);
 
+/* Fuer weitere CPUs (smp.c): Local APIC samt Timer auf der aufrufenden CPU einschalten; INIT und STARTUP senden */
+void apic_ap_init(void);
+void apic_send_init(uint32_t apic_id);
+void apic_send_startup(uint32_t apic_id, uint64_t page);
+
 uint64_t apic_ticks(void);                 /* Ticks seit apic_init (je 1/APIC_TIMER_HZ s) */
 uint64_t apic_timer_ticks_per_ms(void);    /* Ergebnis der Kalibrierung */
 void     apic_sleep_ms(uint64_t ms);       /* braucht aktivierte Interrupts */
