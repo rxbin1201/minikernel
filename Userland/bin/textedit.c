@@ -1022,101 +1022,105 @@ void _start(int argc, char **argv)
     for (;;) {
         Event e;
         int got = gfx_wait(&e, 50), changed = 0;
-        if (got) {
-            changed = 1;
-            if (e.type == EV_CLOSE) {
-                if (!modified) {
-                    gfx_close();
-                    sys_exit(0);
-                }
-                prompt = P_CLOSE; /* erst fragen */
-                prompt_hover = -1;
-            } else if (e.type == EV_FOCUS) {
-                focus = e.key;
-            } else if (e.type == EV_KEY) {
-                if (prompt) {
-                    prompt_key(e.key);
-                } else {
-                    key(e.key);
-                    keep_cursor_visible();
-                    blink_t0 = sys_time_us();
-                }
-            } else if (e.type == EV_DOWN && e.button == 1) {
-                if (prompt) {
-                    int b = prompt_btn_at(e.x, e.y);
-                    if (b >= 0)
-                        prompt_click(b);
-                } else if (e.y < bar_h()) {
-                    int b = toolbar_btn_at(e.x, e.y);
-                    if (b == 0 && gfx_desktop_open("") != 0) { /* Neu: neues Fenster (ohne Desktop: leeren) */
-                        if (!modified) {
-                            clear_doc();
-                            path[0] = 0;
-                        }
-                    } else if (b == 1) {
-                        open_prompt(P_OPEN);
-                    } else if (b == 2) {
-                        save();
-                    } else if (b == 3) {
-                        open_prompt(P_SAVEAS);
+        if (got) { /* alle wartenden Ereignisse (z.B. eine gehaltene Taste) abarbeiten, dann einmal zeichnen */
+            int nev = 0;
+            do {
+                int this_changed = 1;
+                if (e.type == EV_CLOSE) {
+                    if (!modified) {
+                        gfx_close();
+                        sys_exit(0);
                     }
-                } else if (e.y < gfx_screen.h - status_h()) {
-                    int y, x;
-                    hit(e.x, e.y, &y, &x);
-                    if (e.key & KEY_MOD_SHIFT) { /* Shift+Klick: Markierung bis hierher */
-                        move_to(y, x, 1);
-                        want_col = -1;
-                        dragging = 1;
+                    prompt = P_CLOSE; /* erst fragen */
+                    prompt_hover = -1;
+                } else if (e.type == EV_FOCUS) {
+                    focus = e.key;
+                } else if (e.type == EV_KEY) {
+                    if (prompt) {
+                        prompt_key(e.key);
+                    } else {
+                        key(e.key);
+                        keep_cursor_visible();
                         blink_t0 = sys_time_us();
-                        draw();
-                        continue;
                     }
-                    s64 now = sys_ticks();
-                    clicks = now - last_click < 40 && y == cy ? clicks + 1 : 1;
-                    last_click = now;
-                    move_to(y, x, 0);
-                    if (clicks == 2) {
-                        select_word();
-                    } else if (clicks >= 3) { /* ganze Zeile */
-                        sel = 1;
-                        ay = cy;
-                        ax = 0;
-                        cx = L[cy].len;
+                } else if (e.type == EV_DOWN && e.button == 1) {
+                    if (prompt) {
+                        int b = prompt_btn_at(e.x, e.y);
+                        if (b >= 0)
+                            prompt_click(b);
+                    } else if (e.y < bar_h()) {
+                        int b = toolbar_btn_at(e.x, e.y);
+                        if (b == 0 && gfx_desktop_open("") != 0) { /* Neu: neues Fenster (ohne Desktop: leeren) */
+                            if (!modified) {
+                                clear_doc();
+                                path[0] = 0;
+                            }
+                        } else if (b == 1) {
+                            open_prompt(P_OPEN);
+                        } else if (b == 2) {
+                            save();
+                        } else if (b == 3) {
+                            open_prompt(P_SAVEAS);
+                        }
+                    } else if (e.y < gfx_screen.h - status_h()) {
+                        int y, x;
+                        hit(e.x, e.y, &y, &x);
+                        if (e.key & KEY_MOD_SHIFT) { /* Shift+Klick: Markierung bis hierher */
+                            move_to(y, x, 1);
+                            want_col = -1;
+                            dragging = 1;
+                            blink_t0 = sys_time_us();
+                            draw();
+                            continue;
+                        }
+                        s64 now = sys_ticks();
+                        clicks = now - last_click < 40 && y == cy ? clicks + 1 : 1;
+                        last_click = now;
+                        move_to(y, x, 0);
+                        if (clicks == 2) {
+                            select_word();
+                        } else if (clicks >= 3) { /* ganze Zeile */
+                            sel = 1;
+                            ay = cy;
+                            ax = 0;
+                            cx = L[cy].len;
+                        }
+                        want_col = -1;
+                        dragging = clicks == 1;
+                        blink_t0 = sys_time_us();
                     }
-                    want_col = -1;
-                    dragging = clicks == 1;
-                    blink_t0 = sys_time_us();
+                } else if (e.type == EV_MOVE) {
+                    if (dragging) {
+                        int y, x;
+                        hit(e.x, e.y, &y, &x);
+                        if (!sel) {
+                            sel = 1;
+                            ay = cy;
+                            ax = cx;
+                        }
+                        cy = y;
+                        cx = x;
+                        if (e.y < text_y() && top > 0) /* ueber den Rand: mitscrollen */
+                            top--;
+                        else if (e.y > gfx_screen.h - status_h() && top + rows() < nl)
+                            top++;
+                        keep_cursor_visible();
+                    } else {
+                        int hb = prompt ? -1 : e.y < bar_h() ? toolbar_btn_at(e.x, e.y) : -1;
+                        int ph = prompt ? prompt_btn_at(e.x, e.y) : -1;
+                        this_changed = hb != hover_btn || ph != prompt_hover;
+                        hover_btn = hb;
+                        prompt_hover = ph;
+                    }
+                } else if (e.type == EV_UP) {
+                    dragging = 0;
+                } else if (e.type == EV_WHEEL && !prompt) {
+                    top -= e.wheel * 3;
+                    if (top > nl - rows()) top = nl - rows();
+                    if (top < 0) top = 0;
                 }
-            } else if (e.type == EV_MOVE) {
-                if (dragging) {
-                    int y, x;
-                    hit(e.x, e.y, &y, &x);
-                    if (!sel) {
-                        sel = 1;
-                        ay = cy;
-                        ax = cx;
-                    }
-                    cy = y;
-                    cx = x;
-                    if (e.y < text_y() && top > 0) /* ueber den Rand: mitscrollen */
-                        top--;
-                    else if (e.y > gfx_screen.h - status_h() && top + rows() < nl)
-                        top++;
-                    keep_cursor_visible();
-                } else {
-                    int hb = prompt ? -1 : e.y < bar_h() ? toolbar_btn_at(e.x, e.y) : -1;
-                    int ph = prompt ? prompt_btn_at(e.x, e.y) : -1;
-                    changed = hb != hover_btn || ph != prompt_hover;
-                    hover_btn = hb;
-                    prompt_hover = ph;
-                }
-            } else if (e.type == EV_UP) {
-                dragging = 0;
-            } else if (e.type == EV_WHEEL && !prompt) {
-                top -= e.wheel * 3;
-                if (top > nl - rows()) top = nl - rows();
-                if (top < 0) top = 0;
-            }
+                changed |= this_changed;
+            } while (++nev < 64 && gfx_poll(&e));
         }
         if (modified != last_mod) {
             last_mod = modified;

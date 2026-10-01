@@ -368,13 +368,22 @@ uint32_t fat_free_clusters(int v)
     if (fat_activate(v) == 0) {
         if (vol.exfat && vol.xbm_first) {
             free = exfat_count_free();
-        } else {
+        } else if (vol.free_known) { /* Zaehler, den Belegen/Freigeben mitfuehren: nicht jedesmal die ganze FAT lesen */
+            free = vol.free_count;
+        } else { /* einmal durchzaehlen, danach fuehren ihn Belegen/Freigeben mit */
+            int ok = 1;
             for (uint32_t c = 2; c < vol.clusters + 2; c++) {
                 uint32_t val;
-                if (fat_get(c, &val) != 0)
+                if (fat_get(c, &val) != 0) {
+                    ok = 0;
                     break;
+                }
                 if (val == 0)
                     free++;
+            }
+            if (ok) {
+                vol.free_count = free;
+                vol.free_known = 1;
             }
         }
     }

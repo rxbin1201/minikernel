@@ -28,6 +28,7 @@ static char back_hist[MAXHIST][256], fwd_hist[MAXHIST][256];
 static int  nback, nfwd;
 static char status[200];
 static s64  status_t;
+static s64  free_bytes = -1; /* freier Platz des Datentraegers (-1 = unbekannt), beim Laden bestimmt */
 
 static struct {
     char label[40], path[64];
@@ -349,6 +350,8 @@ static void load(int keep)
         e[j + 1] = x;
     }
     ents = e;
+    u64 fsz[2];
+    free_bytes = sys_statfs(dir, fsz) == 0 ? (s64)fsz[1] : -1;
     cur = anchor = -1;
     for (int i = 0; i < nent; i++) {
         for (int k = 0; k < ns; k++)
@@ -989,11 +992,10 @@ static void draw(void)
     if (status[0] && sys_time_us() - status_t < 6000000) {
         snprintf(t, sizeof(t), "%s", status);
     } else {
-        u64 fs[2];
         char free_s[32] = "";
-        if (sys_statfs(dir, fs) == 0) {
+        if (free_bytes >= 0) { /* beim Laden des Ordners bestimmt, nicht bei jedem Bild */
             char b[24];
-            fmt_size(fs[1], b, sizeof(b));
+            fmt_size((u64)free_bytes, b, sizeof(b));
             snprintf(free_s, sizeof(free_s), "  \xC2\xB7  %s frei", b);
         }
         int n = nsel();
@@ -1284,102 +1286,110 @@ void _start(int argc, char **argv)
             }
             continue;
         }
-        if (e.type == EV_CLOSE)
-            break;
-        if (e.type == EV_FOCUS) {
-            focus = e.key;
-            if (focus && sys_time_us() - last_refresh > 1000000) { /* zurueck im Fenster: vielleicht hat sich etwas geaendert */
-                last_refresh = sys_time_us();
-                load(1);
-                load_places();
+        /* alle wartenden Ereignisse (z.B. eine gehaltene Taste) abarbeiten und dann einmal zeichnen */
+        int quit = 0, nev = 0;
+        do {
+            if (e.type == EV_CLOSE) {
+                quit = 1;
+                break;
             }
-        } else if (e.type == EV_RESIZE) {
-            keep_visible();
-        } else if (dialog) {
-            if (e.type == EV_KEY) {
-                dialog_key(e.key);
+            if (e.type == EV_FOCUS) {
+                focus = e.key;
+                if (focus && sys_time_us() - last_refresh > 1000000) { /* zurueck im Fenster: vielleicht hat sich etwas geaendert */
+                    last_refresh = sys_time_us();
+                    load(1);
+                    load_places();
+                }
+            } else if (e.type == EV_RESIZE) {
+                keep_visible();
+            } else if (dialog) {
+                if (e.type == EV_KEY) {
+                    dialog_key(e.key);
+                } else if (e.type == EV_DOWN && e.button == 1) {
+                    int b = dialog_btn_at(e.x, e.y);
+                    if (b == 0)
+                        dialog = D_NONE;
+                    else if (b == 1)
+                        dialog_ok();
+                } else if (e.type == EV_MOVE) {
+                    int b = dialog_btn_at(e.x, e.y);
+                    if (b == dialog_hover)
+                        continue;
+                    dialog_hover = b;
+                }
+            } else if (nmenu) { /* Kontextmenue offen */
+                if (e.type == EV_MOVE) {
+                    int h = menu_at(e.x, e.y);
+                    if (h == menu_hover)
+                        continue;
+                    menu_hover = h;
+                } else if (e.type == EV_DOWN) {
+                    int h = menu_at(e.x, e.y);
+                    int act = h >= 0 && menu[h].enabled ? menu[h].action : 0;
+                    nmenu = 0;
+                    if (act)
+                        action(act);
+                } else if (e.type == EV_KEY && e.key == 0x1B) {
+                    nmenu = 0;
+                }
+            } else if (e.type == EV_KEY) {
+                key(e.key);
             } else if (e.type == EV_DOWN && e.button == 1) {
-                int b = dialog_btn_at(e.x, e.y);
-                if (b == 0)
-                    dialog = D_NONE;
-                else if (b == 1)
-                    dialog_ok();
+                click(&e, &last_click, &last_i);
+            } else if (e.type == EV_DOWN && e.button == 2) { /* Rechtsklick: Kontextmenue */
+                int i = row_at(e.x, e.y);
+                if (i == -2)
+                    continue;
+                if (i >= 0 && !ents[i].sel)
+                    select_only(i);
+                open_menu(e.x, e.y, i >= 0);
             } else if (e.type == EV_MOVE) {
-                int b = dialog_btn_at(e.x, e.y);
-                if (b == dialog_hover)
-                    continue;
-                dialog_hover = b;
+                if (drag_pending && !drag_active) {
+                    int dx = e.x - press_x, dy = e.y - press_y;
+                    if (dx * dx + dy * dy > U(6) * U(6))
+                        drag_active = 1;
+                }
+                if (drag_active) {
+                    drag_x = e.x;
+                    drag_y = e.y;
+                    int r = row_at(e.x, e.y);
+                    drop_row = r >= 0 && ents[r].is_dir && !ents[r].sel ? r : -1;
+                    drop_place = place_at(e.x, e.y);
+                    if (drop_place >= 0 && strcmp(places[drop_place].path, dir) == 0)
+                        drop_place = -1;
+                    if (e.y < list_y() + ROW_H && scroll > 0) /* am Rand: mitscrollen */
+                        scroll--;
+                    else if (e.y > list_y() + list_h() - ROW_H && scroll + visible() < nent)
+                        scroll++;
+                } else {
+                    int h = e.y < tb_h() ? tb_at(e.x, e.y) : -1;
+                    if (h == hover_btn)
+                        continue;
+                    hover_btn = h;
+                }
+            } else if (e.type == EV_UP) {
+                if (drag_active) {
+                    char target[512] = "";
+                    if (drop_row >= 0)
+                        join(target, sizeof(target), dir, ents[drop_row].name);
+                    else if (drop_place >= 0)
+                        snprintf(target, sizeof(target), "%s", places[drop_place].path);
+                    drag_active = 0;
+                    drop_row = drop_place = -1;
+                    if (target[0])
+                        drop_on(target, (e.key & KEY_MOD_CTRL) != 0);
+                } else if (drag_pending && !(e.key & (KEY_MOD_CTRL | KEY_MOD_SHIFT)) && cur >= 0) {
+                    select_only(cur); /* Klick auf eine Auswahl ohne Ziehen: nur diesen */
+                }
+                drag_pending = 0;
+            } else if (e.type == EV_WHEEL) {
+                scroll -= e.wheel * 3;
+                if (scroll > nent - visible()) scroll = nent - visible();
+                if (scroll < 0) scroll = 0;
             }
-        } else if (nmenu) { /* Kontextmenue offen */
-            if (e.type == EV_MOVE) {
-                int h = menu_at(e.x, e.y);
-                if (h == menu_hover)
-                    continue;
-                menu_hover = h;
-            } else if (e.type == EV_DOWN) {
-                int h = menu_at(e.x, e.y);
-                int act = h >= 0 && menu[h].enabled ? menu[h].action : 0;
-                nmenu = 0;
-                if (act)
-                    action(act);
-            } else if (e.type == EV_KEY && e.key == 0x1B) {
-                nmenu = 0;
-            }
-        } else if (e.type == EV_KEY) {
-            key(e.key);
-        } else if (e.type == EV_DOWN && e.button == 1) {
-            click(&e, &last_click, &last_i);
-        } else if (e.type == EV_DOWN && e.button == 2) { /* Rechtsklick: Kontextmenue */
-            int i = row_at(e.x, e.y);
-            if (i == -2)
-                continue;
-            if (i >= 0 && !ents[i].sel)
-                select_only(i);
-            open_menu(e.x, e.y, i >= 0);
-        } else if (e.type == EV_MOVE) {
-            if (drag_pending && !drag_active) {
-                int dx = e.x - press_x, dy = e.y - press_y;
-                if (dx * dx + dy * dy > U(6) * U(6))
-                    drag_active = 1;
-            }
-            if (drag_active) {
-                drag_x = e.x;
-                drag_y = e.y;
-                int r = row_at(e.x, e.y);
-                drop_row = r >= 0 && ents[r].is_dir && !ents[r].sel ? r : -1;
-                drop_place = place_at(e.x, e.y);
-                if (drop_place >= 0 && strcmp(places[drop_place].path, dir) == 0)
-                    drop_place = -1;
-                if (e.y < list_y() + ROW_H && scroll > 0) /* am Rand: mitscrollen */
-                    scroll--;
-                else if (e.y > list_y() + list_h() - ROW_H && scroll + visible() < nent)
-                    scroll++;
-            } else {
-                int h = e.y < tb_h() ? tb_at(e.x, e.y) : -1;
-                if (h == hover_btn)
-                    continue;
-                hover_btn = h;
-            }
-        } else if (e.type == EV_UP) {
-            if (drag_active) {
-                char target[512] = "";
-                if (drop_row >= 0)
-                    join(target, sizeof(target), dir, ents[drop_row].name);
-                else if (drop_place >= 0)
-                    snprintf(target, sizeof(target), "%s", places[drop_place].path);
-                drag_active = 0;
-                drop_row = drop_place = -1;
-                if (target[0])
-                    drop_on(target, (e.key & KEY_MOD_CTRL) != 0);
-            } else if (drag_pending && !(e.key & (KEY_MOD_CTRL | KEY_MOD_SHIFT)) && cur >= 0) {
-                select_only(cur); /* Klick auf eine Auswahl ohne Ziehen: nur diesen */
-            }
-            drag_pending = 0;
-        } else if (e.type == EV_WHEEL) {
-            scroll -= e.wheel * 3;
-            if (scroll > nent - visible()) scroll = nent - visible();
-            if (scroll < 0) scroll = 0;
-        }
+        } while (++nev < 64 && gfx_poll(&e));
+        if (quit)
+            break;
         draw();
     }
     gfx_close();
