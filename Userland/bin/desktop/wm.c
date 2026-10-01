@@ -139,7 +139,7 @@ void anim_tick(void)
         if (type == ANIM_CLOSE)
             close_win_now(w);
         else if (type == ANIM_MIN)
-            damage_dock(); /* jetzt erscheint das Fenster im Dock */
+            damage_dock(); /* jetzt erscheint das Fenster in der Taskleiste */
         else
             damage_win(w);
     }
@@ -204,7 +204,7 @@ void raise_win(Win *w)
     for (; i < nord - 1; i++)
         order[i] = order[i + 1];
     order[nord - 1] = w;
-    if (w->minimized) { /* aus dem Dock zurueck: vom Symbol auf die alte Groesse */
+    if (w->minimized) { /* aus der Taskleiste zurueck: vom Symbol auf die alte Groesse */
         int from[4], to[4], sz;
         dock_slot_of(w, &from[0], &from[1], &sz);
         set4(from, from[0], from[1], sz, sz * w->h / (w->w ? w->w : 1));
@@ -223,7 +223,7 @@ void raise_win(Win *w)
 void minimize(Win *w)
 {
     damage_win(w);
-    w->minimized = 1; /* das Dock macht schon Platz: dorthin schrumpft das Fenster */
+    w->minimized = 1; /* die Taskleiste macht schon Platz: dorthin schrumpft das Fenster */
     int from[4], to[4], sz;
     set4(from, w->x, w->y, w->w, w->h);
     dock_slot_of(w, &to[0], &to[1], &sz);
@@ -236,7 +236,7 @@ void minimize(Win *w)
         win_dirty(f, 0, 0, f->w, TITLE_H);
 }
 
-/* Andocken: ganzer Bildschirm oder eine Haelfte (zwischen Menueleiste und Dock, mit kleinem Rand) */
+/* Andocken: ganzer Bildschirm oder eine Haelfte (ueber der Taskleiste, mit kleinem Rand) */
 void snap_rect(int where, int *r)
 {
     int gap = U(6), top = MENUBAR_H + gap, h = dock_top() - top - U(2), half = (W - 3 * gap) / 2;
@@ -496,7 +496,7 @@ static void render_window(Win *w)
 }
 
 /* Rechteck des Bildschirms zusammensetzen: Hintergrund, je Fenster Schatten und Bild (runde Ecken, feiner Rand),
- * dann Menueleiste, Dock und offenes Menue; anzeigen */
+ * dann Taskleiste und offenes Menue; anzeigen */
 static void compose(const Clip *r)
 {
     int x0 = r->x0, y0 = r->y0, x1 = r->x1, y1 = r->y1;
@@ -530,9 +530,7 @@ static void compose(const Clip *r)
         gfx_round_rect(&gfx_screen, sr[0], sr[1], sr[2], sr[3], RADIUS, 0xFFFFFF, 70);
         gfx_round_frame(&gfx_screen, sr[0], sr[1], sr[2], sr[3], RADIUS, 0xFFFFFF, 170);
     }
-    if (y0 < MENUBAR_H)
-        draw_menubar();
-    if (y1 > dock_top() - DOCK_H - U(100)) /* vergroesserte Symbole und Namen ragen hoch */
+    if (y1 > dock_top() - U(50)) /* Taskleiste und die Namen darueber */
         draw_dock();
     draw_menu();
     draw_dialog();

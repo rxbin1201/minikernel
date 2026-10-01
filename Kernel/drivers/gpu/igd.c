@@ -629,7 +629,7 @@ static void draw_cursor_image(uint64_t frames[4])
         sc = 1;
     if (sc > 3)
         sc = 3;
-    int64_t f = 2 + (int64_t)sc * 2;    /* 1x, 1,5x, 2x in Vierteln: 16tel * f = 1/64 Pixel */
+    int64_t f = sc == 1 ? 4 : 1 + (int64_t)sc * 2; /* 1x, 1,25x, 1,75x in Vierteln: 16tel * f = 1/64 Pixel */
     int64_t unit = 64;                  /* 1 Pixel (bei Groesse 1) in 1/64, skaliert unten */
     int64_t border = unit * 3 / 2 * f / 4, sh_dy = unit * 3 / 2 * f / 4, sh_r = unit * 3 * f / 4;
     cursor_hot = (uint32_t)(2 * f / 4);

@@ -97,17 +97,27 @@ auf echter Hardware (bisher i5-8400T, UHD 630, 3440x1440 ueber HDMI).
 
 ## Desktop
 
-`desktop` startet die grafische Oberflaeche im Stil von macOS (hell): oben die Menueleiste (Logo-Menue mit den
-Programmen und "Zur Konsole", Menue des aktiven Programms, Netzwerk, Lautstaerke, Datum und Uhrzeit), unten das Dock (Punkt =
-laeuft, rechts die minimierten Fenster). Fenster haben runde Ecken, weiche Schatten und die drei Knoepfe
-(schliessen, minimieren, zoomen; Doppelklick auf die Titelleiste zoomt). Menueleiste und Dock sind Milchglas ueber
-einem berechneten Farbverlauf. Ab 1300 Pixel Hoehe wird alles um 25 % groesser.
+`desktop` startet die grafische Oberflaeche (hell). Unten sitzt die Taskleiste aus vier freistehenden Segmenten aus
+Milchglas ueber einem berechneten Farbverlauf:
+
+- **Programme:** ein Klick startet bzw. holt das Fenster nach vorn; ein Strich darunter = laeuft, lang und blau = aktives
+  Fenster. Rechts hinter einem Trennstrich die minimierten Fenster
+- **Suche, Start, Fenster:** Start zeigt alle Programme mit Suchfeld (einfach tippen, Treffer am Anfang zuerst, Enter
+  startet, Pfeile waehlen); die Lupe oeffnet dasselbe. Das Fenstermenue listet alle Fenster und die Befehle fuer das
+  aktive (minimieren, zoomen, anordnen, schliessen)
+- **Uhrzeit und Datum:** ein Klick oeffnet die Uhr
+- **System:** Netzwerk, Lautstaerke (Klick: stumm/zurueck, Mausrad: lauter/leiser) und ^ (Ueber MiniKernel, Neu
+  starten, Ausschalten, Zur Konsole)
+
+Menues oeffnen sich nach oben ueber ihrem Knopf, Esc schliesst sie. Fenster haben runde Ecken, weiche Schatten und die
+drei Knoepfe (schliessen, minimieren, zoomen; Doppelklick auf die Titelleiste zoomt). Ab 1300 Pixel Hoehe wird alles um
+25 % groesser.
 
 Tastenkuerzel (linke Alt-Taste): Alt+Tab naechstes Fenster (mit Shift zurueck), Alt+W Fenster schliessen, Alt+Q
 Programm beenden, Alt+M minimieren, Alt+N neues Fenster, Alt+F zoomen, Alt+Pfeil links/rechts an die Bildschirmhaelfte
 andocken, Alt+Pfeil hoch/runter maximieren bzw. zurueck. Fenster, die man an den linken/rechten Rand zieht, docken an
 die Haelfte an, am oberen Rand fuellen sie den Bildschirm (mit Vorschau); weggezogen bekommen sie ihre alte Groesse.
-Im Logo-Menue: Neu starten und Ausschalten mit Rueckfrage - alle Programme werden gebeten, sich zu beenden; bleibt eins
+Im Systemmenue: Neu starten und Ausschalten mit Rueckfrage - alle Programme werden gebeten, sich zu beenden; bleibt eins
 offen (z.B. Malen mit ungespeichertem Bild), fragt der Desktop, ob trotzdem.
 Das Netzwerk-Symbol zeigt den Zustand (kraeftig: verbunden, blass: ohne Adresse, durchgestrichen: kein Kabel); ein
 Klick oeffnet Karte, Adresse, Gateway, DNS, Geschwindigkeit und die Datenmengen mit aktueller Rate (jede Sekunde neu)
@@ -116,10 +126,9 @@ Alt-Kombinationen kommen als zwei Bytes (`KEY_ALT`/`KEY_ALT_SHIFT`, dann die Tas
 (`KEY_MOD_ALT` in `Event.key`); die Konsole verwirft sie.
 
 Animationen (nach der Uhr, nicht nach Bildern): Fenster blenden beim Oeffnen und Schliessen weich ein und aus, fliegen
-beim Minimieren an ihren Platz im Dock und von dort zurueck, Zoomen gleitet auf die neue Groesse. Das Dock
-vergroessert die Symbole unter der Maus (bis 60 %, Nachbarn abgestuft).
+beim Minimieren an ihren Platz in der Taskleiste und von dort zurueck, Zoomen gleitet auf die neue Groesse.
 
-Jedes Fenster gehoert einem eigenen Prozess; der Desktop zeichnet nur Rahmen, Menueleiste und Dock. Programme:
+Jedes Fenster gehoert einem eigenen Prozess; der Desktop zeichnet nur Rahmen und Taskleiste. Programme:
 `term` (Terminal mit Shell), `files` (Dateien; Doppelklick oeffnet Ordner hier, Bilder in `view`, alles andere im
 Texteditor), `textedit`, `textview` (nur ansehen), `view`, `calc`, `clock`, `about`, `paint`, `snake`, `tetris`. Ohne
 Desktop gestartet, laufen sie im Vollbild.

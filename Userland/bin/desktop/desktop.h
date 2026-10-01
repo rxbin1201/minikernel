@@ -8,21 +8,21 @@
 #include "ui.h"
 #include "winproto.h"
 
-/* desktop: grafische Oberflaeche im Stil von macOS (hell).
- *   Oben die Menueleiste (Logo-Menue, Menue des aktiven Programms, Lautstaerke, Uhr), unten das Dock mit den
- *   Programmen (Punkt = laeuft) und rechts davon die minimierten Fenster.
+/* desktop: grafische Oberflaeche (hell).
+ *   Unten die Taskleiste aus vier freistehenden Segmenten: Programme (Strich = laeuft, lang und blau = aktiv) und
+ *   minimierte Fenster | Suche, Startmenue, Fenstermenue | Uhrzeit und Datum | Netzwerk, Lautstaerke, Systemmenue.
  *   Fenster: runde Ecken, Schatten, links die drei Knoepfe (schliessen, minimieren, zoomen). Verschieben an der
  *   Titelleiste, Groesse aendern an der Ecke unten rechts (wenn das Programm es erlaubt).
  *   Jedes Fenster gehoert einem eigenen Prozess (client.c, Protokoll in winproto.h): Terminal (term), Dateien (files),
  *   Texteditor (textedit), Musik (music), Bildansicht (view), Rechner (calc), Uhr (clock), Info (about), Malen (paint), Snake und
- *   Tetris. Der Desktop zeichnet nur Rahmen, Menueleiste und Dock. Grafikprogramme, die man im Terminal startet,
+ *   Tetris. Der Desktop zeichnet nur Rahmen und Taskleiste. Grafikprogramme, die man im Terminal startet,
  *   melden sich ueber den Dienst "desktop" und bekommen ebenfalls ein Fenster. "Zur Konsole" beendet den Desktop.
  * Alle Masse sind fuer 1920x1080 angegeben und werden mit U() (ui.h) an groessere Bildschirme angepasst. */
 
 #define MAXW 16
 
 /* Masse des Desktops (chrome.c: desk_init); Schriften und Farben in ui.h */
-extern int MENUBAR_H, TITLE_H, DOCK_H, RADIUS, SHADOW;
+extern int MENUBAR_H, TITLE_H, DOCK_H, RADIUS, SHADOW; /* MENUBAR_H: oberer Rand der Fensterflaeche (0) */
 
 enum { ANIM_NONE, ANIM_OPEN, ANIM_CLOSE, ANIM_MIN, ANIM_RESTORE, ANIM_ZOOM };
 enum { SNAP_NONE, SNAP_MAX, SNAP_LEFT, SNAP_RIGHT }; /* ganzer Bildschirm, linke/rechte Haelfte */
@@ -43,7 +43,7 @@ typedef struct {
     /* Das Programm dahinter (client.c) */
     int  pid;
     int  app;                     /* Aktion (A_*) bzw. Symbol (ICON_*), mit der es gestartet wurde */
-    char name[32];                /* Programmname fuer die Menueleiste */
+    char name[32];                /* Programmname (Fenstermenue, Alt+Q) */
     int  flags;                   /* WPF_* */
     int  app_in, app_out;         /* Pipes */
     int  app_w, app_h;            /* Groesse des geteilten Inhalts */
@@ -55,10 +55,11 @@ typedef struct {
     char open_path[WP_PATH_MAX];  /* WP_OPEN: Pfad wird aus Stuecken zusammengesetzt */
 } Win;
 
-/* Aktionen (Menues und Dock). Die ersten sind zugleich die Programmsymbole (ICON_* in ui.h). */
+/* Aktionen (Menues und Taskleiste). Die ersten sind zugleich die Programmsymbole (ICON_* in ui.h). */
 enum { A_NONE, A_TERM, A_FILES, A_CALC, A_CLOCK, A_ABOUT, A_PAINT, A_SNAKE, A_TETRIS, A_EDIT, A_MUSIC, A_QUIT = 20, A_SEP,
        A_WIN_NEW, A_WIN_MIN, A_WIN_ZOOM, A_WIN_CLOSE, A_APP_QUIT, A_SNAP_LEFT, A_SNAP_RIGHT, A_NEXT_WIN,
-       A_RESTART, A_POWEROFF, A_INFO, A_NET_DHCP }; /* A_INFO: Zeile nur zum Lesen (Name links, Wert rechts) */
+       A_RESTART, A_POWEROFF, A_INFO, A_NET_DHCP, A_SEARCH, A_WINSEL = 64 };
+/* A_INFO: Zeile nur zum Lesen (Name links, Wert rechts); A_SEARCH: Suchfeld im Startmenue; A_WINSEL + i: Fenster wins[i] */
 
 typedef struct {
     const char *label;
@@ -71,7 +72,7 @@ typedef struct {
 extern Win      wins[MAXW];
 extern Win     *order[MAXW]; /* Stapel: order[nord-1] liegt oben und hat den Fokus */
 extern int      nord;
-extern Surface  bg, bg_blur; /* Hintergrundbild und weichgezeichnete Kopie (Milchglas von Menueleiste und Dock) */
+extern Surface  bg, bg_blur; /* Hintergrundbild und weichgezeichnete Kopie (Milchglas von Taskleiste und Menues) */
 extern Surface *tgt;         /* Ziel der draw_*-Funktionen */
 extern int      W, H;
 extern int      drag_mode;   /* 0 = nichts, 1 = verschieben, 2 = Groesse */
@@ -80,33 +81,34 @@ extern int      mouse_x, mouse_y;
 extern s64      now_us;      /* Zeit dieses Bildes (Mikrosekunden) */
 void do_action(int a);
 
-/* ---------- chrome.c: Masse, Hintergrund, Menueleiste, Dock, Menues ---------- */
+/* ---------- chrome.c: Masse, Hintergrund, Taskleiste, Menues ---------- */
 
-extern int menu_open;  /* 0 = zu, 1 = Logo-Menue, 2 = Programm-Menue, 3 = Netzwerk */
+extern int menu_open;  /* 0 = zu, 1 = Start, 2 = Fenster, 3 = Netzwerk, 4 = System */
 extern int menu_hover; /* Eintrag unter der Maus, -1 = keiner */
 extern int dock_hover; /* Symbol unter der Maus, -1 = keins */
 
 void desk_init(void);
 void make_background(void);
-void draw_menubar(void);
 void draw_dock(void);
 void draw_menu(void);
-void damage_menubar(void);
+void damage_menubar(void);      /* = damage_dock (Uhrzeit, Fokus, Netzwerk stehen in der Taskleiste) */
 void damage_dock(void);
 void damage_menu(void);
-int  menubar_hit(int x, int y);  /* 1 = Logo, 2 = Programmname, 3 = Netzwerk-Symbol, 0 = sonst */
+int  menubar_hit(int x, int y);  /* Knopf mit Menue: 1 Start, 2 Fenster, 3 Netzwerk, 4 System, 5 Suche; 0 = keiner */
+int  menu_current(void);         /* offenes Menue wie menubar_hit (5 = Start ueber die Suche) */
+void open_menu(int m);
+int  menu_key(int k);            /* Taste fuer das offene Menue (Pfeile, Enter, Suche); 1 = verbraucht */
+int  dock_wheel(int x, int y, int delta); /* Mausrad ueber der Lautstaerke; 1 = verbraucht */
 int  menu_hit(int x, int y);     /* Eintrag im offenen Menue, -1 = keiner */
 int  menu_inside(int x, int y);  /* liegt der Punkt im offenen Menue? */
 void net_tick(void);             /* einmal je Sekunde den Netzwerkzustand holen (Symbol, Menue) */
 void net_dhcp(void);             /* Adresse neu anfragen */
 int  menu_action(int i);
-int  dock_hit(int x, int y);     /* Symbol, -1 = keins */
+int  dock_hit(int x, int y);     /* Slot oder Knopf der Taskleiste, -1 = nichts */
 void dock_click(int i);
 void dock_hover_at(int x, int y);
-int  dock_top(void);             /* Oberkante des Docks (Fenster enden darueber) */
-void dock_slot_of(const Win *w, int *x, int *y, int *size); /* wo das minimierte Fenster im Dock liegt */
-void dock_tick(s64 dt_us);       /* Vergroesserung unter der Maus weich nachfuehren */
-const char *app_name(const Win *w);
+int  dock_top(void);             /* Oberkante der Taskleiste (Fenster enden darueber) */
+void dock_slot_of(const Win *w, int *x, int *y, int *size); /* wo das minimierte Fenster in der Leiste liegt */
 
 /* ---------- wm.c: geaenderte Bereiche, Fenster, Zusammensetzen ---------- */
 

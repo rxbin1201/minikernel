@@ -37,6 +37,11 @@ static void close_menu(void)
 void do_action(int a)
 {
     close_menu();
+    if (a >= A_WINSEL && a < A_WINSEL + MAXW) { /* Fenster aus dem Fenstermenue nach vorn */
+        if (wins[a - A_WINSEL].used)
+            raise_win(&wins[a - A_WINSEL]);
+        return;
+    }
     Win *f = focused();
     switch (a) {
     case A_TERM: launch_app("/bin/term", "term", A_TERM, "Terminal"); break;
@@ -120,23 +125,15 @@ static void mouse_down(Event *e)
         }
         if (menu_inside(e->x, e->y)) /* Infozeile oder Trennstrich: Menue bleibt offen */
             return;
-        int m = menubar_hit(e->x, e->y), was = menu_open;
+        int m = menubar_hit(e->x, e->y), was = menu_current();
         close_menu();
-        if (m && m != was) { /* anderes Menue der Leiste: gleich oeffnen */
-            menu_open = m;
-            damage_menu();
-            damage_menubar();
-        }
+        if (m && m != was) /* anderer Knopf der Leiste: dessen Menue gleich oeffnen */
+            open_menu(m);
         return;
     }
-    if (e->y < MENUBAR_H) { /* Menueleiste */
-        int m = menubar_hit(e->x, e->y);
-        if (m) {
-            menu_open = m;
-            menu_hover = -1;
-            damage_menu();
-            damage_menubar();
-        }
+    int m = menubar_hit(e->x, e->y);
+    if (m) { /* Knopf der Taskleiste mit Menue */
+        open_menu(m);
         return;
     }
     int d = dock_hit(e->x, e->y);
@@ -261,6 +258,8 @@ static void key(int k)
         close_menu();
         return;
     }
+    if (menu_key(k))
+        return;
     if ((k & KEY_MOD_ALT) && shortcut(k)) {
         close_menu();
         return;
@@ -272,6 +271,8 @@ static void key(int k)
 
 static void wheel(Event *e)
 {
+    if (dock_wheel(e->x, e->y, e->wheel))
+        return;
     Win *w = window_at(e->x, e->y);
     if (w)
         app_input(w, EV_WHEEL, e->key, e->x, e->y, 0, e->wheel);
@@ -297,7 +298,6 @@ void _start(int argc, char **argv)
     s64 last_min = -1;
     Win *last_focus = focused();
     while (!quit) {
-        s64 prev_us = now_us;
         now_us = sys_time_us();
         Event e;
         int n = 0;
@@ -338,14 +338,13 @@ void _start(int argc, char **argv)
             last_focus = f;
         }
         s64 now = sys_time();
-        if (now / 60 != last_min) { /* Uhrzeit in der Menueleiste */
+        if (now / 60 != last_min) { /* Uhrzeit in der Taskleiste */
             last_min = now / 60;
             damage_menubar();
         }
         power_tick();
         net_tick();
         anim_tick();
-        dock_tick(now_us - prev_us);
         draw_all(); /* direkt nach dem Bildwechsel: was sich geaendert hat, steht bis zum naechsten Bild */
         gfx_vsync();
         apps_frame();

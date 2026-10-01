@@ -81,7 +81,7 @@ static void add_pending(Pending *p, int pid, int in, int out, int action, const 
     snprintf(p->name, sizeof(p->name), "%s", name);
 }
 
-/* Bekannte Programme: Symbol und Name fuer Dock und Menueleiste */
+/* Bekannte Programme: Symbol und Name fuer die Taskleiste */
 static const struct {
     const char *prog, *name;
     int         action;
