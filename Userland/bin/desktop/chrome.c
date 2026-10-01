@@ -508,8 +508,19 @@ void draw_dock(void)
 /* Streifen unten: Leiste und die Namen darueber */
 void damage_dock(void)
 {
+    int z[4];
+    dock_zone(z);
+    damage(z[0], z[1], z[2], z[3]);
+    overlay_dirty(z[0], z[1], z[2], z[3]);
+}
+
+void dock_zone(int *r)
+{
     int top = H - U(8) - SEG_H - U(44);
-    damage(0, top, W, H - top);
+    r[0] = 0;
+    r[1] = top;
+    r[2] = W;
+    r[3] = H - top;
 }
 
 void damage_menubar(void) { damage_dock(); }
@@ -862,13 +873,26 @@ void draw_menu(void)
     }
 }
 
-void damage_menu(void)
+int menu_zone(int *r)
 {
     if (!menu_open)
-        return;
+        return 0;
     int x, y, w, h;
     menu_box(&x, &y, &w, &h);
-    damage(x - U(24), y - U(24), w + U(48), h + U(52)); /* mit Schatten ringsum */
+    r[0] = x - U(24); /* mit Schatten ringsum */
+    r[1] = y - U(24);
+    r[2] = w + U(48);
+    r[3] = h + U(52);
+    return 1;
+}
+
+void damage_menu(void)
+{
+    int z[4];
+    if (!menu_zone(z))
+        return;
+    damage(z[0], z[1], z[2], z[3]);
+    overlay_dirty(z[0], z[1], z[2], z[3]);
 }
 
 int menu_hit(int px, int py)

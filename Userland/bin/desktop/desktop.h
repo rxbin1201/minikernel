@@ -104,6 +104,8 @@ void draw_dock(void);
 void draw_menu(void);
 void damage_menubar(void);      /* = damage_dock (Uhrzeit, Fokus, Netzwerk stehen in der Taskleiste) */
 void damage_dock(void);
+void dock_zone(int *r);          /* x, y, w, h: Streifen unten mit Taskleiste und den Namen darueber */
+int  menu_zone(int *r);          /* offenes Menue samt Schatten; 0 = keins */
 void damage_menu(void);
 int  menubar_hit(int x, int y);  /* Knopf mit Menue: 1 Start, 2 Fenster, 3 Netzwerk, 4 System, 5 Suche; 0 = keiner */
 int  menu_current(void);         /* offenes Menue wie menubar_hit (5 = Start ueber die Suche) */
@@ -126,6 +128,7 @@ void dock_slot_of(const Win *w, int *x, int *y, int *size); /* wo das minimierte
 void damage(int x, int y, int w, int h);
 void damage_all(void);
 void damage_win(const Win *w);
+void overlay_dirty(int x, int y, int w, int h); /* Taskleiste/Menue/Dialog haben sich dort geaendert (Ebene fuer die GPU) */
 void win_dirty(Win *w, int x, int y, int ww, int hh);
 void win_dirty_all(Win *w);
 void content_rect(const Win *w, int *x, int *y, int *cw, int *ch);

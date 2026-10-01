@@ -37,6 +37,7 @@ static void button_rect(int i, int *bx, int *by, int *bw, int *bh)
 void damage_dialog(void)
 {
     damage_all(); /* der ganze Bildschirm wird abgedunkelt */
+    overlay_dirty(0, 0, W, H);
 }
 
 void dialog_open(int action)
@@ -177,6 +178,7 @@ void dialog_mouse(int px, int py, int down)
         int x, y, w, h;
         box(&x, &y, &w, &h);
         damage(x, y, w, h);
+        overlay_dirty(x, y, w, h);
     }
 }
 
