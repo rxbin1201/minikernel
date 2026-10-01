@@ -479,7 +479,7 @@ static void corner_alpha(Win *w)
         if (y0 < w->ry0) y0 = w->ry0;
         if (y1 > w->ry1) y1 = w->ry1;
         for (int y = y0; y < y1; y++) {
-            u32 *p = w->buf.px + (u64)y * (u64)w->w;
+            u32 *p = w->buf.px + (u64)y * (u64)w->buf.w;
             for (int x = x0; x < x1; x++) {
                 int c = gfx_round_cov(x, y, 0, 0, w->w, w->h, RADIUS);
                 p[x] = (p[x] & 0xFFFFFF) | (u32)(c > 255 ? 255 : c) << 24;
@@ -491,10 +491,11 @@ static void corner_alpha(Win *w)
 /* Geaenderten Teil eines Fensters in sein eigenes Bild zeichnen und auf dem Bildschirm als geaendert melden */
 static void render_window(Win *w)
 {
-    if (!w->buf.px || w->buf.w != w->w || w->buf.h != w->h) {
+    int bw = gsurf_width(w->w); /* fuer die GPU auf 16 Pixel aufgerundet, rechts bleibt ein unbenutzter Rand */
+    if (!w->buf.px || w->buf.w != bw || w->buf.h != w->h) {
         if (w->buf.px)
             gsurf_free(&w->buf);
-        if (gsurf_new(&w->buf, w->w, w->h) != 0) {
+        if (gsurf_new(&w->buf, bw, w->h) != 0) {
             w->buf.px = 0;
             return;
         }
@@ -578,7 +579,7 @@ static void compose_cpu(const Clip *r)
             int rad = RADIUS * sc / ww;
             gfx_shadow(&gfx_screen, r[0], r[1] + shadow_dy() * sc / ww, r[2], r[3], rad, SHADOW,
                        (w == f ? 95 : 55) * a / 255);
-            gfx_blit_scaled(&gfx_screen, &w->buf, r[0], r[1], r[2], r[3], a, rad);
+            gfx_blit_scaled_part(&gfx_screen, &w->buf, w->w, w->h, r[0], r[1], r[2], r[3], a, rad);
             continue;
         }
         if (w->x - SHADOW >= x1 || w->x + w->w + SHADOW <= x0 || w->y - SHADOW >= y1 || w->y + w->h + 2 * SHADOW <= y0)

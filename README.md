@@ -101,9 +101,11 @@ In der Shell: `burn 5000 & burn 5000 & cpus` zeigt zwei ausgelastete CPUs.
   Referenz auf das shm-Objekt, solange angemeldet). Je Bild schickt der Desktop alle geaenderten Rechtecke als eine
   Liste von Auftraegen: Hintergrund kopieren, je Fenster Schatten (vier vorberechnete Streifen) und die Zeilen mit den
   runden Ecken mischen (Deckung in Byte 3 des Fensterbildes), den Rest kopieren. Gemessen auf echter Hardware: die GPU
-  rundet die Basisadresse einer Flaeche auf 32 Byte ab und schneidet Bloecke am Rand nicht ab. Deshalb beginnen die
-  Flaechen an 64 Byte (Rest als Versatz an den Kernel), und jeder Auftrag wird in Stuecke zerlegt, in denen die
-  Bloecke der Threads genau aufgehen (innen 8 x 8 Pixel, Raender 1 x 8, 8 x 1, 1 x 1 - je ein eigener Kernel).
+  rundet die Basisadresse einer Flaeche auf 32 Byte und die Zeilenlaenge auf 64 Byte ab und schneidet Bloecke am Rand
+  nicht ab. Deshalb sind es immer ganze Flaechen ab ihrem Anfang (Ecke des Rechtecks in den Konstanten des Kernels),
+  nur mit Breiten in Vielfachen von 16 Pixeln (der Desktop rundet Fensterbilder und Schatten auf), und jeder Auftrag
+  wird in Stuecke zerlegt, in denen die Bloecke der Threads genau aufgehen (innen 8 x 8 Pixel, Raender 1 x 8, 8 x 1,
+  1 x 1 - je ein eigener Kernel).
   Taskleiste, Menues und Animationen zeichnet weiter die CPU. Beim Start prueft ein Selbsttest die GPU gegen die CPU
   (ungerade, ueberlappende Rechtecke: jeder Auftrag allein, dann alle als Liste, sonst einzeln nacheinander; ohne und
   mit Zurueckschreiben der CPU-Caches); geht nichts davon, setzt die CPU zusammen wie bisher. `igdtest comp` zeigt Zustand und Messwerte (GPU gegen CPU je Mpx),

@@ -50,8 +50,8 @@ typedef struct {
     int      blend;            /* 0 kopieren, 1 Quelle mit ihrem Alpha (Byte 3) ueber das Ziel mischen */
     int      shape;            /* IGD_BLK_* */
     uint32_t gx, gy;           /* Bloecke (Threads) in x und y */
-    IgdSurf  dst, src;         /* Basis an 64 Byte ausgerichtet, bis zum rechten und unteren Rand des Rechtecks */
-    uint32_t dst_off, src_off; /* linker Rand des Rechtecks in der Flaeche (Bytes) */
+    IgdSurf  dst, src;         /* ganze Flaechen (Anfang an 4 KiB, Zeilenlaenge Vielfaches von 64 Byte) */
+    uint32_t dx, dy, sx, sy;   /* linke obere Ecke des Rechtecks in Ziel und Quelle (x in Bytes) */
 } IgdCompOp;
 #define IGD_COMP_MAX_OPS 120
 /* Auftraege der Reihe nach ausfuehren (jeder sieht die Ergebnisse der vorigen) und abwarten.

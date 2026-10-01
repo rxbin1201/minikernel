@@ -151,6 +151,7 @@ void gpu_quit(void);   /* vor gfx_close */
 int  gsurf_new(Surface *s, int w, int h); /* Flaeche, die die GPU benutzen kann (sonst wie surface_new) */
 void gsurf_free(Surface *s);
 int  gsurf_handle(const Surface *s);      /* Nummer beim Kernel, 0 = nur CPU */
+int  gsurf_width(int w);                  /* Breite fuer gsurf_new: die GPU braucht Vielfache von 16 Pixeln */
 void gq_copy(const Surface *d, int dx, int dy, const Surface *s, int sx, int sy, int w, int h, const Clip *c);
 void gq_blend(const Surface *d, int dx, int dy, const Surface *s, int sx, int sy, int w, int h, const Clip *c);
 void gq_cancel(void);

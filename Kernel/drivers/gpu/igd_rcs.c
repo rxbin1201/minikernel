@@ -1078,11 +1078,10 @@ int igd_gpgpu_test(void)
 }
 
 /* ---------- Zusammensetzen fuer den Desktop (igd_comp.c) ----------
- * Kopieren und Mischen mit denselben Kernels wie igdtest gpgpu. Jeder Auftrag bekommt eigene Flaechen, die genau so
- * gross sind wie sein Rechteck (Basisadresse = Ecke): was ein Thread ueber den Rand hinaus schreibt, verwirft die
- * Hardware - so gehen beliebige Rechtecke, obwohl jeder Thread einen Block von 8 x 8 Pixeln bearbeitet.
- * Zustandsbereich: je Auftrag 256 Bytes: Interface Descriptor, Konstanten (linker Rand des Rechtecks in Ziel und
- * Quelle, falls die Flaechen an 64 Byte ausgerichtet beginnen), Binding Table (Ziel, Quelle), zwei Surface States.
+ * Kopieren und Mischen mit denselben Kernels wie igdtest gpgpu (in vier Blockgroessen, siehe igd_comp.c). Wie dort
+ * sind die Flaechen ganze Flaechen ab ihrem Anfang, die Ecke des Rechtecks steht in den Konstanten.
+ * Zustandsbereich: je Auftrag 256 Bytes: Interface Descriptor, Konstanten (Ecke des Rechtecks in Ziel und Quelle),
+ * Binding Table (Ziel, Quelle), zwei Surface States.
  * Zwischen zwei Auftraegen wartet ein PIPE_CONTROL, bis alle Threads fertig sind (spaetere Auftraege lesen, was
  * fruehere geschrieben haben). */
 
@@ -1182,8 +1181,10 @@ int igd_rcs_comp(const IgdCompOp *ops, int n, uint64_t *us)
         idd[4] = off + 96;       /* Binding Table */
         idd[5] = 1u << 16;       /* Konstanten: 1 Register */
         idd[6] = 1;
-        cb[0] = o->dst_off;      /* Ziel x (Bytes), y */
-        cb[2] = o->src_off;      /* Quelle x, y */
+        cb[0] = o->dx;           /* Ziel x (Bytes), y */
+        cb[1] = o->dy;
+        cb[2] = o->sx;           /* Quelle x, y */
+        cb[3] = o->sy;
         bt[0] = off + 128;
         bt[1] = off + 192;
         surf_state((uint32_t *)(st + off + 128), &o->dst);

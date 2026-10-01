@@ -110,6 +110,9 @@ void gfx_blit_round(Surface *dst, const Surface *src, int sx, int sy, int dx, in
 void gfx_round_rect_grad(Surface *s, int x, int y, int w, int h, int r, u32 top, u32 bottom, int alpha);
 /* ganzes Bild src skaliert (bilinear) mit runden Ecken und Transparenz nach (dx, dy, dw, dh): fuer Animationen */
 void gfx_blit_scaled(Surface *dst, const Surface *src, int dx, int dy, int dw, int dh, int alpha, int r);
+/* dasselbe nur fuer die linken oberen sw x sh Pixel von src (Zeilenlaenge bleibt src->w) */
+void gfx_blit_scaled_part(Surface *dst, const Surface *src, int sw, int sh, int dx, int dy, int dw, int dh, int alpha,
+                          int r);
 
 /* Wartet hoechstens timeout_ms auf ein Ereignis (-1 = ohne Grenze). 0 = keins */
 int gfx_wait(Event *e, int timeout_ms);

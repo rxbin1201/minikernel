@@ -321,6 +321,12 @@ void gfx_round_rect_grad(Surface *s, int x, int y, int w, int h, int r, u32 top,
 #define SCALED_MAXW 8192
 void gfx_blit_scaled(Surface *dst, const Surface *src, int dx, int dy, int dw, int dh, int alpha, int r)
 {
+    gfx_blit_scaled_part(dst, src, src->w, src->h, dx, dy, dw, dh, alpha, r);
+}
+
+void gfx_blit_scaled_part(Surface *dst, const Surface *src, int sw, int sh, int dx, int dy, int dw, int dh, int alpha,
+                          int r)
+{
     static u32 colx[SCALED_MAXW]; /* je Zielspalte: Quellspalte << 8 | Gewicht */
     int x0 = dx, y0 = dy, x1 = dx + dw, y1 = dy + dh;
     if (dw < 2 || dh < 2 || alpha <= 0 || !clip_box(dst, &x0, &y0, &x1, &y1))
@@ -330,7 +336,7 @@ void gfx_blit_scaled(Surface *dst, const Surface *src, int dx, int dy, int dw, i
     if (r * 2 > dw) r = dw / 2;
     if (r * 2 > dh) r = dh / 2;
     if (alpha > 255) alpha = 255;
-    u64 stepx = ((u64)(src->w - 1) << 16) / (u64)(dw - 1), stepy = ((u64)(src->h - 1) << 16) / (u64)(dh - 1);
+    u64 stepx = ((u64)(sw - 1) << 16) / (u64)(dw - 1), stepy = ((u64)(sh - 1) << 16) / (u64)(dh - 1);
     int n = x1 - x0, nearest = (u64)dw * (u64)dh >= 1000000;
     for (int i = 0; i < n; i++)
         colx[i] = (u32)(((u64)(x0 + i - dx) * stepx) >> 8);
@@ -343,7 +349,7 @@ void gfx_blit_scaled(Surface *dst, const Surface *src, int dx, int dy, int dw, i
     u32 *prev = 0;
     for (int yy = y0; yy < y1; yy++) {
         u64 fy = (u64)(yy - dy) * stepy;
-        int sy = (int)(fy >> 16), wy = (int)(fy >> 8 & 0xFF), sy1 = sy + 1 < src->h ? sy + 1 : sy;
+        int sy = (int)(fy >> 16), wy = (int)(fy >> 8 & 0xFF), sy1 = sy + 1 < sh ? sy + 1 : sy;
         const u32 *r0 = src->px + (u64)sy * (u64)src->w, *r1 = src->px + (u64)sy1 * (u64)src->w;
         u32 *dp = dst->px + (u64)yy * (u64)dst->w + x0;
         int corner = yy < dy + r || yy >= dy + dh - r, plain = !corner && alpha == 255;
@@ -357,7 +363,7 @@ void gfx_blit_scaled(Surface *dst, const Surface *src, int dx, int dy, int dw, i
             if (nearest) {
                 c = r0[cx >> 8];
             } else {
-                int sx = (int)(cx >> 8), wx = (int)(cx & 0xFF), sx1 = sx + 1 < src->w ? sx + 1 : sx;
+                int sx = (int)(cx >> 8), wx = (int)(cx & 0xFF), sx1 = sx + 1 < sw ? sx + 1 : sx;
                 c = gfx_mix(gfx_mix(r0[sx], r0[sx1], wx), gfx_mix(r1[sx], r1[sx1], wx), wy);
             }
             int a = alpha;

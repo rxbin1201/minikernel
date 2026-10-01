@@ -20,7 +20,7 @@
 
 #define COMP_SURFS   96
 #define COMP_CHUNK   64          /* Auftraege, die auf einmal aus dem Programm geholt werden */
-#define COMP_MAX_W   4000        /* Pixel: Breite (+ Versatz) in Bytes passt in den Surface State (16384) */
+#define COMP_MAX_W   4096        /* Pixel: Breite in Bytes passt in den Surface State (16384) */
 #define COMP_MAX_H   16384
 #define SELF_PID     0xFFFFFFFFu /* Flaechen des Selbsttests */
 
@@ -213,18 +213,17 @@ static void flush_rect(const CompSurf *s, int x, int y, int w, int h)
     }
 }
 
-/* Flaeche fuer ein Rechteck: beginnt an 64 Byte ausgerichtet vor seiner Ecke (die GPU rundet die Basisadresse ab),
- * *off = Abstand der Ecke vom Anfang (Bytes) */
-static IgdSurf gsurf(const CompSurf *s, int x, int y, int w, int h, uint32_t *off)
+/* Ganze Flaeche ab ihrem Anfang (wie bei igdtest gpgpu). Gemessen: die GPU rundet die Basisadresse auf 32 Byte ab
+ * und die Zeilenlaenge auf 64 Byte - deshalb nur Flaechen mit Breite in Vielfachen von 16 Pixeln (siehe anmelden) */
+static IgdSurf gsurf(const CompSurf *s)
 {
-    uint32_t a = (s->ggtt << 12) + ((uint32_t)y * s->w + (uint32_t)x) * 4;
-    *off = a & 63;
-    IgdSurf g = {a - *off, (uint32_t)w * 4 + *off, (uint32_t)h, s->w * 4};
+    IgdSurf g = {s->ggtt << 12, s->w * 4, s->h, s->w * 4};
     return g;
 }
 
-/* Auftrag in Stuecke zerlegen, in denen die Bloecke der Threads genau aufgehen: innen 8 x 8 Pixel, rechts ein Streifen
- * mit 1 x 8, unten mit 8 x 1, die Ecke mit 1 x 1. Liefert die Zahl der Stuecke (hoechstens 4). */
+/* Auftrag in Stuecke zerlegen, in denen die Bloecke der Threads genau aufgehen (die Hardware schneidet Bloecke am Rand
+ * nicht ab): innen 8 x 8 Pixel, rechts ein Streifen mit 1 x 8, unten mit 8 x 1, die Ecke mit 1 x 1. Liefert die Zahl
+ * der Stuecke (hoechstens 4). */
 static int split_op(const KOp *o, IgdCompOp *g)
 {
     int w8 = o->w & ~7, h8 = o->h & ~7, wr = o->w & 7, hr = o->h & 7, n = 0;
@@ -240,8 +239,12 @@ static int split_op(const KOp *o, IgdCompOp *g)
         p->shape = sh;
         p->gx = (uint32_t)(sh == IGD_BLK_8X8 || sh == IGD_BLK_8X1 ? w / 8 : w);
         p->gy = (uint32_t)(sh == IGD_BLK_8X8 || sh == IGD_BLK_1X8 ? h / 8 : h);
-        p->dst = gsurf(o->d, o->dx + x, o->dy + y, w, h, &p->dst_off);
-        p->src = gsurf(o->s, o->sx + x, o->sy + y, w, h, &p->src_off);
+        p->dst = gsurf(o->d);
+        p->src = gsurf(o->s);
+        p->dx = (uint32_t)(o->dx + x) * 4;
+        p->dy = (uint32_t)(o->dy + y);
+        p->sx = (uint32_t)(o->sx + x) * 4;
+        p->sy = (uint32_t)(o->sy + y);
     }
     return n;
 }
@@ -312,12 +315,13 @@ static int exec_ops(const KOp *ops, int n)
 
 /* ---------- Selbsttest: GPU gegen CPU, ungerade und ueberlappende Rechtecke ---------- */
 
-/* ungerade Breite: Zeilen beginnen nicht an 64 Byte (wie bei Fenstern beliebiger Breite) */
-enum { TW = 253, TH = 64, TPAGES = (TW * TH * 4 + 4095) / 4096 };
+/* Zeilenlaenge 1088 Byte: Vielfaches von 64, aber keine Zweierpotenz */
+enum { TW = 272, TH = 64, TPAGES = (TW * TH * 4 + 4095) / 4096 };
 
 static const int test_ops[][7] = { /* mischen, dx, dy, sx, sy, w, h - alle Blockformen, Raender, Ueberlappungen */
     {0, 13, 5, 7, 3, 77, 29},   {1, 3, 17, 21, 2, 101, 37}, {0, 200, 40, 0, 0, 53, 24},
     {1, 0, 0, 128, 1, 9, 7},    {1, 61, 30, 30, 11, 133, 21}, {0, 247, 0, 3, 50, 6, 14},
+    {0, 16, 8, 24, 16, 64, 32}, {1, 40, 24, 8, 8, 32, 16}, /* nur ganze 8 x 8-Bloecke */
 };
 #define TEST_OPS ((int)(sizeof(test_ops) / sizeof(test_ops[0])))
 
@@ -485,7 +489,7 @@ int64_t igd_comp_sys(uint32_t pid, uint64_t op, uint64_t a, uint64_t b)
         return ERR_NOSYS;
     if (op == 1) { /* anmelden: shm-Nummer, breite | hoehe << 16 */
         uint32_t w = (uint32_t)(b & 0xFFFF), h = (uint32_t)((b >> 16) & 0xFFFF);
-        if (!w || !h || w * 4 > COMP_MAX_W * 4 || h > COMP_MAX_H)
+        if (!w || !h || w > COMP_MAX_W || h > COMP_MAX_H || (w & 15)) /* Zeilenlaenge: Vielfaches von 64 Byte */
             return ERR_INVAL;
         uint64_t npages;
         const uint64_t *frames;

@@ -55,6 +55,11 @@ void gsurf_free(Surface *s)
     surface_free(s);
 }
 
+int gsurf_width(int w)
+{
+    return gpu_mode ? (w + 15) & ~15 : w;
+}
+
 int gsurf_handle(const Surface *s)
 {
     for (int i = 0; s->px && i < GMAX; i++)
@@ -156,7 +161,8 @@ int shadow_ready(Win *w, int alpha)
     int S = SHADOW, R = RADIUS, band = S + R, lrh = w->h - 2 * R;
     if (lrh < 1 || w->w < 2 * R)
         return 0;
-    if (gsurf_new(&w->shd_tb, w->w + 2 * S, 2 * band) != 0 || gsurf_new(&w->shd_lr, 2 * band, lrh) != 0) {
+    if (gsurf_new(&w->shd_tb, gsurf_width(w->w + 2 * S), 2 * band) != 0 ||
+        gsurf_new(&w->shd_lr, gsurf_width(2 * band), lrh) != 0) {
         shadow_free(w);
         return 0;
     }
