@@ -1,6 +1,7 @@
 /* Grafikbibliothek, siehe gfx.h */
 
 #include "gfx.h"
+#include "ttf.h"
 #include "winproto.h"
 
 Surface        gfx_screen; /* hierhin zeichnet das Programm */
@@ -568,14 +569,24 @@ static int wp_recv(WpMsg *m)
     return 1;
 }
 
-static void gfx_win_damage(int x, int y, int w, int h)
+/* ---------- Eigene Titelleiste (Fenster unter dem Desktop) ----------
+ * Statt der Titelleiste des Desktops zeichnet die Bibliothek oben im Fenster einen Streifen mit dem Titel links und
+ * den Knoepfen Minimieren, Maximieren/Wiederherstellen, Schliessen rechts (wie bei Windows). Das Programm merkt davon
+ * nichts: gfx_screen ist der Teil des geteilten Puffers unter dem Streifen, Mausereignisse kommen umgerechnet an.
+ * Klicks auf den Streifen erledigt die Bibliothek (gfx_window_cmd: ziehen verschiebt, Doppelklick maximiert).
+ * Programme mit eigener Leiste (z.B. Dateien) oeffnen mit GFX_FRAMELESS und bekommen keinen Streifen. */
+
+static int  gfx_zoomed;           /* WP_RESIZE c: maximiert bzw. angedockt */
+static int  gfx_tb;               /* Hoehe des Streifens in Pixeln (0 = keiner) */
+static u32 *gfx_full;             /* ganzer geteilter Puffer: Streifen + Inhalt */
+static char gfx_title[64];
+static int  gfx_tb_active = 1, gfx_tb_hover = -1, gfx_tb_resizable;
+static s64  gfx_tb_click;
+
+static int tb_px(int v) { return (v * gfx_ui + 50) / 100; }
+
+static void gfx_win_damage_full(int x, int y, int w, int h) /* in Koordinaten des ganzen Puffers */
 {
-    if (x < 0) { w += x; x = 0; }
-    if (y < 0) { h += y; y = 0; }
-    if (x + w > gfx_screen.w) w = gfx_screen.w - x;
-    if (y + h > gfx_screen.h) h = gfx_screen.h - y;
-    if (w <= 0 || h <= 0)
-        return;
     if (gfx_dx0 >= gfx_dx1) {
         gfx_dx0 = x; gfx_dy0 = y; gfx_dx1 = x + w; gfx_dy1 = y + h;
         return;
@@ -586,18 +597,134 @@ static void gfx_win_damage(int x, int y, int w, int h)
     if (y + h > gfx_dy1) gfx_dy1 = y + h;
 }
 
+static int tb_button_at(int x, int y) /* 0 minimieren, 1 maximieren, 2 schliessen, -1 keiner */
+{
+    int bw = tb_px(46);
+    if (y < 0 || y >= gfx_tb || x < gfx_screen.w - 3 * bw || x >= gfx_screen.w)
+        return -1;
+    return (x - (gfx_screen.w - 3 * bw)) / bw;
+}
+
+static void tb_draw(void)
+{
+    if (!gfx_tb)
+        return;
+    Clip oc = gfx_clip, ob = gfx_base; /* das Programm hat vielleicht gerade einen Clip gesetzt */
+    gfx_base.x0 = gfx_base.y0 = 0;
+    gfx_base.x1 = gfx_base.y1 = 1 << 30;
+    gfx_clip.x0 = gfx_clip.y0 = 0;
+    gfx_clip.x1 = gfx_screen.w;
+    gfx_clip.y1 = gfx_tb;
+    Surface s = {gfx_full, gfx_screen.w, gfx_tb};
+    int w = gfx_screen.w, th = gfx_tb, bw = tb_px(46);
+    float k = (float)tb_px(100) / 100.0f;
+    u32 bg = gfx_tb_active ? 0xE6EAF2 : 0xF1F3F7;
+    gfx_fill(&s, 0, 0, w, th, bg);
+    gfx_fill(&s, 0, th - 1, w, 1, 0xDCE0E8);
+    if (font_ui || fonts_init() == 0) {
+        int fs = tb_px(13);
+        Font *f = font_bold ? font_bold : font_ui;
+        gfx_clip.x1 = w - 3 * bw - tb_px(8);
+        text_draw(&s, f, fs, tb_px(16), (th - text_height(f, fs)) / 2, gfx_title, gfx_tb_active ? 0x1D1D1F : 0x8E8E93);
+        gfx_clip.x1 = w;
+    }
+    u32 tc = gfx_tb_active ? 0x1D1D1F : 0x8E8E93;
+    for (int i = 0; i < 3; i++) {
+        int x0 = w - (3 - i) * bw, hv = i == gfx_tb_hover, en = i != 1 || gfx_tb_resizable;
+        float cx = x0 + bw * 0.5f, cy = th * 0.5f;
+        if (hv && en)
+            gfx_fill(&s, x0, 0, bw, th - 1, i == 2 ? 0xE81123 : 0xD8DDE8);
+        u32 c = hv && i == 2 ? 0xFFFFFF : en ? tc : 0xC4C4CA;
+        if (i == 0) {
+            gfx_capsule(&s, cx - 5 * k, cy, cx + 5 * k, cy, 1.7f * k, c, 255);
+        } else if (i == 1 && gfx_zoomed) { /* zwei Fenster: wiederherstellen */
+            gfx_capsule(&s, cx - 2.5f * k, cy - 5 * k, cx + 5 * k, cy - 5 * k, 1.7f * k, c, 255);
+            gfx_capsule(&s, cx + 5 * k, cy - 5 * k, cx + 5 * k, cy + 2.5f * k, 1.7f * k, c, 255);
+            gfx_fill(&s, (int)(cx - 5 * k), (int)(cy - 2.5f * k), (int)(7.5f * k), (int)(7.5f * k), hv ? 0xD8DDE8 : bg);
+            gfx_capsule(&s, cx - 5 * k, cy - 2.5f * k, cx + 2.5f * k, cy - 2.5f * k, 1.7f * k, c, 255);
+            gfx_capsule(&s, cx + 2.5f * k, cy - 2.5f * k, cx + 2.5f * k, cy + 5 * k, 1.7f * k, c, 255);
+            gfx_capsule(&s, cx + 2.5f * k, cy + 5 * k, cx - 5 * k, cy + 5 * k, 1.7f * k, c, 255);
+            gfx_capsule(&s, cx - 5 * k, cy + 5 * k, cx - 5 * k, cy - 2.5f * k, 1.7f * k, c, 255);
+        } else if (i == 1) {
+            gfx_capsule(&s, cx - 5 * k, cy - 5 * k, cx + 5 * k, cy - 5 * k, 1.7f * k, c, 255);
+            gfx_capsule(&s, cx + 5 * k, cy - 5 * k, cx + 5 * k, cy + 5 * k, 1.7f * k, c, 255);
+            gfx_capsule(&s, cx + 5 * k, cy + 5 * k, cx - 5 * k, cy + 5 * k, 1.7f * k, c, 255);
+            gfx_capsule(&s, cx - 5 * k, cy + 5 * k, cx - 5 * k, cy - 5 * k, 1.7f * k, c, 255);
+        } else {
+            gfx_capsule(&s, cx - 5 * k, cy - 5 * k, cx + 5 * k, cy + 5 * k, 1.8f * k, c, 255);
+            gfx_capsule(&s, cx - 5 * k, cy + 5 * k, cx + 5 * k, cy - 5 * k, 1.8f * k, c, 255);
+        }
+    }
+    gfx_clip = oc;
+    gfx_base = ob;
+    gfx_win_damage_full(0, 0, w, th);
+}
+
+/* Mausereignis aus dem Desktop: 1 = gehoert dem Streifen (nicht ans Programm), sonst y umgerechnet */
+static int tb_event(Event *e)
+{
+    if (!gfx_tb || (e->type != EV_DOWN && e->type != EV_UP && e->type != EV_MOVE && e->type != EV_WHEEL))
+        return 0;
+    int in = e->y < gfx_tb;
+    if (e->type == EV_MOVE) {
+        int h = in ? tb_button_at(e->x, e->y) : -1;
+        if (h != gfx_tb_hover) {
+            gfx_tb_hover = h;
+            tb_draw();
+        }
+    }
+    if (in && e->type == EV_DOWN) {
+        if (e->button != 1)
+            return 1;
+        int b = tb_button_at(e->x, e->y);
+        if (b == 0) {
+            gfx_window_cmd(GFX_WIN_MINIMIZE);
+        } else if (b == 1) {
+            if (gfx_tb_resizable)
+                gfx_window_cmd(GFX_WIN_ZOOM);
+        } else if (b == 2) {
+            gfx_window_cmd(GFX_WIN_CLOSE);
+        } else { /* freie Flaeche: verschieben, Doppelklick maximiert */
+            s64 now = sys_ticks();
+            if (now - gfx_tb_click < 40 && gfx_tb_resizable) {
+                gfx_tb_click = 0;
+                gfx_window_cmd(GFX_WIN_ZOOM);
+            } else {
+                gfx_tb_click = now;
+                gfx_window_cmd(GFX_WIN_MOVE);
+            }
+        }
+        return 1;
+    }
+    if (in && e->type == EV_WHEEL)
+        return 1;
+    e->y -= gfx_tb; /* Bewegung und Loslassen bekommt das Programm immer (auch ueber dem Streifen: y < 0) */
+    return 0;
+}
+
+static void gfx_win_damage(int x, int y, int w, int h)
+{
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > gfx_screen.w) w = gfx_screen.w - x;
+    if (y + h > gfx_screen.h) h = gfx_screen.h - y;
+    if (w <= 0 || h <= 0)
+        return;
+    gfx_win_damage_full(x, y + gfx_tb, w, h); /* unter dem Streifen */
+}
+
 /* Geaenderten Bereich melden (gesammelt bis zum naechsten gfx_poll/gfx_vsync: eine Nachricht statt vieler) */
 static void gfx_win_flush(void)
 {
     if (gfx_buf_new) { /* neuer Puffer ist gezeichnet: erst melden, dann ganz anzeigen lassen */
         if (gfx_dx0 >= gfx_dx1)
             return; /* noch nichts gezeichnet: der Desktop zeigt so lange den alten */
-        WpMsg b = {WP_BUFFER, gfx_screen.w, gfx_screen.h, (int)gfx_shm_id, 0, 0, 0, 0, {0}};
+        WpMsg b = {WP_BUFFER, gfx_screen.w, gfx_screen.h + gfx_tb, (int)gfx_shm_id, 0, 0, 0, 0, {0}};
         wp_send(&b);
         gfx_buf_new = 0;
         gfx_dx0 = gfx_dy0 = 0;
         gfx_dx1 = gfx_screen.w;
-        gfx_dy1 = gfx_screen.h;
+        gfx_dy1 = gfx_screen.h + gfx_tb;
     }
     if (gfx_dx0 >= gfx_dx1)
         return;
@@ -609,30 +736,31 @@ static void gfx_win_flush(void)
 /* Neue Groesse: neuen geteilten Puffer anlegen (alter Inhalt oben links uebernommen), das Programm zeichnet neu */
 static void gfx_win_resize(int w, int h)
 {
-    if (w < 16 || h < 16 || w > 16384 || h > 16384 || (w == gfx_screen.w && h == gfx_screen.h))
+    int oh = gfx_screen.h + gfx_tb;
+    if (w < 16 || h < 16 + gfx_tb || w > 16384 || h > 16384 || (w == gfx_screen.w && h == oh))
         return;
     unsigned id;
     s64 a = sys_shm_create((u64)w * (u64)h * 4, &id);
     if (a < 0)
         return;
-    u32 *np = (u32 *)a, *op = gfx_screen.px;
-    int cw = w < gfx_screen.w ? w : gfx_screen.w, chh = h < gfx_screen.h ? h : gfx_screen.h;
+    u32 *np = (u32 *)a, *op = gfx_full;
+    int cw = w < gfx_screen.w ? w : gfx_screen.w, chh = h < oh ? h : oh;
     for (int y = 0; y < chh; y++)
         memcpy(np + (u64)y * (u64)w, op + (u64)y * (u64)gfx_screen.w, (u64)cw * 4);
     sys_shm_unmap(op); /* der Desktop haelt den alten Puffer, bis WP_BUFFER kommt */
-    gfx_screen.px = np;
+    gfx_full = np;
+    gfx_screen.px = np + (u64)gfx_tb * (u64)w;
     gfx_screen.w = w;
-    gfx_screen.h = h;
+    gfx_screen.h = h - gfx_tb;
     gfx_shm_id = id;
     gfx_buf_new = 1;
     gfx_dx0 = gfx_dx1 = 0;
     gfx_reset_base_clip();
     gfx_no_clip();
-    Event e = {EV_RESIZE, 0, w, h, 0, 0};
+    tb_draw();
+    Event e = {EV_RESIZE, 0, w, h - gfx_tb, 0, 0};
     gfx_push(e);
 }
-
-static int gfx_zoomed;
 
 void gfx_window_cmd(int cmd)
 {
@@ -653,8 +781,11 @@ static void gfx_win_collect(void)
     while (wp_recv(&m)) {
         if (m.type == WP_INPUT) {
             Event e = {m.a, m.b, m.c, m.d, m.e, m.f};
-            gfx_push(e);
+            if (!tb_event(&e))
+                gfx_push(e);
         } else if (m.type == WP_FOCUS) {
+            gfx_tb_active = m.a;
+            tb_draw();
             Event e = {EV_FOCUS, m.a, 0, 0, 0, 0};
             gfx_push(e);
         } else if (m.type == WP_CLOSE) {
@@ -664,10 +795,11 @@ static void gfx_win_collect(void)
             gfx_win_frame = 1;
         } else if (m.type == WP_RESIZE) {
             gfx_zoomed = m.c;
-            if (m.a != gfx_screen.w || m.b != gfx_screen.h)
+            if (m.a != gfx_screen.w || m.b != gfx_screen.h + gfx_tb) {
                 gfx_win_resize(m.a, m.b);
-            else { /* nur der Zustand (maximiert) hat sich geaendert: neu zeichnen lassen */
-                Event e = {EV_RESIZE, 0, m.a, m.b, 0, 0};
+            } else { /* nur der Zustand (maximiert) hat sich geaendert: neu zeichnen lassen */
+                tb_draw();
+                Event e = {EV_RESIZE, 0, m.a, m.b - gfx_tb, 0, 0};
                 gfx_push(e);
             }
         }
@@ -737,20 +869,25 @@ static int gfx_win_open(int w, int h, const char *title, int flags)
     if (h > gfx_scr_h - 160) h = gfx_scr_h - 160;
     if (w < 64) w = 64;
     if (h < 32) h = 32;
-    s64 a = sys_shm_create((u64)w * (u64)h * 4, &gfx_shm_id);
+    gfx_tb = flags & GFX_FRAMELESS ? 0 : tb_px(38); /* sonst zeichnet die Bibliothek die Titelleiste */
+    gfx_tb_resizable = (flags & GFX_RESIZABLE) != 0;
+    snprintf(gfx_title, sizeof(gfx_title), "%s", title ? title : "");
+    s64 a = sys_shm_create((u64)w * (u64)(h + gfx_tb) * 4, &gfx_shm_id);
     if (a < 0) {
         fprintf(2, "Grafik: kein Speicher fuer ein Fenster %dx%d\n", w, h);
         return -1;
     }
-    gfx_screen.px = (u32 *)a;
+    gfx_full = (u32 *)a;
+    gfx_screen.px = gfx_full + (u64)gfx_tb * (u64)w;
     gfx_screen.w = w;
     gfx_screen.h = h;
     gfx_no_clip();
     gfx_qh = gfx_qt = 0;
     gfx_dx0 = gfx_dx1 = 0;
     gfx_win = 1;
-    int wf = (flags & GFX_RESIZABLE ? WPF_RESIZABLE : 0) | (flags & GFX_FRAMELESS ? WPF_FRAMELESS : 0);
-    WpMsg m = {WP_CREATE, w, h, (int)gfx_shm_id, wf, 0, 0, 0, {0}};
+    tb_draw();
+    int wf = (flags & GFX_RESIZABLE ? WPF_RESIZABLE : 0) | WPF_FRAMELESS; /* Titelleiste immer im Fenster selbst */
+    WpMsg m = {WP_CREATE, w, h + gfx_tb, (int)gfx_shm_id, wf, 0, 0, 0, {0}};
     snprintf(m.text, sizeof(m.text), "%s", title ? title : "");
     wp_send(&m);
     return 0;
@@ -763,6 +900,8 @@ void gfx_set_title(const char *title)
     WpMsg m = {WP_TITLE, 0, 0, 0, 0, 0, 0, 0, {0}};
     snprintf(m.text, sizeof(m.text), "%s", title);
     wp_send(&m);
+    snprintf(gfx_title, sizeof(gfx_title), "%s", title);
+    tb_draw();
 }
 
 void gfx_flush(void)
@@ -894,8 +1033,8 @@ void gfx_close(void)
         gfx_win_flush();
         sys_close(gfx_fd_in);
         sys_close(gfx_fd_out);
-        sys_shm_unmap(gfx_screen.px);
-        gfx_screen.px = 0;
+        sys_shm_unmap(gfx_full);
+        gfx_screen.px = gfx_full = 0;
         gfx_win = 0;
         gfx_win_dead = 1; /* die Pipes sind zu: kein zweites Fenster */
         return;
