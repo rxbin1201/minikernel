@@ -3,8 +3,12 @@
 #include "ui.h"
 
 /* files [ordner]: Dateien verwalten (Fenster mit aenderbarer Groesse).
- *   Links die Orte (Platte /disk, System /, angesteckte Datentraeger), oben Zurueck/Vor/Hoch und Neuer Ordner,
- *   Umbenennen, Loeschen. Doppelklick oder Enter oeffnet: Ordner hier, Dateien im passenden Programm (der Desktop
+ *   Links die Seitenleiste: Schnellzugriff (Ordner der Platte), die Orte (Platte /disk, System /, angesteckte
+ *   Datentraeger) mit aufklappbaren Unterordnern, unten der belegte Speicher. Rechts Tabs (Strg+T, Strg+W,
+ *   Strg+Tab), die Menuezeile (Datei, Bearbeiten, Ansicht), Zurueck/Vor/Hoch, die Pfadleiste (jeder Teil anklickbar)
+ *   und die Suche (Strg+F: filtert den Ordner; im Schnellzugriff sucht sie auf der ganzen Platte).
+ *   Ohne Ordner beginnt es im Schnellzugriff: grosse Ordner der Platte und die zuletzt geaenderten Dateien.
+ *   Doppelklick oder Enter oeffnet: Ordner hier, Dateien im passenden Programm (der Desktop
  *   waehlt: Bilder in der Bildansicht, sonst der Texteditor). Ruecktaste: eine Ebene hoeher.
  *   Auswahl: Klick, Strg+Klick (dazu/weg), Shift+Klick (Bereich), Pfeile (mit Shift erweitern), Strg+A.
  *   Strg+C/X/V kopieren, ausschneiden, einfuegen (ueber die Zwischenablage, also auch zwischen zwei Fenstern),
@@ -29,6 +33,9 @@ static int  nback, nfwd;
 static char status[200];
 static s64  status_t;
 static s64  free_bytes = -1; /* freier Platz des Datentraegers (-1 = unbekannt), beim Laden bestimmt */
+static u64  total_bytes;      /* Groesse des Datentraegers (0 = unbekannt) */
+static char query[64];        /* Suche: filtert den Ordner bzw. sucht im Schnellzugriff auf der Platte */
+static int  search_focus, sort_mode; /* sort_mode: 0 Name, 1 Datum (neueste zuerst), 2 Groesse */
 
 static struct {
     char label[40], path[64];
@@ -43,16 +50,26 @@ static char field[256], dialog_msg[200];
 static int  flen;
 
 /* Kontextmenue */
-enum { M_OPEN = 1, M_RENAME, M_DUP, M_COPY, M_CUT, M_PASTE, M_DELETE, M_NEWFOLDER, M_NEWFILE };
+enum { M_OPEN = 1, M_RENAME, M_DUP, M_COPY, M_CUT, M_PASTE, M_DELETE, M_NEWFOLDER, M_NEWFILE, M_OPENTAB, M_NEWTAB,
+       M_CLOSETAB, M_SELALL, M_HOME, M_REFRESH, M_SORT_NAME, M_SORT_DATE, M_SORT_SIZE };
 static struct {
     const char *label, *keys;
-    int         action, enabled;
-} menu[10];
+    int         action, enabled, checked;
+} menu[16];
 static int nmenu, menu_x, menu_y, menu_hover = -1;
 
-/* Ziehen */
+/* Ziehen (drop_place: Knoten der Seitenleiste) */
 static int drag_pending, drag_active, drag_x, drag_y, press_x, press_y, drop_row = -1, drop_place = -1;
-static int hover_btn = -1;
+
+/* weiter unten */
+static void dir_title(const char *d, char *out, int max);
+static void home_enter(void);
+static void home_scan(int force);
+static void load_quick(void);
+static void build_side(void);
+static void tab_new(const char *d);
+static void tab_close_current(void);
+static int  contains_ci(const char *s, const char *q);
 
 /* ---------------------------------------------------------------------------------------------------------------------
  * Hilfen
@@ -298,10 +315,14 @@ static void load_places(void)
     }
 }
 
-static int cmp_ent(const Ent *a, const Ent *b) /* Ordner zuerst, dann nach Namen */
+static int cmp_ent(const Ent *a, const Ent *b) /* Ordner zuerst, dann nach sort_mode, sonst nach Namen */
 {
     if (a->is_dir != b->is_dir)
         return b->is_dir - a->is_dir;
+    if (sort_mode == 1 && a->mtime != b->mtime)
+        return a->mtime > b->mtime ? -1 : 1;
+    if (sort_mode == 2 && a->size != b->size)
+        return a->size > b->size ? -1 : 1;
     return strcasecmp(a->name, b->name);
 }
 
@@ -326,6 +347,8 @@ static void load(int keep)
     Ent *e = u_malloc(sizeof(Ent) * (u64)cap);
     DirEnt de;
     for (u64 i = 0; sys_readdir(dir, i, &de) == 0; i++) {
+        if (query[0] && !contains_ci(de.name, query))
+            continue;
         if (nent == cap) {
             Ent *ne = u_malloc(sizeof(Ent) * (u64)cap * 2);
             memcpy(ne, e, sizeof(Ent) * (u64)nent);
@@ -351,7 +374,9 @@ static void load(int keep)
     }
     ents = e;
     u64 fsz[2];
-    free_bytes = sys_statfs(dir, fsz) == 0 ? (s64)fsz[1] : -1;
+    int sok = sys_statfs(dir, fsz) == 0;
+    free_bytes = sok ? (s64)fsz[1] : -1;
+    total_bytes = sok ? fsz[0] : 0;
     cur = anchor = -1;
     for (int i = 0; i < nent; i++) {
         for (int k = 0; k < ns; k++)
@@ -363,13 +388,16 @@ static void load(int keep)
     u_free(selnames);
     if (!keep)
         scroll = 0;
-    gfx_set_title(strcmp(dir, "/") == 0 ? "System" : strcmp(dir, "/disk") == 0 ? "Platte" : base_of(dir));
+    char title[64];
+    dir_title(dir, title, sizeof(title));
+    gfx_set_title(title);
 }
 
+/* p "" = Schnellzugriff */
 static void go(const char *p, int remember)
 {
     Stat st;
-    if (sys_stat(p, &st) != 0 || !st.is_dir) {
+    if (p[0] && (sys_stat(p, &st) != 0 || !st.is_dir)) {
         say("Nicht gefunden: %s", p);
         return;
     }
@@ -383,7 +411,12 @@ static void go(const char *p, int remember)
     }
     snprintf(dir, sizeof(dir), "%s", p);
     status[0] = 0;
-    load(0);
+    query[0] = 0;
+    search_focus = 0;
+    if (dir[0])
+        load(0);
+    else
+        home_enter();
 }
 
 static void go_back(void)
@@ -408,7 +441,7 @@ static void go_forward(void)
 
 static void go_up(void)
 {
-    if (strcmp(dir, "/") == 0)
+    if (!dir[0] || strcmp(dir, "/") == 0)
         return;
     char p[256], from[256];
     snprintf(from, sizeof(from), "%s", base_of(dir));
@@ -701,6 +734,10 @@ static void dialog_ok(void)
 
 static void action(int a)
 {
+    if (!dir[0] && (a == M_NEWFOLDER || a == M_NEWFILE || a == M_PASTE)) {
+        say("%s", "Im Schnellzugriff geht das nicht \xE2\x80\x93 erst einen Ordner \xC3\xB6" "ffnen");
+        return;
+    }
     switch (a) {
     case M_OPEN:
         for (int i = 0; i < nent; i++)
@@ -718,15 +755,57 @@ static void action(int a)
     case M_DELETE: if (nsel()) open_dialog(D_DELETE); break;
     case M_NEWFOLDER: open_dialog(D_NEWFOLDER); break;
     case M_NEWFILE: new_textfile(); break;
+    case M_OPENTAB:
+        if (cur >= 0 && cur < nent && ents[cur].is_dir) {
+            char p[512];
+            if (!join(p, sizeof(p), dir, ents[cur].name))
+                tab_new(p);
+        }
+        break;
+    case M_NEWTAB: tab_new(""); break;
+    case M_CLOSETAB: tab_close_current(); break;
+    case M_SELALL:
+        for (int i = 0; i < nent; i++)
+            ents[i].sel = 1;
+        break;
+    case M_HOME: if (dir[0]) go("", 1); break;
+    case M_REFRESH:
+        load_places();
+        load_quick();
+        build_side();
+        if (dir[0])
+            load(1);
+        else
+            home_scan(1);
+        say("%s", "Aktualisiert");
+        break;
+    case M_SORT_NAME:
+    case M_SORT_DATE:
+    case M_SORT_SIZE:
+        sort_mode = a - M_SORT_NAME;
+        if (dir[0])
+            load(1);
+        break;
     }
 }
 
 /* ---------------------------------------------------------------------------------------------------------------------
- * Aussehen
+ * Aussehen: links die Seitenleiste (Baum, Speicher), rechts Tabs, Menuezeile, Navigation und der Inhalt
+ * (Schnellzugriff oder Ordnerliste), unten die Statuszeile
  * ------------------------------------------------------------------------------------------------------------------- */
 
-static int tb_h(void) { return U(44); }
-static int side_w(void) { return U(170); }
+#define C_SIDE    0xEEF1F7
+#define C_SIDE_HL 0xDCE4F4
+#define C_STRIP   0xE6EAF2
+#define C_FIELD   0xF0F2F7
+#define C_HOME_BG 0xF8F9FC
+
+static int side_w(void) { int w = U(220); return w > gfx_screen.w / 3 ? gfx_screen.w / 3 : w; }
+static int tabs_h(void) { return U(38); }
+static int mrow_h(void) { return U(30); }
+static int nav_h(void) { return U(46); }
+static int nav_y(void) { return tabs_h() + mrow_h(); }
+static int tb_h(void) { return tabs_h() + mrow_h() + nav_h(); } /* ganzer Kopfbereich */
 static int head_h(void) { return U(26); }
 static int foot_h(void) { return U(24); }
 static int list_y(void) { return tb_h() + head_h(); }
@@ -734,66 +813,36 @@ static int list_h(void) { return gfx_screen.h - list_y() - foot_h(); }
 static int visible(void) { int v = list_h() / ROW_H; return v < 1 ? 1 : v; }
 static int col_date(void) { return gfx_screen.w - U(250); }
 static int col_size(void) { return gfx_screen.w - U(92); }
+static int show_date(void) { return col_date() > side_w() + U(200); }
 
-/* Werkzeugleiste: 0 zurueck, 1 vor, 2 hoch, dann rechts 3 neuer Ordner, 4 umbenennen, 5 loeschen */
-static const char *const tb_label[6] = {"\xE2\x86\x90", "\xE2\x86\x92", "\xE2\x86\x91", "Neuer Ordner", "Umbenennen", "L\xC3\xB6schen"};
+/* Klickbare Flaechen: beim Zeichnen gesammelt, beim naechsten Ereignis abgefragt */
+enum { H_NONE, H_TAB, H_TABX, H_TABNEW, H_MENU, H_BACK, H_FWD, H_UP, H_CRUMB, H_REFRESH, H_SEARCH, H_SIDE, H_SIDECHEV,
+       H_TILE, H_RECENT, H_COL };
+typedef struct {
+    int kind, idx, x, y, w, h;
+} Hit;
+static Hit hits[200];
+static int nhits, hov_kind, hov_idx = -1, hover_row = -1;
 
-static void tb_rect(int i, int *x, int *y, int *w, int *h)
+static void hit_add(int kind, int idx, int x, int y, int w, int h)
 {
-    *y = U(8);
-    *h = tb_h() - U(16);
-    if (i < 3) {
-        *w = U(30);
-        *x = U(12) + i * (U(30) + U(4));
-        return;
-    }
-    int right = gfx_screen.w - U(12);
-    for (int k = 5; k >= i; k--) {
-        *w = text_width(font_ui, FS, tb_label[k]) + U(22);
-        right -= *w;
-        *x = right;
-        right -= U(6);
-    }
+    if (nhits < (int)(sizeof(hits) / sizeof(hits[0])))
+        hits[nhits++] = (Hit){kind, idx, x, y, w, h};
 }
 
-static int tb_enabled(int i)
+static const Hit *hit_at(int px, int py)
 {
-    switch (i) {
-    case 0: return nback > 0;
-    case 1: return nfwd > 0;
-    case 2: return strcmp(dir, "/") != 0;
-    case 4: return nsel() == 1;
-    case 5: return nsel() > 0;
-    default: return 1;
-    }
+    for (int i = nhits - 1; i >= 0; i--)
+        if (px >= hits[i].x && px < hits[i].x + hits[i].w && py >= hits[i].y && py < hits[i].y + hits[i].h)
+            return &hits[i];
+    return 0;
 }
 
-static int tb_at(int px, int py)
-{
-    for (int i = 0; i < 6; i++) {
-        int x, y, w, h;
-        tb_rect(i, &x, &y, &w, &h);
-        if (px >= x && px < x + w && py >= y && py < y + h)
-            return i;
-    }
-    return -1;
-}
-
-static int place_y(int i) { return tb_h() + U(34) + i * U(28); }
-
-static int place_at(int px, int py)
-{
-    if (px >= side_w())
-        return -1;
-    for (int i = 0; i < nplaces; i++)
-        if (py >= place_y(i) && py < place_y(i) + U(26))
-            return i;
-    return -1;
-}
+static int hovered(int kind, int idx) { return hov_kind == kind && hov_idx == idx; }
 
 static int row_at(int px, int py)
 {
-    if (px < side_w() || py < list_y() || py >= list_y() + list_h())
+    if (!dir[0] || px < side_w() || py < list_y() || py >= list_y() + list_h())
         return -2; /* nicht in der Liste */
     int i = scroll + (py - list_y()) / ROW_H;
     return i < nent ? i : -1; /* -1: leere Flaeche */
@@ -805,13 +854,29 @@ static int current_place(void) /* der Ort, in dem man gerade ist (laengster pass
     size_t bl = 0;
     for (int i = 0; i < nplaces; i++) {
         size_t l = strlen(places[i].path);
-        if (inside(dir, places[i].path) && (best < 0 || l > bl)) {
+        if (dir[0] && inside(dir, places[i].path) && (best < 0 || l > bl)) {
             best = i;
             bl = l;
         }
     }
     return best;
 }
+
+static void dir_title(const char *d, char *out, int max)
+{
+    if (!d[0]) {
+        snprintf(out, max, "Schnellzugriff");
+        return;
+    }
+    for (int i = 0; i < nplaces; i++)
+        if (strcmp(d, places[i].path) == 0) {
+            snprintf(out, max, "%s", places[i].label);
+            return;
+        }
+    snprintf(out, max, "%s", base_of(d));
+}
+
+/* ---------- kleine Symbole (aus Linien, die Schrift hat nicht alle Zeichen) ---------- */
 
 static void place_icon(Surface *s, int kind, int x, int y, int sz)
 {
@@ -824,9 +889,428 @@ static void place_icon(Surface *s, int kind, int x, int y, int sz)
     gfx_disc(s, x + sz * 0.78f, y + sz * 0.5f, sz * 0.07f, 0xFFFFFF, 255);
 }
 
+static void star_icon(Surface *s, float cx, float cy, float r, u32 c)
+{
+    for (int i = 0; i < 5; i++) { /* fuenf Zacken von der Mitte aus */
+        float a = -1.5707963f + 6.2831853f * i / 5;
+        float tx = cx + ui_sin(a + 1.5707963f) * r, ty = cy + ui_sin(a) * r;
+        gfx_capsule(s, cx, cy, tx, ty, r * 0.42f, c, 255);
+    }
+    gfx_disc(s, cx, cy, r * 0.5f, c, 255);
+}
+
+static void chevron(Surface *s, float cx, float cy, float k, int dir_, u32 c) /* 0 rechts, 1 unten, 2 links, 3 oben */
+{
+    float dx[4] = {1, 0, -1, 0}, dy[4] = {0, 1, 0, -1};
+    float ax = dx[dir_] * 2.5f * k, ay = dy[dir_] * 2.5f * k, px = -dy[dir_] * 4 * k, py = dx[dir_] * 4 * k;
+    gfx_capsule(s, cx - ax + px, cy - ay + py, cx + ax, cy + ay, 1.6f * k, c, 255);
+    gfx_capsule(s, cx - ax - px, cy - ay - py, cx + ax, cy + ay, 1.6f * k, c, 255);
+}
+
+static void arrow_icon(Surface *s, float cx, float cy, float k, int dir_, u32 c) /* Pfeil: 0 rechts, 2 links, 3 oben */
+{
+    float dx[4] = {1, 0, -1, 0}, dy[4] = {0, 1, 0, -1};
+    float ex = cx + dx[dir_] * 7 * k, ey = cy + dy[dir_] * 7 * k;
+    gfx_capsule(s, cx - dx[dir_] * 7 * k, cy - dy[dir_] * 7 * k, ex, ey, 1.8f * k, c, 255);
+    float px = -dy[dir_] * 5 * k, py = dx[dir_] * 5 * k, bx = ex - dx[dir_] * 5 * k, by = ey - dy[dir_] * 5 * k;
+    gfx_capsule(s, bx + px, by + py, ex, ey, 1.8f * k, c, 255);
+    gfx_capsule(s, bx - px, by - py, ex, ey, 1.8f * k, c, 255);
+}
+
+static void search_icon(Surface *s, float cx, float cy, float k, u32 c)
+{
+    const int n = 18;
+    float r = 4.5f * k, ox = cx - 1.5f * k, oy = cy - 1.5f * k;
+    for (int i = 0; i < n; i++) {
+        float a0 = 6.2831853f * i / n, a1 = 6.2831853f * (i + 1) / n;
+        gfx_capsule(s, ox + ui_sin(a0 + 1.5707963f) * r, oy + ui_sin(a0) * r, ox + ui_sin(a1 + 1.5707963f) * r,
+                    oy + ui_sin(a1) * r, 1.6f * k, c, 255);
+    }
+    gfx_capsule(s, cx + 2 * k, cy + 2 * k, cx + 5.5f * k, cy + 5.5f * k, 2 * k, c, 255);
+}
+
+static void refresh_icon(Surface *s, float cx, float cy, float k, u32 c)
+{
+    const int n = 14;
+    float r = 5.5f * k;
+    for (int i = 0; i < n; i++) { /* Kreis mit Luecke oben rechts */
+        float a0 = 0.5f + 5.2f * i / n, a1 = 0.5f + 5.2f * (i + 1) / n;
+        gfx_capsule(s, cx + ui_sin(a0 + 1.5707963f) * r, cy - ui_sin(a0) * r, cx + ui_sin(a1 + 1.5707963f) * r,
+                    cy - ui_sin(a1) * r, 1.6f * k, c, 255);
+    }
+    float ex = cx + ui_sin(0.5f + 1.5707963f) * r, ey = cy - ui_sin(0.5f) * r; /* Pfeilspitze am Anfang */
+    gfx_capsule(s, ex, ey, ex - 3.5f * k, ey - 1 * k, 1.6f * k, c, 255);
+    gfx_capsule(s, ex, ey, ex + 0.5f * k, ey - 3.8f * k, 1.6f * k, c, 255);
+}
+
+static void plus_icon(Surface *s, float cx, float cy, float k, u32 c)
+{
+    gfx_capsule(s, cx - 6 * k, cy, cx + 6 * k, cy, 1.7f * k, c, 255);
+    gfx_capsule(s, cx, cy - 6 * k, cx, cy + 6 * k, 1.7f * k, c, 255);
+}
+
+static void close_icon(Surface *s, float cx, float cy, float k, u32 c)
+{
+    gfx_capsule(s, cx - 3.5f * k, cy - 3.5f * k, cx + 3.5f * k, cy + 3.5f * k, 1.4f * k, c, 255);
+    gfx_capsule(s, cx - 3.5f * k, cy + 3.5f * k, cx + 3.5f * k, cy - 3.5f * k, 1.4f * k, c, 255);
+}
+
+static void check_icon(Surface *s, float cx, float cy, float k, u32 c)
+{
+    gfx_capsule(s, cx - 4 * k, cy, cx - 1 * k, cy + 3 * k, 1.7f * k, c, 255);
+    gfx_capsule(s, cx - 1 * k, cy + 3 * k, cx + 5 * k, cy - 4 * k, 1.7f * k, c, 255);
+}
+
+static u32 file_accent(const char *name)
+{
+    return ends_with(name, ".bmp") ? 0x34C759 : ends_with(name, ".sh") ? 0x0A84FF :
+           ends_with(name, ".wav") || ends_with(name, ".mp3") ? 0xFF2D55 : ends_with(name, ".txt") ? 0xFFCC00 : 0;
+}
+
+static void entry_icon(Surface *s, const char *name, int is_dir, int x, int y, int sz)
+{
+    if (is_dir)
+        ui_folder_icon(s, x, y, sz);
+    else
+        ui_doc_icon(s, x, y, sz, file_accent(name));
+}
+
+/* Grosser Ordner mit Zeichen nach dem Namen (Musik, Bilder, Downloads, Dokumente) */
+static void big_folder(Surface *s, const char *name, int x, int y, int sz)
+{
+    ui_folder_icon(s, x, y, sz);
+    char l[64];
+    int n = 0;
+    for (; name[n] && n < 63; n++)
+        l[n] = (char)((name[n] >= 'A' && name[n] <= 'Z') ? name[n] + 32 : name[n]);
+    l[n] = 0;
+    int e = sz * 2 / 5, ex = x + sz - e - sz / 10, ey = y + sz * 9 / 10 - e - sz / 14;
+    float k = sz / 70.0f;
+    if (strstr(l, "musik") || strstr(l, "music") || strstr(l, "mp3"))
+        ui_app_icon(s, ICON_MUSIC, ex, ey, e);
+    else if (strstr(l, "bild") || strstr(l, "foto") || strstr(l, "pic") || strstr(l, "image"))
+        ui_app_icon(s, ICON_IMAGE, ex, ey, e);
+    else if (strstr(l, "download")) {
+        float cx = ex + e * 0.5f, cy = ey + e * 0.45f;
+        gfx_capsule(s, cx, cy - 9 * k, cx, cy + 7 * k, 4.5f * k, 0x0A64D6, 255);
+        gfx_capsule(s, cx - 8 * k, cy, cx, cy + 9 * k, 4.5f * k, 0x0A64D6, 255);
+        gfx_capsule(s, cx + 8 * k, cy, cx, cy + 9 * k, 4.5f * k, 0x0A64D6, 255);
+    } else if (strstr(l, "dokument") || strstr(l, "doc") || strstr(l, "text"))
+        ui_doc_icon(s, ex, ey, e, 0);
+}
+
+/* ---------- Seitenleiste: Schnellzugriff (Ordner der Platte), Orte mit aufklappbaren Unterordnern ---------- */
+
+typedef struct {
+    char label[48], path[256];
+    int  depth, icon, place, open; /* icon: 0 Stern, 1 Ordner, 2.. Ort (2 + Art); place: Index in places oder -1 */
+} Node;
+static Node nodes[64];
+static int  nnodes, qa_open = 1, place_open[MAXPLACES];
+
+/* Ordner der Platte (fuer Schnellzugriff und die grossen Ordner) */
+static char quick[8][256];
+static int  nquick;
+
+static void load_quick(void)
+{
+    nquick = 0;
+    DirEnt de;
+    for (u64 i = 0; nquick < 8 && sys_readdir("/disk", i, &de) == 0; i++)
+        if (de.is_dir && de.name[0] != '.')
+            join(quick[nquick++], 256, "/disk", de.name);
+}
+
+static void node_add(const char *label, const char *path, int depth, int icon, int place, int open)
+{
+    if (nnodes == (int)(sizeof(nodes) / sizeof(nodes[0])))
+        return;
+    Node *n = &nodes[nnodes++];
+    snprintf(n->label, sizeof(n->label), "%s", label);
+    snprintf(n->path, sizeof(n->path), "%s", path);
+    n->depth = depth;
+    n->icon = icon;
+    n->place = place;
+    n->open = open;
+}
+
+static void build_side(void)
+{
+    nnodes = 0;
+    node_add("Schnellzugriff", "", 0, 0, -1, qa_open);
+    if (qa_open)
+        for (int i = 0; i < nquick; i++)
+            node_add(base_of(quick[i]), quick[i], 1, 1, -1, 0);
+    for (int p = 0; p < nplaces; p++) {
+        node_add(places[p].label, places[p].path, 0, 2 + places[p].kind, p, place_open[p]);
+        if (!place_open[p])
+            continue;
+        DirEnt de;
+        int n = 0;
+        for (u64 i = 0; n < 12 && sys_readdir(places[p].path, i, &de) == 0; i++)
+            if (de.is_dir && de.name[0] != '.') {
+                char full[256];
+                join(full, sizeof(full), places[p].path, de.name);
+                node_add(de.name, full, 1, 1, -1, 0);
+                n++;
+            }
+    }
+}
+
+static int side_selected(void) /* Knoten des aktuellen Ordners: genau, sonst der Ort darum */
+{
+    for (int i = 0; i < nnodes; i++)
+        if (strcmp(nodes[i].path, dir) == 0)
+            return i;
+    int cp = current_place();
+    for (int i = 0; i < nnodes; i++)
+        if (nodes[i].place == cp && cp >= 0)
+            return i;
+    return -1;
+}
+
+/* ---------- Schnellzugriff: alles unter /disk einmal durchsehen (fuer "Zuletzt geaendert" und die Suche) ---------- */
+
+typedef struct {
+    char path[256];
+    u64  mtime, size;
+    int  is_dir;
+} Found;
+#define MAXFOUND 800
+static Found *found;
+static int    nfound, recent[12], nrecent, results[40], nresults;
+static s64    scanned_us;
+
+static void scan(const char *d, int depth)
+{
+    DirEnt de;
+    for (u64 i = 0; nfound < MAXFOUND && sys_readdir(d, i, &de) == 0; i++) {
+        if (de.name[0] == '.')
+            continue;
+        Found *f = &found[nfound];
+        if (join(f->path, sizeof(f->path), d, de.name))
+            continue;
+        f->mtime = de.mtime;
+        f->size = de.size;
+        f->is_dir = (int)de.is_dir;
+        nfound++;
+        if (de.is_dir && depth < 3) {
+            char sub[256];
+            snprintf(sub, sizeof(sub), "%s", f->path);
+            scan(sub, depth + 1);
+        }
+    }
+}
+
+static int contains_ci(const char *s, const char *q)
+{
+    int n = (int)strlen(q);
+    for (; *s; s++) {
+        int i = 0;
+        while (i < n && ((s[i] | 0x20) == (q[i] | 0x20) || s[i] == q[i]))
+            i++;
+        if (i == n)
+            return 1;
+    }
+    return n == 0;
+}
+
+static void home_search(void)
+{
+    nresults = 0;
+    for (int i = 0; i < nfound && nresults < 40; i++)
+        if (contains_ci(base_of(found[i].path), query))
+            results[nresults++] = i;
+}
+
+static void home_scan(int force)
+{
+    if (!force && found && sys_time_us() - scanned_us < 10000000)
+        return;
+    if (!found)
+        found = u_malloc(sizeof(Found) * MAXFOUND);
+    nfound = 0;
+    if (exists("/disk"))
+        scan("/disk", 0);
+    scanned_us = sys_time_us();
+    nrecent = 0; /* die zuletzt geaenderten Dateien, neueste zuerst */
+    for (int i = 0; i < nfound; i++) {
+        if (found[i].is_dir || !found[i].mtime)
+            continue;
+        int pos = nrecent;
+        while (pos > 0 && found[recent[pos - 1]].mtime < found[i].mtime)
+            pos--;
+        if (pos >= 12)
+            continue;
+        if (nrecent < 12)
+            nrecent++;
+        for (int k = nrecent - 1; k > pos; k--)
+            recent[k] = recent[k - 1];
+        recent[pos] = i;
+    }
+    home_search();
+}
+
+static void home_enter(void)
+{
+    u_free(ents);
+    ents = 0;
+    nent = 0;
+    scroll = 0;
+    cur = anchor = -1;
+    home_scan(0);
+    u64 fsz[2];
+    total_bytes = sys_statfs("/disk", fsz) == 0 ? fsz[0] : 0;
+    free_bytes = total_bytes ? (s64)fsz[1] : -1;
+    gfx_set_title("Schnellzugriff");
+}
+
+/* Ordner "Platte > Musik > Alben" */
+static void path_label(const char *p, char *out, int max)
+{
+    int best = -1;
+    size_t bl = 0;
+    for (int i = 0; i < nplaces; i++) {
+        size_t l = strlen(places[i].path);
+        if (inside(p, places[i].path) && (best < 0 || l > bl)) {
+            best = i;
+            bl = l;
+        }
+    }
+    const char *rest = best >= 0 ? p + bl : p;
+    int n = snprintf(out, max, "%s", best >= 0 ? places[best].label : "");
+    for (; *rest && n < max - 8; rest++) {
+        if (*rest == '/') {
+            if (rest[1])
+                n += snprintf(out + n, max - n, "  >  ");
+        } else {
+            out[n++] = *rest;
+            out[n] = 0;
+        }
+    }
+}
+
+static void when_str(u64 t, char *out, int max)
+{
+    out[0] = 0;
+    s64 now = sys_time();
+    if (!t || now <= 0)
+        return;
+    s64 d = now - (s64)t;
+    if (d >= 0 && d < 60) {
+        snprintf(out, max, "gerade eben");
+        return;
+    }
+    if (d >= 0 && d < 3600) {
+        snprintf(out, max, "vor %lld Min.", (long long)(d / 60));
+        return;
+    }
+    DateTime a, b, y;
+    time_to_date(t, &a);
+    time_to_date((u64)now, &b);
+    time_to_date((u64)(now - 86400), &y);
+    if (a.year == b.year && a.month == b.month && a.day == b.day)
+        snprintf(out, max, "Heute um %02d:%02d", a.hour, a.min);
+    else if (a.year == y.year && a.month == y.month && a.day == y.day)
+        snprintf(out, max, "Gestern um %02d:%02d", a.hour, a.min);
+    else
+        snprintf(out, max, "%02d.%02d.%04d", a.day, a.month, a.year);
+}
+
+/* ---------- Tabs ---------- */
+
+#define MAXTABS 8
+typedef struct {
+    char dir[256];
+    char back[MAXHIST][256], fwd[MAXHIST][256];
+    int  nback, nfwd, scroll;
+} Tab;
+static Tab *tabs[MAXTABS];
+static int  ntabs, cur_tab;
+
+static void tab_save(Tab *t)
+{
+    snprintf(t->dir, sizeof(t->dir), "%s", dir);
+    memcpy(t->back, back_hist, sizeof(back_hist));
+    memcpy(t->fwd, fwd_hist, sizeof(fwd_hist));
+    t->nback = nback;
+    t->nfwd = nfwd;
+    t->scroll = scroll;
+}
+
+static void tab_restore(const Tab *t)
+{
+    snprintf(dir, sizeof(dir), "%s", t->dir);
+    memcpy(back_hist, t->back, sizeof(back_hist));
+    memcpy(fwd_hist, t->fwd, sizeof(fwd_hist));
+    nback = t->nback;
+    nfwd = t->nfwd;
+    query[0] = 0;
+    search_focus = 0;
+    status[0] = 0;
+    if (!dir[0] || !exists(dir)) {
+        dir[0] = 0;
+        home_enter();
+        return;
+    }
+    load(0);
+    scroll = t->scroll;
+    if (scroll > nent - visible())
+        scroll = nent - visible();
+    if (scroll < 0)
+        scroll = 0;
+}
+
+static void tab_new(const char *d)
+{
+    if (ntabs == MAXTABS) {
+        say("H\xC3\xB6" "chstens %s Tabs", "8");
+        return;
+    }
+    if (ntabs)
+        tab_save(tabs[cur_tab]);
+    Tab *t = u_malloc(sizeof(Tab));
+    memset(t, 0, sizeof(*t));
+    snprintf(t->dir, sizeof(t->dir), "%s", d);
+    tabs[ntabs] = t;
+    cur_tab = ntabs++;
+    tab_restore(t);
+}
+
+static void tab_switch(int i)
+{
+    if (i < 0 || i >= ntabs || i == cur_tab)
+        return;
+    tab_save(tabs[cur_tab]);
+    cur_tab = i;
+    tab_restore(tabs[i]);
+}
+
+static void tab_close(int i)
+{
+    if (ntabs <= 1 || i < 0 || i >= ntabs)
+        return;
+    if (i != cur_tab)
+        tab_save(tabs[cur_tab]);
+    u_free(tabs[i]);
+    for (int k = i; k < ntabs - 1; k++)
+        tabs[k] = tabs[k + 1];
+    ntabs--;
+    if (cur_tab > i || cur_tab == ntabs)
+        cur_tab = cur_tab > 0 ? cur_tab - 1 : 0;
+    if (cur_tab >= ntabs)
+        cur_tab = ntabs - 1;
+    tab_restore(tabs[cur_tab]);
+}
+
+/* ---------- Menues (Kontextmenue und die Menuezeile teilen sich die Darstellung) ---------- */
+
+static const char *const mrow_label[3] = {"Datei", "Bearbeiten", "Ansicht"};
+static int dropdown; /* offenes Menue der Menuezeile + 1 */
+
 static void menu_size(int *w, int *h)
 {
-    *w = U(230);
+    *w = U(240);
     *h = U(10) + nmenu * U(24);
 }
 
@@ -888,56 +1372,360 @@ static void draw_dialog(Surface *s)
     }
 }
 
-static void draw(void)
+/* ---------- Zeichnen ---------- */
+
+static void draw_side(Surface *s, int H)
 {
-    Surface *s = &gfx_screen;
-    int W = s->w, H = s->h, sw = side_w(), ly = list_y(), lh = list_h();
-    gfx_fill(s, 0, 0, W, H, C_WINDOW);
+    int sw = side_w();
+    float k = (float)U(1);
+    gfx_fill(s, 0, 0, sw, H, C_SIDE);
+    gfx_fill(s, sw - 1, 0, 1, H, 0xDCE0E8);
+    ui_app_icon(s, ICON_FILES, U(14), (tabs_h() - U(22)) / 2 + U(2), U(22));
+    text_draw(s, font_bold, U(15), U(44), (tabs_h() - text_height(font_bold, U(15))) / 2 + U(2), "Dateien", C_TEXT);
 
-    /* Werkzeugleiste */
-    gfx_gradient(s, 0, 0, W, tb_h(), 0xF7F7F8, 0xEDEDF0);
-    gfx_fill(s, 0, tb_h() - 1, W, 1, 0xDDDDE0);
-    for (int i = 0; i < 6; i++) {
-        int x, y, w, h, en = tb_enabled(i);
-        tb_rect(i, &x, &y, &w, &h);
-        if (i >= 3 && x < U(220))
-            continue; /* zu schmal */
-        gfx_round_rect(s, x, y, w, h, U(6), i == hover_btn && en ? 0xDCDCE2 : 0xFFFFFF, 255);
-        gfx_round_frame(s, x, y, w, h, U(6), 0x000000, 28);
-        int fs = i < 3 ? U(16) : FS;
-        text_draw(s, font_ui, fs, x + (w - text_width(font_ui, fs, tb_label[i])) / 2, y + (h - text_height(font_ui, fs)) / 2,
-                  tb_label[i], en ? C_TEXT : 0xB8B8BE);
+    int card_h = U(78), bottom = H - card_h, rh = U(30), sel = side_selected();
+    gfx_set_clip(0, tabs_h() + U(8), sw, bottom - tabs_h() - U(8));
+    for (int i = 0; i < nnodes; i++) {
+        Node *n = &nodes[i];
+        int y = tabs_h() + U(10) + i * rh;
+        if (y + rh > bottom)
+            break;
+        int drop = i == drop_place;
+        if (drop)
+            gfx_round_rect(s, U(6), y, sw - U(12), rh - U(2), U(7), C_ACCENT, 255);
+        else if (i == sel)
+            gfx_round_rect(s, U(6), y, sw - U(12), rh - U(2), U(7), C_SIDE_HL, 255);
+        else if (hovered(H_SIDE, i) || hovered(H_SIDECHEV, i))
+            gfx_round_rect(s, U(6), y, sw - U(12), rh - U(2), U(7), 0xE4E8F1, 255);
+        int ix = U(14) + n->depth * U(22), isz = U(18), iy = y + (rh - U(2) - isz) / 2;
+        if (n->icon == 0)
+            star_icon(s, ix + isz * 0.5f, iy + isz * 0.5f, isz * 0.48f, 0x0A84FF);
+        else if (n->icon == 1)
+            ui_folder_icon(s, ix, iy, isz);
+        else
+            place_icon(s, n->icon - 2, ix, iy, isz);
+        Font *f = n->depth ? font_ui : font_bold;
+        int tx = ix + isz + U(10), chev = n->depth == 0;
+        gfx_set_clip(0, y, sw - (chev ? U(34) : U(10)), rh);
+        text_draw(s, f, FS, tx, y + (rh - U(2) - text_height(f, FS)) / 2, n->label, drop ? 0xFFFFFF : C_TEXT);
+        gfx_set_clip(0, tabs_h() + U(8), sw, bottom - tabs_h() - U(8));
+        hit_add(H_SIDE, i, U(6), y, sw - U(12), rh - U(2));
+        if (chev) {
+            chevron(s, sw - U(22), y + (rh - U(2)) * 0.5f, k, n->open ? 1 : 0, drop ? 0xFFFFFF : 0x6E6E73);
+            hit_add(H_SIDECHEV, i, sw - U(38), y, U(32), rh - U(2));
+        }
     }
-    int tx = U(12) + 3 * (U(30) + U(4)) + U(8);
-    const char *title = strcmp(dir, "/") == 0 ? "System" : strcmp(dir, "/disk") == 0 ? "Platte" : base_of(dir);
-    text_draw(s, font_bold, U(15), tx, (tb_h() - text_height(font_bold, U(15))) / 2, title, C_TEXT);
+    gfx_no_clip();
 
-    /* Orte */
-    gfx_fill(s, 0, tb_h(), sw, H - tb_h(), 0xF2F2F5);
-    gfx_fill(s, sw - 1, tb_h(), 1, H - tb_h(), 0xE0E0E4);
-    text_draw(s, font_bold, FS_SMALL, U(14), tb_h() + U(12), "Orte", 0x8E8E93);
-    int cp = current_place();
-    for (int i = 0; i < nplaces; i++) {
-        int py = place_y(i);
-        if (i == drop_place)
-            gfx_round_rect(s, U(6), py, sw - U(12), U(26), U(6), C_ACCENT, 255);
-        else if (i == cp)
-            gfx_round_rect(s, U(6), py, sw - U(12), U(26), U(6), 0xDCDCE2, 255);
-        place_icon(s, places[i].kind, U(14), py + U(5), U(16));
-        gfx_set_clip(0, py, sw - U(8), U(26));
-        text_draw(s, font_ui, FS, U(38), py + (U(26) - text_height(font_ui, FS)) / 2, places[i].label,
-                  i == drop_place ? 0xFFFFFF : C_TEXT);
+    /* Speicher des aktuellen Ortes */
+    gfx_fill(s, 0, bottom, sw - 1, card_h, 0xE8ECF3);
+    gfx_fill(s, 0, bottom, sw - 1, 1, 0xDCE0E8);
+    if (total_bytes) {
+        int cp = current_place();
+        char lab[64], a[24], b[24], t[80];
+        snprintf(lab, sizeof(lab), "%s", cp >= 0 ? places[cp].label : "Platte");
+        place_icon(s, cp >= 0 ? places[cp].kind : 0, U(14), bottom + U(13), U(18));
+        text_draw(s, font_bold, FS, U(42), bottom + U(14), lab, C_TEXT);
+        u64 used = free_bytes >= 0 && (u64)free_bytes <= total_bytes ? total_bytes - (u64)free_bytes : 0;
+        int bw = sw - U(30), fill = (int)((u64)bw * used / total_bytes);
+        gfx_round_rect(s, U(14), bottom + U(42), bw, U(5), U(2), 0xD3D8E3, 255);
+        if (fill > U(4))
+            gfx_round_rect(s, U(14), bottom + U(42), fill, U(5), U(2), C_ACCENT, 255);
+        fmt_size(used, a, sizeof(a));
+        fmt_size(total_bytes, b, sizeof(b));
+        snprintf(t, sizeof(t), "%s von %s belegt", a, b);
+        text_draw(s, font_ui, FS_SMALL, U(14), bottom + U(54), t, C_TEXT2);
+    }
+}
+
+static void draw_tabs(Surface *s, int W)
+{
+    int sw = side_w(), th = tabs_h(), x = sw + U(8);
+    float k = (float)U(1);
+    gfx_fill(s, sw, 0, W - sw, th, C_STRIP);
+    int avail = W - x - U(46), tw = ntabs ? avail / ntabs : avail;
+    if (tw > U(210))
+        tw = U(210);
+    for (int i = 0; i < ntabs; i++) {
+        int active = i == cur_tab, ty = U(6), h = th - ty;
+        char lab[64];
+        dir_title(active ? dir : tabs[i]->dir, lab, sizeof(lab));
+        if (active) {
+            gfx_round_rect(s, x, ty, tw, h, U(9), C_WINDOW, 255);
+            gfx_fill(s, x, ty + U(10), tw, h - U(10), C_WINDOW);
+        } else if (hovered(H_TAB, i) || hovered(H_TABX, i)) {
+            gfx_round_rect(s, x, ty, tw, h - U(4), U(9), 0xF2F4F9, 255);
+        }
+        int cy = ty + h / 2, isz = U(16);
+        if (!(active ? dir : tabs[i]->dir)[0])
+            star_icon(s, x + U(12) + isz * 0.5f, cy, isz * 0.48f, 0x0A84FF);
+        else
+            ui_folder_icon(s, x + U(12), cy - isz / 2, isz);
+        int show_x = ntabs > 1 && (active || hovered(H_TAB, i) || hovered(H_TABX, i));
+        gfx_set_clip(x, 0, tw - (show_x ? U(30) : U(8)), th);
+        text_draw(s, active ? font_bold : font_ui, FS, x + U(36), cy - text_height(font_ui, FS) / 2, lab, C_TEXT);
         gfx_no_clip();
+        hit_add(H_TAB, i, x, ty, tw, h);
+        if (show_x) {
+            int bx = x + tw - U(26);
+            if (hovered(H_TABX, i))
+                gfx_round_rect(s, bx, cy - U(10), U(20), U(20), U(5), 0x000000, 20);
+            close_icon(s, bx + U(10), cy, k, 0x6E6E73);
+            hit_add(H_TABX, i, bx, cy - U(10), U(20), U(20));
+        }
+        x += tw + U(2);
     }
+    int bx = x + U(4), by = U(6) + (th - U(6) - U(28)) / 2;
+    if (hovered(H_TABNEW, 0))
+        gfx_round_rect(s, bx, by, U(28), U(28), U(7), 0x000000, 18);
+    plus_icon(s, bx + U(14), by + U(14), k, C_TEXT);
+    hit_add(H_TABNEW, 0, bx, by, U(28), U(28));
+}
 
-    /* Kopfzeile der Liste */
-    gfx_fill(s, sw, tb_h(), W - sw, head_h(), 0xFAFAFA);
-    gfx_fill(s, sw, ly - 1, W - sw, 1, 0xE5E5E5);
+/* Pfade der Pfadleiste (beim Zeichnen gemerkt) */
+static char crumb_path[16][256];
+static void crumb_paths_set(int i, const char *p)
+{
+    if (i >= 0 && i < 16)
+        snprintf(crumb_path[i], 256, "%s", p);
+}
+
+static void draw_crumbs(Surface *s, int x, int y, int w, int h)
+{
+    char seg[16][64], segp[16][256];
+    int n = 0;
+    if (!dir[0]) {
+        snprintf(seg[0], 64, "Schnellzugriff");
+        segp[0][0] = 0;
+        n = 1;
+    } else {
+        int cp = current_place();
+        const char *root = cp >= 0 ? places[cp].path : "/";
+        snprintf(seg[0], 64, "%s", cp >= 0 ? places[cp].label : "System");
+        snprintf(segp[0], 256, "%s", root);
+        n = 1;
+        const char *r = dir + strlen(root);
+        char acc[256];
+        snprintf(acc, sizeof(acc), "%s", root);
+        while (*r && n < 16) {
+            while (*r == '/')
+                r++;
+            if (!*r)
+                break;
+            int l = 0;
+            char name[64];
+            while (r[l] && r[l] != '/' && l < 63) {
+                name[l] = r[l];
+                l++;
+            }
+            name[l] = 0;
+            r += l;
+            char next[256];
+            join(next, sizeof(next), acc, name);
+            snprintf(acc, sizeof(acc), "%s", next);
+            snprintf(seg[n], 64, "%s", name);
+            snprintf(segp[n], 256, "%s", acc);
+            n++;
+        }
+    }
+    float k = (float)U(1);
+    int cy = y + h / 2, isz = U(16), ix = x + U(12);
+    if (!dir[0])
+        star_icon(s, ix + isz * 0.5f, cy, isz * 0.48f, 0x0A84FF);
+    else {
+        int cp = current_place();
+        if (cp >= 0)
+            place_icon(s, places[cp].kind, ix, cy - isz / 2, isz);
+        else
+            ui_folder_icon(s, ix, cy - isz / 2, isz);
+    }
+    int sep = U(20), first = 0, tx = ix + isz + U(10), maxw = x + w - tx - U(36), total = 0;
+    for (int i = 0; i < n; i++)
+        total += text_width(font_ui, FS, seg[i]) + U(12) + sep;
+    while (first < n - 1 && total > maxw) { /* zu lang: vorne weglassen */
+        total -= text_width(font_ui, FS, seg[first]) + U(12) + sep;
+        first++;
+    }
+    gfx_set_clip(x, y, w - U(34), h);
+    for (int i = first; i < n; i++) {
+        int sw_ = text_width(font_ui, FS, seg[i]) + U(12);
+        if (hovered(H_CRUMB, i))
+            gfx_round_rect(s, tx, y + U(4), sw_, h - U(8), U(6), 0x000000, 16);
+        text_draw(s, i == n - 1 ? font_bold : font_ui, FS, tx + U(6), cy - text_height(font_ui, FS) / 2, seg[i], C_TEXT);
+        hit_add(H_CRUMB, i, tx, y, sw_, h);
+        crumb_paths_set(i, segp[i]);
+        tx += sw_;
+        chevron(s, tx + sep * 0.5f, cy, k * 0.85f, 0, 0x8E8E93);
+        tx += sep;
+        if (i == n - 1)
+            break;
+    }
+    gfx_no_clip();
+    int rx = x + w - U(30);
+    if (hovered(H_REFRESH, 0))
+        gfx_round_rect(s, rx, y + U(4), U(26), h - U(8), U(6), 0x000000, 16);
+    refresh_icon(s, rx + U(13), cy, k, C_TEXT);
+    hit_add(H_REFRESH, 0, rx, y, U(26), h);
+}
+
+static void draw_nav(Surface *s, int W)
+{
+    int sw = side_w(), y = tabs_h();
+    float k = (float)U(1);
+    /* Menuezeile */
+    gfx_fill(s, sw, y, W - sw, mrow_h(), C_WINDOW);
+    int x = sw + U(14);
+    for (int i = 0; i < 3; i++) {
+        int w = text_width(font_ui, FS, mrow_label[i]) + U(20);
+        if (dropdown == i + 1 || hovered(H_MENU, i))
+            gfx_round_rect(s, x, y + U(3), w, mrow_h() - U(6), U(6), dropdown == i + 1 ? 0xDFE5F2 : 0xEEF1F7, 255);
+        text_draw(s, font_ui, FS, x + U(10), y + (mrow_h() - text_height(font_ui, FS)) / 2, mrow_label[i], C_TEXT);
+        hit_add(H_MENU, i, x, y, w, mrow_h());
+        x += w + U(6);
+    }
+    /* Navigation */
+    y = nav_y();
+    int h = nav_h();
+    gfx_fill(s, sw, y, W - sw, h, C_WINDOW);
+    gfx_fill(s, sw, y + h - 1, W - sw, 1, 0xE6E8EE);
+    int bx = sw + U(10), bs = U(32), by = y + (h - bs) / 2;
+    int en[3] = {nback > 0, nfwd > 0, dir[0] && strcmp(dir, "/") != 0}, dirs[3] = {2, 0, 3}, kinds[3] = {H_BACK, H_FWD, H_UP};
+    for (int i = 0; i < 3; i++) {
+        if (en[i] && hovered(kinds[i], 0))
+            gfx_round_rect(s, bx, by, bs, bs, U(7), 0x000000, 16);
+        arrow_icon(s, bx + bs * 0.5f, by + bs * 0.5f, k, dirs[i], en[i] ? C_TEXT : 0xC4C4CA);
+        hit_add(kinds[i], 0, bx, by, bs, bs);
+        bx += bs + U(2);
+    }
+    int sfw = (W - sw) / 3 < U(240) ? (W - sw) / 3 : U(240), sfx = W - U(12) - sfw, fy = y + U(7), fh = h - U(14);
+    int ax = bx + U(8), aw = sfx - U(10) - ax;
+    gfx_round_rect(s, ax, fy, aw, fh, U(8), C_FIELD, 255);
+    draw_crumbs(s, ax, fy, aw, fh);
+    /* Suchfeld */
+    gfx_round_rect(s, sfx, fy, sfw, fh, U(8), search_focus ? C_WINDOW : C_FIELD, 255);
+    if (search_focus)
+        gfx_round_frame(s, sfx, fy, sfw, fh, U(8), C_ACCENT, 255);
+    int ty = fy + (fh - text_height(font_ui, FS)) / 2;
+    gfx_set_clip(sfx + U(8), fy, sfw - U(40), fh);
+    if (query[0])
+        text_draw(s, font_ui, FS, sfx + U(12), ty, query, C_TEXT);
+    else
+        text_draw(s, font_ui, FS, sfx + U(12), ty, dir[0] ? "In diesem Ordner suchen" : "Auf der Platte suchen", C_TEXT2);
+    if (search_focus)
+        gfx_fill(s, sfx + U(12) + (query[0] ? text_width(font_ui, FS, query) + 1 : 0), fy + U(7), 2, fh - U(14), C_ACCENT);
+    gfx_no_clip();
+    search_icon(s, sfx + sfw - U(18), fy + fh * 0.5f, k, C_TEXT2);
+    hit_add(H_SEARCH, 0, sfx, fy, sfw, fh);
+}
+
+static void recent_row(Surface *s, int idx, int kind, const Found *f, int x, int y, int w, int rh)
+{
+    if (hovered(kind, idx)) {
+        gfx_shadow(s, x, y + U(2), w, rh, U(8), U(12), 40);
+        gfx_round_rect(s, x, y, w, rh, U(8), C_WINDOW, 255);
+    }
+    const char *name = base_of(f->path);
+    int isz = U(30);
+    entry_icon(s, name, f->is_dir, x + U(14), y + (rh - isz) / 2, isz);
+    char where[300], parent[256], t[40];
+    parent_of(f->path, parent, sizeof(parent));
+    path_label(parent, where, sizeof(where));
+    when_str(f->mtime, t, sizeof(t));
+    int tw = text_width(font_ui, FS, t), right = x + w - U(16) - tw;
+    gfx_set_clip(x, y, right - x - U(12), rh);
+    text_draw(s, font_ui, FS, x + U(58), y + U(8), name, C_TEXT);
+    text_draw(s, font_ui, FS_SMALL, x + U(58), y + U(10) + text_height(font_ui, FS), where, C_TEXT2);
+    gfx_no_clip();
+    text_draw(s, font_ui, FS, right, y + (rh - text_height(font_ui, FS)) / 2, t, C_TEXT2);
+    hit_add(kind, idx, x, y, w, rh);
+}
+
+static void draw_home(Surface *s, int W, int H)
+{
+    int sw = side_w(), x = sw + U(26), y = tb_h() + U(16), w = W - sw - U(52), bottom = H - foot_h();
+    gfx_fill(s, sw, tb_h(), W - sw, bottom - tb_h(), C_HOME_BG);
+    gfx_set_clip(sw, tb_h(), W - sw, bottom - tb_h());
+    int rh = U(54);
+    if (query[0]) {
+        char t[120];
+        snprintf(t, sizeof(t), "Suchergebnisse f\xC3\xBCr \xE2\x80\x9E%s\xE2\x80\x9C", query);
+        text_draw(s, font_bold, U(15), x, y, t, C_TEXT);
+        y += U(32);
+        for (int i = 0; i < nresults && y + rh <= bottom; i++, y += rh + U(2))
+            recent_row(s, i, H_RECENT, &found[results[i]], x - U(10), y, w + U(20), rh);
+        if (!nresults)
+            text_draw(s, font_ui, FS, x, y + U(10), "Nichts gefunden", 0xAEAEB2);
+        gfx_no_clip();
+        return;
+    }
+    text_draw(s, font_bold, U(15), x, y, "H\xC3\xA4ufige Ordner", C_TEXT);
+    y += U(30);
+    int tw = U(138), th = U(128), per = w / tw;
+    if (per < 1)
+        per = 1;
+    /* Ordner der Platte, aufgefuellt mit den Orten */
+    int nt = 0;
+    for (int i = 0; i < nquick && nt < per; i++, nt++) {
+        int tx = x - U(10) + nt * tw;
+        if (hovered(H_TILE, nt))
+            gfx_round_rect(s, tx, y, tw - U(8), th, U(10), 0xE9EDF6, 255);
+        int isz = U(84);
+        big_folder(s, base_of(quick[i]), tx + (tw - U(8) - isz) / 2, y + U(6), isz);
+        const char *lab = base_of(quick[i]);
+        int lw = text_width(font_ui, FS, lab);
+        gfx_set_clip(tx + U(4), y, tw - U(16), th);
+        text_draw(s, font_ui, FS, tx + (tw - U(8) - (lw < tw - U(16) ? lw : tw - U(16))) / 2, y + th - U(28), lab, C_TEXT);
+        gfx_set_clip(sw, tb_h(), W - sw, bottom - tb_h());
+        hit_add(H_TILE, nt, tx, y, tw - U(8), th);
+    }
+    for (int p = 0; p < nplaces && nt < per && nt < 4; p++, nt++) {
+        int tx = x - U(10) + nt * tw;
+        if (hovered(H_TILE, nt))
+            gfx_round_rect(s, tx, y, tw - U(8), th, U(10), 0xE9EDF6, 255);
+        int isz = U(70);
+        place_icon(s, places[p].kind, tx + (tw - U(8) - isz) / 2, y + U(12), isz);
+        int lw = text_width(font_ui, FS, places[p].label);
+        text_draw(s, font_ui, FS, tx + (tw - U(8) - lw) / 2, y + th - U(28), places[p].label, C_TEXT);
+        hit_add(H_TILE, nt, tx, y, tw - U(8), th);
+    }
+    y += th + U(22);
+    text_draw(s, font_bold, U(15), x, y, "Zuletzt ge\xC3\xA4ndert", C_TEXT);
+    y += U(30);
+    for (int i = 0; i < nrecent && y + rh <= bottom; i++, y += rh + U(2))
+        recent_row(s, i, H_RECENT, &found[recent[i]], x - U(10), y, w + U(20), rh);
+    if (!nrecent)
+        text_draw(s, font_ui, FS, x, y + U(6), "Noch keine Dateien auf der Platte", 0xAEAEB2);
+    gfx_no_clip();
+}
+
+/* Ziel beim Klick auf eine grosse Kachel: zuerst die Ordner der Platte, dann die Orte */
+static const char *tile_path(int i)
+{
+    if (i < nquick)
+        return quick[i];
+    i -= nquick;
+    return i >= 0 && i < nplaces ? places[i].path : 0;
+}
+
+static void draw_list(Surface *s, int W)
+{
+    int sw = side_w(), ly = list_y(), lh = list_h();
+    float k = (float)U(1);
+    /* Kopfzeile: Klick sortiert */
+    gfx_fill(s, sw, tb_h(), W - sw, head_h(), 0xFAFAFC);
+    gfx_fill(s, sw, ly - 1, W - sw, 1, 0xE5E5EA);
     int hy = tb_h() + (head_h() - text_height(font_bold, FS_SMALL)) / 2;
-    text_draw(s, font_bold, FS_SMALL, sw + U(40), hy, "Name", C_TEXT2);
-    if (col_date() > sw + U(200))
-        text_draw(s, font_bold, FS_SMALL, col_date(), hy, "Ge\xC3\xA4ndert", C_TEXT2);
-    text_draw(s, font_bold, FS_SMALL, col_size(), hy, "Gr\xC3\xB6\xC3\x9F" "e", C_TEXT2);
+    int cx[3] = {sw + U(40), col_date(), col_size()};
+    const char *cl[3] = {"Name", "Ge\xC3\xA4ndert", "Gr\xC3\xB6\xC3\x9F" "e"};
+    for (int c = 0; c < 3; c++) {
+        if (c == 1 && !show_date())
+            continue;
+        int w = text_width(font_bold, FS_SMALL, cl[c]);
+        text_draw(s, font_bold, FS_SMALL, cx[c], hy, cl[c], sort_mode == c ? C_TEXT : C_TEXT2);
+        if (sort_mode == c)
+            chevron(s, cx[c] + w + U(8), tb_h() + head_h() * 0.5f, k * 0.7f, c == 0 ? 3 : 1, C_TEXT);
+        hit_add(H_COL, c, cx[c] - U(6), tb_h(), w + U(24), head_h());
+    }
 
     /* Eintraege */
     gfx_set_clip(sw, ly, W - sw, lh);
@@ -949,23 +1737,20 @@ static void draw(void)
             gfx_round_rect(s, sw + U(6), ry + 1, W - sw - U(12), ROW_H - 2, U(5), C_ACCENT, 255);
         else if (e->sel)
             gfx_round_rect(s, sw + U(6), ry + 1, W - sw - U(12), ROW_H - 2, U(5), focus && hl ? C_ACCENT : 0xDCDCE0, 255);
+        else if (idx == hover_row)
+            gfx_round_rect(s, sw + U(6), ry + 1, W - sw - U(12), ROW_H - 2, U(5), 0xEEF1F7, 255);
         else if (i % 2)
-            gfx_fill(s, sw, ry, W - sw, ROW_H, 0xF7F7F9);
+            gfx_fill(s, sw, ry, W - sw, ROW_H, 0xF8F8FA);
         int white = target || (e->sel && focus && hl);
         int isz = ROW_H - U(8), iy = ry + U(4);
-        if (e->is_dir)
-            ui_folder_icon(s, sw + U(14), iy, isz);
-        else
-            ui_doc_icon(s, sw + U(14), iy, isz, ends_with(e->name, ".bmp") ? 0x34C759 : ends_with(e->name, ".sh") ? 0x0A84FF :
-                        ends_with(e->name, ".wav") || ends_with(e->name, ".mp3") ? 0xFF2D55 :
-                        ends_with(e->name, ".txt") ? 0xFFCC00 : 0);
+        entry_icon(s, e->name, e->is_dir, sw + U(14), iy, isz);
         u32 tc = white ? 0xFFFFFF : C_TEXT, tc2 = white ? 0xEAF2FF : C_TEXT2;
         int ty = ry + (ROW_H - text_height(font_ui, FS)) / 2;
-        int name_end = (col_date() > sw + U(200) ? col_date() : col_size()) - U(10);
+        int name_end = (show_date() ? col_date() : col_size()) - U(10);
         gfx_set_clip(sw, ly, name_end - sw, lh);
         text_draw(s, font_ui, FS, sw + U(40), ty, e->name, tc);
         gfx_set_clip(sw, ly, W - sw, lh);
-        if (col_date() > sw + U(200) && e->mtime) {
+        if (show_date() && e->mtime) {
             DateTime dt;
             time_to_date(e->mtime, &dt);
             char d[32];
@@ -979,18 +1764,38 @@ static void draw(void)
             fmt_size(e->size, sz, sizeof(sz));
         text_draw(s, font_ui, FS, col_size(), ty, sz, tc2);
     }
-    if (!nent)
-        text_draw(s, font_ui, FS, sw + (W - sw - text_width(font_ui, FS, "Ordner ist leer")) / 2, ly + U(30), "Ordner ist leer", 0xAEAEB2);
+    if (!nent) {
+        const char *m = query[0] ? "Nichts gefunden" : "Ordner ist leer";
+        text_draw(s, font_ui, FS, sw + (W - sw - text_width(font_ui, FS, m)) / 2, ly + U(30), m, 0xAEAEB2);
+    }
     gfx_no_clip();
     ui_scrollbar(s, W, ly, lh, nent, visible(), scroll);
+}
+
+static void draw(void)
+{
+    Surface *s = &gfx_screen;
+    int W = s->w, H = s->h, sw = side_w();
+    nhits = 0;
+    gfx_fill(s, 0, 0, W, H, C_WINDOW);
+    draw_side(s, H);
+    draw_tabs(s, W);
+    draw_nav(s, W);
+    if (dir[0])
+        draw_list(s, W);
+    else
+        draw_home(s, W, H);
 
     /* Fusszeile */
     int fy = H - foot_h();
-    gfx_fill(s, sw, fy, W - sw, foot_h(), 0xFAFAFA);
-    gfx_fill(s, sw, fy, W - sw, 1, 0xE5E5E5);
+    gfx_fill(s, sw, fy, W - sw, foot_h(), 0xFAFAFC);
+    gfx_fill(s, sw, fy, W - sw, 1, 0xE5E5EA);
     char t[300];
     if (status[0] && sys_time_us() - status_t < 6000000) {
         snprintf(t, sizeof(t), "%s", status);
+    } else if (!dir[0]) {
+        snprintf(t, sizeof(t), query[0] ? "%d Treffer auf der Platte" : "%d Dateien und Ordner auf der Platte",
+                 query[0] ? nresults : nfound);
     } else {
         char free_s[32] = "";
         if (free_bytes >= 0) { /* beim Laden des Ordners bestimmt, nicht bei jedem Bild */
@@ -1001,6 +1806,8 @@ static void draw(void)
         int n = nsel();
         if (n)
             snprintf(t, sizeof(t), "%d von %d ausgew\xC3\xA4hlt%s", n, nent, free_s);
+        else if (query[0])
+            snprintf(t, sizeof(t), "%d %s f\xC3\xBCr \xE2\x80\x9E%s\xE2\x80\x9C%s", nent, "Treffer", query, free_s);
         else
             snprintf(t, sizeof(t), "%d %s%s", nent, nent == 1 ? "Objekt" : "Objekte", free_s);
     }
@@ -1024,9 +1831,10 @@ static void draw(void)
         text_draw(s, font_ui, FS, lx + U(30), lyy + (lh2 - text_height(font_ui, FS)) / 2, lab, C_TEXT);
     }
 
-    /* Kontextmenue */
+    /* Kontextmenue bzw. Menue der Menuezeile */
     if (nmenu) {
         int mw, mh;
+        float k = (float)U(1);
         menu_size(&mw, &mh);
         gfx_shadow(s, menu_x, menu_y + U(4), mw, mh, U(8), U(18), 60);
         gfx_round_rect(s, menu_x, menu_y, mw, mh, U(8), 0xF6F6F8, 250);
@@ -1042,7 +1850,9 @@ static void draw(void)
                 gfx_round_rect(s, menu_x + U(5), iy, mw - U(10), U(24), U(5), C_ACCENT, 255);
             u32 c = !menu[i].enabled ? 0xB8B8BE : hv ? 0xFFFFFF : C_TEXT;
             int ty = iy + (U(24) - text_height(font_ui, FS)) / 2;
-            text_draw(s, font_ui, FS, menu_x + U(14), ty, menu[i].label, c);
+            if (menu[i].checked)
+                check_icon(s, menu_x + U(16), iy + U(12), k * 0.9f, c);
+            text_draw(s, font_ui, FS, menu_x + U(30), ty, menu[i].label, c);
             if (menu[i].keys)
                 text_draw(s, font_ui, FS, menu_x + mw - U(14) - text_width(font_ui, FS, menu[i].keys), ty, menu[i].keys,
                           hv ? 0xFFFFFF : 0x8E8E93);
@@ -1082,19 +1892,38 @@ static void add_item(const char *label, const char *keys, int act, int en)
     menu[nmenu].label = label;
     menu[nmenu].keys = keys;
     menu[nmenu].action = act;
+    menu[nmenu].checked = 0;
     menu[nmenu++].enabled = en;
+}
+
+static void place_menu(int x, int y)
+{
+    int mw, mh;
+    menu_size(&mw, &mh);
+    menu_x = x + mw > gfx_screen.w ? gfx_screen.w - mw - 2 : x;
+    menu_y = y + mh > gfx_screen.h ? gfx_screen.h - mh - 2 : y;
+    if (menu_x < 0) menu_x = 0;
+    if (menu_y < 0) menu_y = 0;
+}
+
+static int can_paste_now(void)
+{
+    char *t;
+    int cut, ok = clip_paths(&t, &cut);
+    if (ok)
+        u_free(t);
+    return ok && dir[0];
 }
 
 static void open_menu(int x, int y, int on_item)
 {
     nmenu = 0;
     menu_hover = -1;
-    char *t;
-    int cut, can_paste = clip_paths(&t, &cut);
-    if (can_paste)
-        u_free(t);
+    dropdown = 0;
+    int can_paste = can_paste_now();
     if (on_item) {
         add_item("\xC3\x96" "ffnen", "Enter", M_OPEN, 1);
+        add_item("In neuem Tab \xC3\xB6" "ffnen", 0, M_OPENTAB, cur >= 0 && cur < nent && ents[cur].is_dir);
         add_item(0, 0, 0, 0);
         add_item("Umbenennen \xE2\x80\xA6", 0, M_RENAME, nsel() == 1);
         add_item("Duplizieren", "Strg+D", M_DUP, 1);
@@ -1109,12 +1938,47 @@ static void open_menu(int x, int y, int on_item)
         add_item(0, 0, 0, 0);
         add_item("Einf\xC3\xBCgen", "Strg+V", M_PASTE, can_paste);
     }
-    int mw, mh;
-    menu_size(&mw, &mh);
-    menu_x = x + mw > gfx_screen.w ? gfx_screen.w - mw - 2 : x;
-    menu_y = y + mh > gfx_screen.h ? gfx_screen.h - mh - 2 : y;
-    if (menu_x < 0) menu_x = 0;
-    if (menu_y < 0) menu_y = 0;
+    place_menu(x, y);
+}
+
+/* Menues der Menuezeile */
+static void open_dropdown(int i, int x)
+{
+    nmenu = 0;
+    menu_hover = -1;
+    int real = dir[0] != 0, n = nsel();
+    if (i == 0) {
+        add_item("Neuer Tab", "Strg+T", M_NEWTAB, ntabs < MAXTABS);
+        add_item("Neuer Ordner", "Strg+N", M_NEWFOLDER, real);
+        add_item("Neue Textdatei", 0, M_NEWFILE, real);
+        add_item(0, 0, 0, 0);
+        add_item("\xC3\x96" "ffnen", "Enter", M_OPEN, n > 0);
+        add_item(0, 0, 0, 0);
+        add_item("Tab schlie\xC3\x9F" "en", "Strg+W", M_CLOSETAB, ntabs > 1);
+    } else if (i == 1) {
+        add_item("Ausschneiden", "Strg+X", M_CUT, n > 0);
+        add_item("Kopieren", "Strg+C", M_COPY, n > 0);
+        add_item("Einf\xC3\xBCgen", "Strg+V", M_PASTE, can_paste_now());
+        add_item("Duplizieren", "Strg+D", M_DUP, n > 0);
+        add_item(0, 0, 0, 0);
+        add_item("Umbenennen \xE2\x80\xA6", 0, M_RENAME, n == 1);
+        add_item("L\xC3\xB6schen \xE2\x80\xA6", "Entf", M_DELETE, n > 0);
+        add_item(0, 0, 0, 0);
+        add_item("Alles ausw\xC3\xA4hlen", "Strg+A", M_SELALL, real && nent > 0);
+    } else {
+        add_item("Schnellzugriff", 0, M_HOME, 1);
+        menu[nmenu - 1].checked = !dir[0];
+        add_item("Aktualisieren", "Strg+R", M_REFRESH, 1);
+        add_item(0, 0, 0, 0);
+        add_item("Nach Name sortieren", 0, M_SORT_NAME, real);
+        menu[nmenu - 1].checked = sort_mode == 0;
+        add_item("Nach Datum sortieren", 0, M_SORT_DATE, real);
+        menu[nmenu - 1].checked = sort_mode == 1;
+        add_item("Nach Gr\xC3\xB6\xC3\x9F" "e sortieren", 0, M_SORT_SIZE, real);
+        menu[nmenu - 1].checked = sort_mode == 2;
+    }
+    dropdown = i + 1;
+    place_menu(x, tabs_h() + mrow_h() - U(2));
 }
 
 static int menu_at(int px, int py)
@@ -1156,10 +2020,73 @@ static void dialog_key(int k)
     }
 }
 
+static void apply_query(void)
+{
+    if (dir[0])
+        load(0);
+    else
+        home_search();
+}
+
+static void open_found(const Found *f)
+{
+    if (f->is_dir) {
+        go(f->path, 1);
+    } else if (gfx_desktop_open(f->path) == 0) {
+        say("%s wird ge\xC3\xB6" "ffnet", base_of(f->path));
+    } else {
+        say("%s kann ohne Desktop nicht ge\xC3\xB6" "ffnet werden", base_of(f->path));
+    }
+}
+
+/* Tasten im Suchfeld; 1 = verbraucht */
+static int search_key(int k)
+{
+    int len = (int)strlen(query);
+    if (k == 0x1B) {
+        query[0] = 0;
+        search_focus = 0;
+        apply_query();
+    } else if (k == '\n') {
+        search_focus = 0;
+        if (!dir[0] && nresults)
+            open_found(&found[results[0]]);
+    } else if (k == '\b' || k == 0x7F) {
+        while (len > 0 && (query[len - 1] & 0xC0) == 0x80)
+            len--;
+        if (len > 0)
+            len--;
+        query[len] = 0;
+        apply_query();
+    } else if (k >= 32 && k < 0xF5 && k != 0x7F && len < (int)sizeof(query) - 1) {
+        query[len] = (char)k;
+        query[len + 1] = 0;
+        apply_query();
+    } else if (KEY_BASE(k) == KEY_DOWN) {
+        search_focus = 0;
+        return 0; /* weiter in die Liste */
+    } else {
+        return 0;
+    }
+    return 1;
+}
+
 static void key(int k)
 {
     int base = KEY_BASE(k), shift = (k & KEY_MOD_SHIFT) != 0;
     if (k & KEY_MOD_ALT)
+        return;
+    if (base == '\t' && (k & KEY_MOD_CTRL)) { /* Strg+Tab: naechster Tab */
+        tab_switch((cur_tab + (shift ? ntabs - 1 : 1)) % ntabs);
+        return;
+    }
+    switch (k) { /* Strg+Buchstabe kommt als Steuerzeichen */
+    case 20: action(M_NEWTAB); return;    /* Strg+T */
+    case 23: action(M_CLOSETAB); return;  /* Strg+W */
+    case 6: search_focus = 1; return;     /* Strg+F */
+    case 18: action(M_REFRESH); return;   /* Strg+R */
+    }
+    if (search_focus && search_key(k))
         return;
     if ((base == KEY_UP || base == KEY_DOWN || base == KEY_HOME || base == KEY_END || base == KEY_PGUP || base == KEY_PGDN) &&
         nent) {
@@ -1188,12 +2115,12 @@ static void key(int k)
     case '\b':
     case 0x7F: go_up(); return;
     case KEY_DEL: action(M_DELETE); return;
-    case 1: for (int i = 0; i < nent; i++) ents[i].sel = 1; return; /* Strg+A */
-    case 3: clip_put(0); return;                                    /* Strg+C */
-    case 24: clip_put(1); return;                                   /* Strg+X */
-    case 22: paste(); return;                                       /* Strg+V */
-    case 4: if (nsel()) duplicate(); return;                        /* Strg+D */
-    case 14: open_dialog(D_NEWFOLDER); return;                      /* Strg+N */
+    case 1: action(M_SELALL); return;      /* Strg+A */
+    case 3: action(M_COPY); return;        /* Strg+C */
+    case 24: action(M_CUT); return;        /* Strg+X */
+    case 22: action(M_PASTE); return;      /* Strg+V */
+    case 4: if (nsel()) duplicate(); return; /* Strg+D */
+    case 14: action(M_NEWFOLDER); return;  /* Strg+N */
     }
     if (k > ' ' && k < 0x7F) { /* Tippen springt zum ersten passenden Namen */
         for (int i = 0; i < nent; i++) {
@@ -1207,27 +2134,75 @@ static void key(int k)
     }
 }
 
+static void side_click(int i, int chev)
+{
+    if (i < 0 || i >= nnodes)
+        return;
+    Node *n = &nodes[i];
+    if (chev) { /* auf- bzw. zuklappen */
+        if (n->place >= 0)
+            place_open[n->place] = !place_open[n->place];
+        else if (!n->path[0])
+            qa_open = !qa_open;
+        build_side();
+        return;
+    }
+    if (n->place >= 0 && !place_open[n->place]) { /* Ort anklicken klappt ihn auch auf */
+        place_open[n->place] = 1;
+        build_side();
+    }
+    char p[256];
+    snprintf(p, sizeof(p), "%s", n->path);
+    go(p, 1);
+}
+
 static void click(Event *e, s64 *last_click, int *last_i)
 {
-    if (e->y < tb_h()) {
-        int b = tb_at(e->x, e->y);
-        if (b < 0 || !tb_enabled(b))
+    const Hit *h = hit_at(e->x, e->y);
+    if (h && h->kind != H_SEARCH)
+        search_focus = 0;
+    if (h) {
+        switch (h->kind) {
+        case H_TAB: tab_switch(h->idx); return;
+        case H_TABX: tab_close(h->idx); return;
+        case H_TABNEW: action(M_NEWTAB); return;
+        case H_MENU: open_dropdown(h->idx, h->x); return;
+        case H_BACK: go_back(); return;
+        case H_FWD: go_forward(); return;
+        case H_UP: if (dir[0]) go_up(); return;
+        case H_CRUMB: {
+            char p[256];
+            snprintf(p, sizeof(p), "%s", crumb_path[h->idx]);
+            if (strcmp(p, dir) != 0)
+                go(p, 1);
             return;
-        switch (b) {
-        case 0: go_back(); break;
-        case 1: go_forward(); break;
-        case 2: go_up(); break;
-        case 3: open_dialog(D_NEWFOLDER); break;
-        case 4: open_dialog(D_RENAME); break;
-        case 5: open_dialog(D_DELETE); break;
         }
-        return;
+        case H_REFRESH: action(M_REFRESH); return;
+        case H_SEARCH: search_focus = 1; return;
+        case H_SIDE: side_click(h->idx, 0); return;
+        case H_SIDECHEV: side_click(h->idx, 1); return;
+        case H_TILE: {
+            const char *p = tile_path(h->idx);
+            if (p) {
+                char q[256];
+                snprintf(q, sizeof(q), "%s", p);
+                go(q, 1);
+            }
+            return;
+        }
+        case H_RECENT:
+            if (query[0] && h->idx < nresults)
+                open_found(&found[results[h->idx]]);
+            else if (!query[0] && h->idx < nrecent)
+                open_found(&found[recent[h->idx]]);
+            return;
+        case H_COL:
+            sort_mode = h->idx;
+            load(1);
+            return;
+        }
     }
-    int p = place_at(e->x, e->y);
-    if (p >= 0) {
-        go(places[p].path, 1);
-        return;
-    }
+    search_focus = 0;
     int i = row_at(e->x, e->y);
     if (i == -2)
         return;
@@ -1261,19 +2236,26 @@ static void click(Event *e, s64 *last_click, int *last_i)
     }
 }
 
+static int side_node_at(int px, int py)
+{
+    const Hit *h = hit_at(px, py);
+    return h && (h->kind == H_SIDE || h->kind == H_SIDECHEV) ? h->idx : -1;
+}
+
 void _start(int argc, char **argv)
 {
+    char start[256] = "";
     if (argc > 1)
-        snprintf(dir, sizeof(dir), "%s", argv[1]);
-    else if (!exists(dir))
-        snprintf(dir, sizeof(dir), "/");
+        snprintf(start, sizeof(start), "%s", argv[1]);
     ui_setup(0);
-    if (gfx_open_window_ex(U(800), U(500), "Dateien", GFX_RESIZABLE) != 0)
+    if (gfx_open_window_ex(U(980), U(640), "Dateien", GFX_RESIZABLE) != 0)
         sys_exit(1);
     if (!gfx_windowed())
         ui_setup(0);
     load_places();
-    load(0);
+    load_quick();
+    build_side();
+    tab_new(start);
     draw();
     s64 last_click = 0, last_refresh = sys_time_us();
     int last_i = -1;
@@ -1297,8 +2279,13 @@ void _start(int argc, char **argv)
                 focus = e.key;
                 if (focus && sys_time_us() - last_refresh > 1000000) { /* zurueck im Fenster: vielleicht hat sich etwas geaendert */
                     last_refresh = sys_time_us();
-                    load(1);
+                    if (dir[0])
+                        load(1);
+                    else
+                        home_scan(0);
                     load_places();
+                    load_quick();
+                    build_side();
                 }
             } else if (e.type == EV_RESIZE) {
                 keep_visible();
@@ -1317,7 +2304,7 @@ void _start(int argc, char **argv)
                         continue;
                     dialog_hover = b;
                 }
-            } else if (nmenu) { /* Kontextmenue offen */
+            } else if (nmenu) { /* Menue offen */
                 if (e.type == EV_MOVE) {
                     int h = menu_at(e.x, e.y);
                     if (h == menu_hover)
@@ -1326,11 +2313,19 @@ void _start(int argc, char **argv)
                 } else if (e.type == EV_DOWN) {
                     int h = menu_at(e.x, e.y);
                     int act = h >= 0 && menu[h].enabled ? menu[h].action : 0;
+                    int was = dropdown;
                     nmenu = 0;
-                    if (act)
+                    dropdown = 0;
+                    if (act) {
                         action(act);
+                    } else if (h == -2) { /* daneben: anderes Menue der Menuezeile gleich oeffnen */
+                        const Hit *hh = hit_at(e.x, e.y);
+                        if (hh && hh->kind == H_MENU && hh->idx + 1 != was)
+                            open_dropdown(hh->idx, hh->x);
+                    }
                 } else if (e.type == EV_KEY && e.key == 0x1B) {
                     nmenu = 0;
+                    dropdown = 0;
                 }
             } else if (e.type == EV_KEY) {
                 key(e.key);
@@ -1354,18 +2349,21 @@ void _start(int argc, char **argv)
                     drag_y = e.y;
                     int r = row_at(e.x, e.y);
                     drop_row = r >= 0 && ents[r].is_dir && !ents[r].sel ? r : -1;
-                    drop_place = place_at(e.x, e.y);
-                    if (drop_place >= 0 && strcmp(places[drop_place].path, dir) == 0)
+                    drop_place = side_node_at(e.x, e.y);
+                    if (drop_place >= 0 && (!nodes[drop_place].path[0] || strcmp(nodes[drop_place].path, dir) == 0))
                         drop_place = -1;
                     if (e.y < list_y() + ROW_H && scroll > 0) /* am Rand: mitscrollen */
                         scroll--;
                     else if (e.y > list_y() + list_h() - ROW_H && scroll + visible() < nent)
                         scroll++;
                 } else {
-                    int h = e.y < tb_h() ? tb_at(e.x, e.y) : -1;
-                    if (h == hover_btn)
+                    const Hit *h = hit_at(e.x, e.y);
+                    int hk = h ? h->kind : H_NONE, hi = h ? h->idx : -1, hr = row_at(e.x, e.y);
+                    if (hk == hov_kind && hi == hov_idx && hr == hover_row)
                         continue;
-                    hover_btn = h;
+                    hov_kind = hk;
+                    hov_idx = hi;
+                    hover_row = hr;
                 }
             } else if (e.type == EV_UP) {
                 if (drag_active) {
@@ -1373,7 +2371,7 @@ void _start(int argc, char **argv)
                     if (drop_row >= 0)
                         join(target, sizeof(target), dir, ents[drop_row].name);
                     else if (drop_place >= 0)
-                        snprintf(target, sizeof(target), "%s", places[drop_place].path);
+                        snprintf(target, sizeof(target), "%s", nodes[drop_place].path);
                     drag_active = 0;
                     drop_row = drop_place = -1;
                     if (target[0])
@@ -1394,4 +2392,9 @@ void _start(int argc, char **argv)
     }
     gfx_close();
     sys_exit(0);
+}
+
+static void tab_close_current(void)
+{
+    tab_close(cur_tab);
 }
