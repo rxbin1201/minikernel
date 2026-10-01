@@ -57,6 +57,7 @@ static void on_report(UsbDevice *d, const uint8_t *buf, uint32_t len)
     HidState *s = (HidState *)buf; /* der Bericht liegt am Anfang der Zustandsstruktur */
     if (len < 8)
         return;
+    keyboard_usb_mods(s->report[0]); /* fuer Strg/Shift + Mausklick */
     for (int i = 2; i < 8; i++) {
         uint8_t k = s->report[i];
         if (k < 4) /* 0 = nichts, 1..3 = Fehler/Ueberlauf */

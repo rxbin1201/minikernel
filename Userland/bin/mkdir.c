@@ -1,6 +1,6 @@
 #include "libc.h"
 
-/* mkdir pfad...: legt Verzeichnisse an (nur unter /disk, 8.3-Namen) */
+/* mkdir pfad...: legt Verzeichnisse an (auf beschreibbaren FAT-Datentraegern wie /disk, lange Namen gehen) */
 void _start(int argc, char **argv)
 {
     int rc = 0;

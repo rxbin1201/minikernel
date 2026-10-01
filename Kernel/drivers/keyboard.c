@@ -40,6 +40,22 @@ static volatile char     buf[BUF_SIZE];
 static volatile unsigned head, tail; /* head: Schreiber (IRQ), tail: Leser */
 
 static int shift, caps, ctrl, extended, lalt, ralt;
+static volatile uint8_t usb_mods; /* zuletzt gemeldetes HID-Modifier-Byte */
+
+void keyboard_usb_mods(unsigned char hid_mods)
+{
+    usb_mods = hid_mods;
+}
+
+int keyboard_mods(void)
+{
+    uint8_t u = usb_mods;
+    int m = 0;
+    if (shift || (u & 0x22)) m |= 1;
+    if (lalt || (u & 0x04)) m |= 2;
+    if (ctrl || (u & 0x11)) m |= 4;
+    return m;
+}
 
 static void put(char c)
 {

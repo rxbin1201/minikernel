@@ -79,6 +79,9 @@ typedef long long          s64;
 #define ERR_AGAIN     (-11)
 #define ERR_INTR      (-4)
 #define ERR_NOSYS     (-38)
+#define ERR_NOSPC     (-28)
+#define ERR_ROFS      (-30)
+#define ERR_NOTEMPTY  (-39)
 #define ERR_NETUNREACH  (-101)
 #define ERR_TIMEDOUT    (-110)
 #define ERR_HOSTUNREACH (-113)
@@ -144,6 +147,7 @@ typedef struct {
     unsigned events, attached, width, height;
     unsigned left_presses, right_presses; /* zaehlen jedes Druecken (kein Klick geht zwischen zwei Abfragen verloren) */
     int      press_x, press_y;            /* Position beim letzten Druecken der linken Taste */
+    unsigned kbd_mods;                    /* gedrueckte Umschalttasten: 1 Shift, 2 Alt, 4 Strg */
 } MouseInfo;
 
 typedef struct {

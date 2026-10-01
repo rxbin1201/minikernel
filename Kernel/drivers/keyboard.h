@@ -12,6 +12,10 @@ void keyboard_deliver(unsigned char c);
  * Bildschirm, kommen sie mit; sonst wie bisher (Shift + Bild hoch/runter blaettert in der Konsole). */
 void keyboard_deliver_mods(int mods, unsigned char k);
 
+/* Gerade gedrueckte Umschalttasten aller Tastaturen (1 Shift, 2 Alt, 4 Strg), z.B. fuer Strg+Klick */
+int keyboard_mods(void);
+void keyboard_usb_mods(unsigned char hid_mods); /* USB-Tastaturen melden ihren Stand (HID-Modifier-Byte) */
+
 /* Zwischenablage (console.h) als Eingabe einspeisen (Ctrl-V, rechte Maustaste). Ctrl-C bei markiertem Text kopiert. */
 void keyboard_paste(void);
 

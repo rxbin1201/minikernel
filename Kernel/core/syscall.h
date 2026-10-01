@@ -30,7 +30,7 @@
 #define SYS_DUP       23 /* (fd) -> neuer fd (kleinster freier) auf dasselbe Objekt */
 #define SYS_DUP2      24 /* (old, new) -> new; ein offener new wird vorher geschlossen */
 #define SYS_LSEEK     25 /* (fd, offset, whence 0/1/2) -> neue Position; nur bei Dateien */
-#define SYS_RENAME    26 /* (alt, neu): nur unter /disk, in derselben Ebene (bei Verzeichnissen) */
+#define SYS_RENAME    26 /* (alt, neu): umbenennen oder verschieben (Datei oder Ordner) auf demselben FAT-Datentraeger */
 #define SYS_STAT      27 /* (path, Stat*) */
 #define SYS_CHDIR     28 /* (path) */
 #define SYS_GETCWD    29 /* (buf, size) -> Laenge */
@@ -98,7 +98,7 @@ typedef struct {
     uint64_t flags;
 } MountInfo;
 
-/* Dateisysteme: "/" ist die initrd (nur lesbar), "/disk" die FAT32-Platte MINIKERNEL (lesen und schreiben, 8.3-Namen),
+/* Dateisysteme: "/" ist die initrd (nur lesbar), "/disk" die FAT32-Platte MINIKERNEL (lesen und schreiben, lange Namen),
  * "/mnt/<geraet>" weitere FAT12/16/32-Datentraeger (nur lesbar, lange Namen). */
 
 #define ERR_NOENT     (-2)
@@ -146,6 +146,7 @@ typedef struct {
     uint32_t width, height;
     uint32_t left_presses, right_presses; /* zaehlen jedes Druecken (auch Klicks, die zwischen zwei Abfragen liegen) */
     int32_t  press_x, press_y;             /* Position beim letzten Druecken der linken Taste */
+    uint32_t kbd_mods;                     /* gerade gedrueckte Umschalttasten: 1 Shift, 2 Alt, 4 Strg (fuer Klicks) */
 } MouseInfo;
 
 /* Eintrag fuer SYS_VIDEOINFO (gleiches Layout in Userland/user.h): ein Grafikmodus; scale/cols/rows beschreiben die Konsole */

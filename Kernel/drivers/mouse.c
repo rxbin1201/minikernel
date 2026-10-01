@@ -146,6 +146,7 @@ void mouse_get(MouseInfo *out)
     out->right_presses = right_presses;
     out->press_x = press_x;
     out->press_y = press_y;
+    out->kbd_mods = (uint32_t)keyboard_mods();
 }
 
 void mouse_tick(void)

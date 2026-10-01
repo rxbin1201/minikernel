@@ -500,37 +500,39 @@ static void gfx_collect(void)
     MouseInfo m;
     if (sys_mouse(&m) != 0 || m.events == gfx_mprev.events)
         return;
+    int mods = (m.kbd_mods & 1 ? KEY_MOD_SHIFT : 0) | (m.kbd_mods & 2 ? KEY_MOD_ALT : 0) |
+               (m.kbd_mods & 4 ? KEY_MOD_CTRL : 0); /* Umschalttasten zum Klick */
     if (m.x != gfx_cur_x || m.y != gfx_cur_y) {
         gfx_move_cursor(m.x, m.y);
-        Event e = {EV_MOVE, 0, m.x, m.y, 0, 0};
+        Event e = {EV_MOVE, mods, m.x, m.y, 0, 0};
         gfx_push(e);
     }
     for (unsigned k = gfx_mprev.left_presses; k != m.left_presses; k++) { /* jeder Druck, auch sehr kurze Klicks */
         if (gfx_left_down) {
-            Event u = {EV_UP, 0, m.press_x, m.press_y, 1, 0};
+            Event u = {EV_UP, mods, m.press_x, m.press_y, 1, 0};
             gfx_push(u);
         }
-        Event e = {EV_DOWN, 0, m.press_x, m.press_y, 1, 0};
+        Event e = {EV_DOWN, mods, m.press_x, m.press_y, 1, 0};
         gfx_push(e);
         gfx_left_down = 1;
     }
     if (gfx_left_down && !(m.buttons & 1)) {
-        Event e = {EV_UP, 0, m.x, m.y, 1, 0};
+        Event e = {EV_UP, mods, m.x, m.y, 1, 0};
         gfx_push(e);
         gfx_left_down = 0;
     }
     for (unsigned k = gfx_mprev.right_presses; k != m.right_presses; k++) {
-        Event e = {EV_DOWN, 0, m.x, m.y, 2, 0};
+        Event e = {EV_DOWN, mods, m.x, m.y, 2, 0};
         gfx_push(e);
         gfx_right_down = 1;
     }
     if (gfx_right_down && !(m.buttons & 2)) {
-        Event e = {EV_UP, 0, m.x, m.y, 2, 0};
+        Event e = {EV_UP, mods, m.x, m.y, 2, 0};
         gfx_push(e);
         gfx_right_down = 0;
     }
     if (m.wheel) {
-        Event e = {EV_WHEEL, 0, m.x, m.y, 0, m.wheel};
+        Event e = {EV_WHEEL, mods, m.x, m.y, 0, m.wheel};
         gfx_push(e);
     }
     gfx_mprev = m;
@@ -739,6 +741,12 @@ void gfx_set_title(const char *title)
     WpMsg m = {WP_TITLE, 0, 0, 0, 0, 0, 0, 0, {0}};
     snprintf(m.text, sizeof(m.text), "%s", title);
     wp_send(&m);
+}
+
+void gfx_flush(void)
+{
+    if (gfx_win)
+        gfx_win_flush();
 }
 
 int gfx_desktop_open(const char *path)

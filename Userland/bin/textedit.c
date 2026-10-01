@@ -3,12 +3,13 @@
 #include "ui.h"
 
 /* textedit [datei]: Texteditor fuer den Desktop.
- *   Markieren mit der Maus (Doppelklick: Wort, Dreifachklick: Zeile) oder mit Shift + Pfeilen/Pos1/Ende/Bild,
+ *   Markieren mit der Maus (Doppelklick: Wort, Dreifachklick: Zeile, Shift+Klick: bis dorthin) oder mit Shift +
+ *   Pfeilen/Pos1/Ende/Bild,
  *   Strg + Pfeil springt wortweise, Strg + Pos1/Ende an Anfang/Ende. Strg+A alles, Strg+C/X/V kopieren, ausschneiden,
  *   einfuegen (Zwischenablage des Systems), Strg+Z/Y rueckgaengig/wiederholen, Strg+S sichern.
  *   Werkzeugleiste: Neu (neues Fenster), Oeffnen (Pfad eingeben; der Desktop oeffnet die Datei im passenden
  *   Programm), Sichern, Sichern unter. Beim Schliessen mit ungesicherten Aenderungen kommt eine Rueckfrage.
- *   Dateien auf /disk brauchen kurze Namen (8.3, z.B. /disk/NOTIZ.TXT); die initrd ("/") ist nur lesbar. */
+ *   Gesichert wird z.B. auf /disk (lange Namen gehen, auch mit Leerzeichen); die initrd ("/") ist nur lesbar. */
 
 #define TABW     4   /* Tabulator: Spalten */
 #define MAXUNDO  100
@@ -424,10 +425,14 @@ static int save_as(const char *p)
         sys_close((int)fd);
     u_free(t);
     if (rc != 0) {
-        if (strncmp(p, "/disk/", 6) != 0)
-            snprintf(status, sizeof(status), "Hier kann nicht gespeichert werden (nur auf /disk)");
+        if (rc == ERR_ROFS)
+            snprintf(status, sizeof(status), "Hier ist kein Speichern mÃ¶glich (schreibgeschÃ¼tzt) - z.B. auf /disk sichern");
+        else if (rc == ERR_NOENT)
+            snprintf(status, sizeof(status), "Den Ordner gibt es nicht");
+        else if (rc == ERR_NOSPC)
+            snprintf(status, sizeof(status), "Kein Platz mehr auf dem DatentrÃ¤ger");
         else
-            snprintf(status, sizeof(status), "Speichern fehlgeschlagen (Fehler %d) - auf /disk gehen nur kurze Namen wie NOTIZ.TXT", rc);
+            snprintf(status, sizeof(status), "Speichern fehlgeschlagen (Fehler %d)", rc);
         return -1;
     }
     if (p != path)
@@ -443,7 +448,7 @@ static void open_prompt(int kind)
 {
     prompt = kind;
     if (kind == P_SAVEAS)
-        snprintf(field, sizeof(field), "%s", path[0] && strncmp(path, "/disk/", 6) == 0 ? path : "/disk/NOTIZ.TXT");
+        snprintf(field, sizeof(field), "%s", path[0] && strncmp(path, "/disk/", 6) == 0 ? path : "/disk/Notiz.txt");
     else if (kind == P_OPEN)
         snprintf(field, sizeof(field), "/disk/");
     flen = (int)strlen(field);
@@ -451,10 +456,8 @@ static void open_prompt(int kind)
 
 static void save(void)
 {
-    if (!path[0] || strncmp(path, "/disk/", 6) != 0) /* neu oder nur lesbar: wohin? */
+    if (!path[0] || save_as(path) != 0) /* neu oder dort geht es nicht (z.B. nur lesbar): wohin? */
         open_prompt(P_SAVEAS);
-    else
-        save_as(path);
 }
 
 /* ---------------------------------------------------------------------------------------------------------------------
@@ -565,7 +568,7 @@ static void draw_prompt(Surface *s)
         gfx_fill(s, sx + tw + 1, fy, U(2) > 1 ? U(2) : 2, text_height(font_ui, FS), C_ACCENT);
         gfx_no_clip();
         ty += fh + U(6);
-        text_draw(s, font_ui, FS_SMALL, tx, ty, "Auf /disk gehen nur kurze Namen (8.3), z.B. /disk/NOTIZ.TXT", C_TEXT2);
+        text_draw(s, font_ui, FS_SMALL, tx, ty, "Ganzer Pfad mit Namen, z.B. /disk/Meine Notizen.txt", C_TEXT2);
     }
     for (int i = 0; i < prompt_nbtn(); i++) {
         int bx, by, bw, bh;
@@ -942,15 +945,11 @@ static void prompt_click(int i)
         prompt = P_NONE;
         if (i == 2) { /* sichern */
             close_after_save = 1;
-            if (path[0] && strncmp(path, "/disk/", 6) == 0) {
-                if (save_as(path) == 0) {
-                    gfx_close();
-                    sys_exit(0);
-                }
-                close_after_save = 0;
-            } else {
-                open_prompt(P_SAVEAS);
+            if (path[0] && save_as(path) == 0) {
+                gfx_close();
+                sys_exit(0);
             }
+            open_prompt(P_SAVEAS); /* neu oder dort geht es nicht: wohin? */
         }
         return;
     }
@@ -1064,6 +1063,14 @@ void _start(int argc, char **argv)
                 } else if (e.y < gfx_screen.h - status_h()) {
                     int y, x;
                     hit(e.x, e.y, &y, &x);
+                    if (e.key & KEY_MOD_SHIFT) { /* Shift+Klick: Markierung bis hierher */
+                        move_to(y, x, 1);
+                        want_col = -1;
+                        dragging = 1;
+                        blink_t0 = sys_time_us();
+                        draw();
+                        continue;
+                    }
                     s64 now = sys_ticks();
                     clicks = now - last_click < 40 && y == cy ? clicks + 1 : 1;
                     last_click = now;

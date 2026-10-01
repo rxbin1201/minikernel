@@ -40,7 +40,7 @@ void do_action(int a)
     Win *f = focused();
     switch (a) {
     case A_TERM: launch_app("/bin/term", "term", A_TERM, "Terminal"); break;
-    case A_FILES: launch_app("/bin/files", "files /", A_FILES, "Dateien"); break;
+    case A_FILES: launch_app("/bin/files", "files", A_FILES, "Dateien"); break; /* beginnt auf der Platte */
     case A_EDIT: launch_app("/bin/textedit", "textedit", A_EDIT, "Texteditor"); break;
     case A_CALC: launch_app("/bin/calc", "calc", A_CALC, "Rechner"); break;
     case A_CLOCK: launch_app("/bin/clock", "clock", A_CLOCK, "Uhr"); break;
@@ -179,7 +179,7 @@ static void mouse_down(Event *e)
         drag_dy = w->y + w->h - e->y;
         return;
     }
-    app_input(w, EV_DOWN, 0, e->x, e->y, e->button, 0); /* Inhalt gehoert dem Programm */
+    app_input(w, EV_DOWN, e->key, e->x, e->y, e->button, 0); /* Inhalt gehoert dem Programm (key: Umschalttasten) */
     app_grab = w;
 }
 
@@ -270,7 +270,7 @@ static void wheel(Event *e)
 {
     Win *w = window_at(e->x, e->y);
     if (w)
-        app_input(w, EV_WHEEL, 0, e->x, e->y, 0, e->wheel);
+        app_input(w, EV_WHEEL, e->key, e->x, e->y, 0, e->wheel);
 }
 
 void _start(int argc, char **argv)
@@ -308,7 +308,7 @@ void _start(int argc, char **argv)
                 set_snap_preview(SNAP_NONE);
                 drag_mode = 0;
                 if (app_grab && app_grab->used)
-                    app_input(app_grab, EV_UP, 0, e.x, e.y, e.button, 0);
+                    app_input(app_grab, EV_UP, e.key, e.x, e.y, e.button, 0);
                 app_grab = 0;
             }
             else if (e.type == EV_MOVE) mouse_move(&e);

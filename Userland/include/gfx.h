@@ -41,7 +41,7 @@ enum { EV_NONE, EV_KEY, EV_DOWN, EV_UP, EV_MOVE, EV_WHEEL, EV_CLOSE, EV_FOCUS, E
 
 typedef struct {
     int type;
-    int key;         /* EV_KEY: Zeichen (UTF-8-Byte), KEY_* oder mit KEY_MOD_ALT */
+    int key;         /* EV_KEY: Zeichen (UTF-8-Byte), KEY_* oder mit KEY_MOD_*; Maus: gedrueckte KEY_MOD_* */
     int x, y;        /* Mausposition */
     int button;      /* EV_DOWN/EV_UP: 1 links, 2 rechts */
     int wheel;       /* EV_WHEEL: > 0 = nach oben */
@@ -84,6 +84,8 @@ void gfx_draw_scaled(Surface *dst, const Surface *src, int dx, int dy, int dw, i
 void gfx_compose(int x, int y, int w, int h);
 void gfx_present(int x, int y, int w, int h);
 void gfx_present_all(void);
+/* Im Fenster: Gezeichnetes sofort melden (sonst beim naechsten gfx_poll/gfx_vsync), z.B. vor einer langen Arbeit */
+void gfx_flush(void);
 void gfx_move_cursor(int x, int y);
 void gfx_show_cursor(int visible);
 /* Naechstes Ereignis; 0 = keins (nicht blockierend) */

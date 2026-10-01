@@ -108,10 +108,19 @@ Jedes Fenster gehoert einem eigenen Prozess; der Desktop zeichnet nur Rahmen, Me
 Texteditor), `textedit`, `textview` (nur ansehen), `view`, `calc`, `clock`, `about`, `paint`, `snake`, `tetris`. Ohne
 Desktop gestartet, laufen sie im Vollbild.
 
+Dateien (`files [ordner]`): links die Orte (Platte `/disk`, System `/`, angesteckte Datentraeger), oben
+Zurueck/Vor/Hoch, Neuer Ordner, Umbenennen, Loeschen; Spalten Name, Geaendert, Groesse, unten der freie Platz.
+Auswahl mit Klick, Strg+Klick, Shift+Klick, Pfeilen (mit Shift) und Strg+A; Strg+C/X/V kopieren, ausschneiden,
+einfuegen (ueber die Zwischenablage, auch zwischen zwei Fenstern), Strg+D duplizieren, Strg+N neuer Ordner, Entf
+loeschen (mit Rueckfrage, Ordner samt Inhalt). Rechtsklick oeffnet ein Kontextmenue (auch "Neue Textdatei"). Ziehen
+auf einen Ordner oder Ort verschiebt, mit Strg kopiert; zwischen Datentraegern wird kopiert und danach geloescht.
+Mausklicks bringen dafuer die gedrueckten Umschalttasten mit (`MouseInfo.kbd_mods`, bei Grafikprogrammen in
+`Event.key`). Auf `/disk` gehen lange Namen (VFAT, auch mit Leerzeichen).
+
 Texteditor (`textedit [datei]`): Zeilennummern, Markieren mit Maus (Doppelklick Wort, Dreifachklick Zeile) und
 Shift + Pfeil/Pos1/Ende/Bild, Strg + Pfeil wortweise, Strg+A/C/X/V (Zwischenablage des Systems), Strg+Z/Y
 rueckgaengig/wiederholen, Strg+S sichern; Werkzeugleiste mit Neu, Oeffnen, Sichern, Sichern unter. Beim Schliessen
-mit ungesicherten Aenderungen fragt er nach. Gespeichert wird auf `/disk` (8.3-Namen, z.B. `/disk/NOTIZ.TXT`).
+mit ungesicherten Aenderungen fragt er nach. Gespeichert wird z.B. auf `/disk`, mit langen Namen (`/disk/Meine Notizen.txt`).
 Shift und Strg kommen mit Sondertasten als `KEY_MODS`, Umschalttasten, Taste an (`KEY_MOD_SHIFT`/`KEY_MOD_CTRL` in
 `Event.key`), solange ein Grafikprogramm den Bildschirm hat; Strg+V fuegt dann nicht mehr in die Konsole ein, sondern
 geht an das Programm. Stuerzt ein Programm ab, verschwindet nur sein Fenster. Grafikprogramme lassen sich auch im Terminal
