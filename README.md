@@ -92,8 +92,10 @@ In der Shell: `burn 5000 & burn 5000 & cpus` zeigt zwei ausgelastete CPUs.
   startet den Befehlsprozessor der Render-Engine im Ring-Modus und prueft Leerauftrag, `PIPE_CONTROL` (Schreiben nach
   getaner Arbeit), Batch-Buffer und den Zeitstempel der GPU (1000 Befehle). Haengt sie, wird sie zurueckgesetzt.
   `igdtest gpgpu` laesst das erste Programm auf den Recheneinheiten (EUs) laufen: GPGPU-Pipeline (wie der Fuelltest von
-  IGT), ein Kernel in EU-Maschinensprache fuellt eine Flaeche (im RAM byteweise geprueft, an der Konsole zusaetzlich
-  zwei graue Baender auf dem Bildschirm)
+  IGT), Kernel in EU-Maschinensprache (eigener kleiner Assembler) fuellen, kopieren und mischen Flaechen (gegen die
+  CPU geprueft, an der Konsole zusaetzlich ein halbtransparentes Farbfeld). Ring, Status- und Befehlsseiten bleiben
+  nach dem ersten Test fest in der GGTT; vor jedem Test wird die Engine zurueckgesetzt und vor jedem Auftrag verwirft
+  ein `PIPE_CONTROL` TLB und Caches - so laufen die Tests beliebig oft hintereinander
 - **Bildwechsel-Interrupt** (`igd_irq.c`): die Pipe meldet jeden Bildwechsel per MSI. Grafikprogramme warten mit
   `gfx_vsync()` darauf und laufen so genau im Takt des Monitors (Tetris, Snake, Desktop; `anim` zeigt es), die
   Doppelpufferung wartet darauf statt nachzusehen. Ohne Interrupt (QEMU) ersetzt eine 10-ms-Pause den Takt

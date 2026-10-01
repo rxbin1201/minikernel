@@ -38,6 +38,7 @@
 #define R_ESR            (RCS + 0xB8)
 #define R_BBADDR         (RCS + 0x140)          /* Batch-Buffer, in dem die Engine gerade ist */
 #define R_BBSTATE        (RCS + 0x110)
+#define R_RESET_CTL      (RCS + 0xD0)           /* Reset anmelden / bereit */
 #define R_GFX_MODE       (RCS + 0x29C)
 #define R_TIMESTAMP      (RCS + 0x358)          /* Zeitstempel der Engine (Gen9: 12 MHz) */
 #define STOP_RING        (1u << 8)
@@ -76,8 +77,22 @@ static void dump(const char *why)
             igd_rd(R_IPEIR), igd_rd(R_INSTDONE), igd_rd(R_EIR), igd_rd(R_ESR), igd_rd(R_MI_MODE), igd_rd(R_GFX_MODE));
 }
 
+/* Engine zuruecksetzen (wie i915): Reset anmelden, warten bis sie bereit ist, dann GDRST. Danach ist ihr Zustand wie
+ * nach dem Einschalten - nichts aus einem frueheren Lauf (Pipeline, Zustaende, Caches) bleibt haengen. */
+static int engine_reset(void)
+{
+    igd_wr(R_RESET_CTL, MASKED_ON(1u));
+    int ready = WAIT_UNTIL(igd_rd(R_RESET_CTL) & 2u, 20);
+    igd_wr(GDRST, GRDOM_RENDER);
+    int ok = WAIT_UNTIL(!(igd_rd(GDRST) & GRDOM_RENDER), 100);
+    igd_wr(R_RESET_CTL, MASKED_OFF(1u));
+    kprintf("igdrcs: Render-Engine zurueckgesetzt: %s%s\n", ok ? "ok" : "haengt", ready ? "" : " (nicht bereit gemeldet)");
+    return ok;
+}
+
 static int ring_start(void)
 {
+    engine_reset();
     igd_wr(R_HWS_PGA, hws_gtt);
     (void)igd_rd(R_HWS_PGA);
     igd_wr(R_GFX_MODE, MASKED_OFF(RUN_LIST_ENABLE)); /* klassischer Ring statt Execlists */
@@ -110,15 +125,71 @@ static void emit(uint32_t v)
     pos += 4;
 }
 
-/* Auftrag beginnen (der Ring ist vor jedem Auftrag leer: jeder wird abgewartet) */
+#define PC_TLB_INV     (1u << 18)
+#define PC_INSTR_INV   (1u << 11)
+#define PC_TEX_INV     (1u << 10)
+#define PC_VF_INV      (1u << 4)
+#define PC_CONST_INV   (1u << 3)
+#define PC_STATE_INV   (1u << 2)
+#define HWS_SCRATCH    0x200
+
+/* Auftrag beginnen (der Ring ist vor jedem Auftrag leer: jeder wird abgewartet). Wie bei i915 zuerst ein PIPE_CONTROL,
+ * das den Adress-Cache (TLB) und die Caches fuer Befehle, Zustaende, Konstanten und Texturen verwirft: die Engine soll
+ * keine Zuordnung oder keinen Kernel eines frueheren Auftrags mehr benutzen. */
 static void begin(uint32_t dwords)
 {
     pos = tail;
-    if (pos + dwords * 4 + 64 > RING_BYTES) {
+    if (pos + (dwords + 6) * 4 + 64 > RING_BYTES) {
         while (pos < RING_BYTES)
             emit(MI_NOOP);
         pos = 0;
     }
+    emit(PIPE_CONTROL);
+    emit(PC_CS_STALL | PC_TLB_INV | PC_INSTR_INV | PC_TEX_INV | PC_VF_INV | PC_CONST_INV | PC_STATE_INV | PC_WRITE_QWORD |
+         PC_GLOBAL_GTT);
+    emit(hws_gtt + HWS_SCRATCH);
+    emit(0);
+    emit(0);
+    emit(0);
+}
+
+/* Fester Speicher der Render-Engine: beim ersten Test angelegt und danach behalten (wie beim Blitter). So bleiben die
+ * Zuordnungen in der GGTT gleich - neu angelegte Seiten an alten Adressen sah die Engine beim zweiten Lauf noch mit
+ * der alten Zuordnung. */
+enum { C_RING = 0, C_HWS = 4, C_BATCH = 5, C_STATE = 9, C_RES = 10, C_KERN = 11, C_PAGES = 13 };
+static uint64_t core_mem;
+static uint32_t core_base;
+
+static uint32_t core_gtt(int page) { return (core_base + (uint32_t)page) << 12; }
+static void *core_ptr(int page) { return (void *)(core_mem + (uint64_t)page * 4096); }
+
+static int core_setup(void)
+{
+    if (!core_mem) {
+        uint32_t base = igd_ggtt_entries / 2 + 0x50000;
+        uint64_t saved[C_PAGES];
+        int rc = igd_ggtt_claim(base, C_PAGES, saved);
+        if (rc)
+            return rc;
+        uint64_t m = pmm_alloc_frames(C_PAGES);
+        if (!m) {
+            kprintf("igdrcs: kein Speicher\n");
+            return -6;
+        }
+        for (uint32_t i = 0; i < C_PAGES; i++)
+            igd_ggtt[base + i] = (m + i * 4096) | IGD_PTE_VALID;
+        igd_ggtt_flush();
+        core_mem = m;
+        core_base = base;
+    }
+    memset((void *)core_mem, 0, C_PAGES * 4096);
+    igd_clflush(core_mem, C_PAGES * 4096);
+    ring = (uint32_t *)core_ptr(C_RING);
+    hws = (volatile uint32_t *)core_ptr(C_HWS);
+    ring_gtt = core_gtt(C_RING);
+    hws_gtt = core_gtt(C_HWS);
+    seqno = 0;
+    return 0;
 }
 
 /* Abschliessen: laufende Nummer in die Statusseite, abschicken; Ergebnis die Nummer */
@@ -167,8 +238,8 @@ static int run(const char *what, int timeout_ms, uint64_t *us)
     }
     kprintf("igdrcs: %s: KEINE Rueckmeldung nach %d ms\n", what, timeout_ms);
     dump("Zustand");
-    igd_wr(GDRST, GRDOM_RENDER);
-    kprintf("igdrcs: Render-Engine zurueckgesetzt: %s\n", WAIT_UNTIL(!(igd_rd(GDRST) & GRDOM_RENDER), 100) ? "ok" : "haengt");
+    ring_stop();
+    engine_reset();
     return -1;
 }
 
@@ -184,30 +255,13 @@ int igd_render_test(void)
     if (pre)
         return pre;
 
-    /* GGTT: Ring (4) + Statusseite (1) + Batch (4) + Ergebnisse (1), getrennt von den anderen Tests */
-    uint32_t base = igd_ggtt_entries / 2 + 0x50000, pages = 10;
-    uint64_t saved[10];
-    int rc = igd_ggtt_claim(base, pages, saved);
+    /* Fester Speicher: Ring (4) + Statusseite (1) + Batch (4) + ... + Ergebnisse (1) */
+    int rc = core_setup();
     if (rc)
         return rc;
-    uint64_t mem = pmm_alloc_frames(pages);
-    if (!mem) {
-        kprintf("igdrcs: kein Speicher\n");
-        return -6;
-    }
-    memset((void *)mem, 0, pages * 4096);
-    igd_clflush(mem, pages * 4096);
-    for (uint32_t i = 0; i < pages; i++)
-        igd_ggtt[base + i] = (mem + i * 4096) | IGD_PTE_VALID;
-    igd_ggtt_flush();
-    ring = (uint32_t *)mem;
-    hws = (volatile uint32_t *)(mem + 4 * 4096);
-    uint32_t *batch = (uint32_t *)(mem + 5 * 4096);
-    volatile uint32_t *res = (volatile uint32_t *)(mem + 9 * 4096);
-    ring_gtt = base << 12;
-    hws_gtt = (base + 4) << 12;
-    uint32_t batch_gtt = (base + 5) << 12, res_gtt = (base + 9) << 12;
-    seqno = 0;
+    uint32_t *batch = (uint32_t *)core_ptr(C_BATCH);
+    volatile uint32_t *res = (volatile uint32_t *)core_ptr(C_RES);
+    uint32_t batch_gtt = core_gtt(C_BATCH), res_gtt = core_gtt(C_RES);
 
     /* 1. Grafikkern wecken, Engine ansehen, Ring starten, Leerauftrag */
     if (!igd_forcewake_get()) {
@@ -320,10 +374,6 @@ out_ring:
     dump("danach");
 out_fw:
     igd_forcewake_put();
-    for (uint32_t i = 0; i < pages; i++)
-        igd_ggtt[base + i] = saved[i];
-    igd_ggtt_flush();
-    pmm_free_frames(mem, pages);
     kprintf("igdtest: %s\n", rc == 0 ? "Render-Engine funktioniert" : "Render-Engine mit Fehlern, bitte Log schicken");
     return rc;
 }
@@ -773,17 +823,20 @@ int igd_gpgpu_test(void)
     kprintf("igdgpu: Assembler erzeugt den IGT-Kernel bitgenau; Kernel: Fuellen %d, Kopieren %d, Mischen %d Befehle\n",
             n32, ncopy, nblend);
 
-    /* GGTT: Ring (4) + Status (1) + Batch (1) + Zustaende (1) + Ergebnis (1) + Kernel (2) + zwei Testflaechen (je 16 =
-     * 1024 x 64 Bytes) + zwei bildschirmgrosse Flaechen (Seite fuer Seite) */
-    enum { P_RING = 0, P_HWS = 4, P_BATCH = 5, P_STATE = 6, P_RES = 7, P_KERN = 8, P_SA = 10, P_SB = 26, P_BIG = 42 };
+    /* Fester Speicher (Ring, Status, Batch, Zustaende, Ergebnis, Kernel) und je Lauf im GGTT-Bereich dahinter: zwei
+     * Testflaechen (je 16 Seiten = 1024 x 64 Bytes) und zwei bildschirmgrosse Flaechen (Seite fuer Seite) */
+    int rc = core_setup();
+    if (rc)
+        return rc;
+    enum { P_SA = 0, P_SB = 16, P_BIG = 32 };
     uint32_t big_w = igd_flip_ready ? igd_scr_stride : 13760, big_h = igd_flip_ready ? igd_scr_h : 1440;
     big_w &= ~31u;
     big_h &= ~7u;
     uint32_t big_pages = (uint32_t)(((uint64_t)big_w * big_h + 4095) / 4096), pages = P_BIG + 2 * big_pages;
-    uint32_t base = igd_ggtt_entries / 2 + 0x50000;
+    uint32_t base = core_base + 0x40;
     uint64_t *saved = kmalloc(sizeof(uint64_t) * pages), *big = kmalloc(sizeof(uint64_t) * 2 * big_pages);
     uint32_t mocs[62];
-    int rc = !saved || !big ? -6 : igd_ggtt_claim(base, pages, saved);
+    rc = !saved || !big ? -6 : igd_ggtt_claim(base, pages, saved);
     if (rc) {
         kfree(saved);
         kfree(big);
@@ -806,34 +859,30 @@ int igd_gpgpu_test(void)
     for (uint32_t i = 0; i < 2 * big_pages; i++)
         igd_ggtt[base + P_BIG + i] = big[i] | IGD_PTE_VALID;
     igd_ggtt_flush();
-    ring = (uint32_t *)mem;
-    hws = (volatile uint32_t *)(mem + P_HWS * 4096);
-    g_batch = (uint32_t *)(mem + P_BATCH * 4096);
-    g_st = (uint32_t *)(mem + P_STATE * 4096);
-    g_kern = (uint32_t *)(mem + P_KERN * 4096);
-    volatile uint32_t *res = (volatile uint32_t *)(mem + P_RES * 4096);
+    g_batch = (uint32_t *)core_ptr(C_BATCH);
+    g_st = (uint32_t *)core_ptr(C_STATE);
+    g_kern = (uint32_t *)core_ptr(C_KERN);
+    volatile uint32_t *res = (volatile uint32_t *)core_ptr(C_RES);
     uint8_t *sa = (uint8_t *)(mem + P_SA * 4096), *sb = (uint8_t *)(mem + P_SB * 4096);
-    ring_gtt = base << 12;
-    hws_gtt = (base + P_HWS) << 12;
-    g_batch_gtt = (base + P_BATCH) << 12;
-    g_st_gtt = (base + P_STATE) << 12;
-    g_res_gtt = (base + P_RES) << 12;
-    g_kern_gtt = (base + P_KERN) << 12;
+    g_batch_gtt = core_gtt(C_BATCH);
+    g_st_gtt = core_gtt(C_STATE);
+    g_res_gtt = core_gtt(C_RES);
+    g_kern_gtt = core_gtt(C_KERN);
     GpuSurf SA = {(base + P_SA) << 12, 1024, 64, 1024}, SB = {(base + P_SB) << 12, 1024, 64, 1024};
     GpuSurf BIG = {(base + P_BIG) << 12, big_w, big_h, big_w}, BIG2 = {(base + P_BIG + big_pages) << 12, big_w, big_h, big_w};
-    seqno = 0;
 
     if (!igd_forcewake_get()) {
         kprintf("igdgpu: Forcewake nicht bestaetigt\n");
         rc = -9;
         goto out_fw;
     }
-    for (int i = 0; i < 62; i++) { /* Cache-Steuerung der Render-Engine: uncached (alte Werte zurueck am Ende) */
+    for (int i = 0; i < 62; i++)
         mocs[i] = igd_rd(GFX_MOCS(i));
-        igd_wr(GFX_MOCS(i), 0x09);
-    }
     kprintf("igdgpu: GPU-Takt %u MHz\n", ((igd_rd(RPSTAT1) >> 23) & 0x1FF) * 50 / 3);
-    if (!ring_start()) {
+    int ring_ok = ring_start();
+    for (int i = 0; i < 62; i++) /* Cache-Steuerung der Render-Engine: uncached (alte Werte zurueck am Ende) */
+        igd_wr(GFX_MOCS(i), 0x09);
+    if (!ring_ok) {
         dump("Ring startet NICHT");
         rc = -10;
         goto out_ring;
