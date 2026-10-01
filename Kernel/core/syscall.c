@@ -233,8 +233,12 @@ static int64_t sys_wait(uint64_t pid, uint64_t ucode, uint64_t flags)
         if (st == 0)
             return ERR_AGAIN;
     }
-    int code = 0, state = 0;
-    int r = process_wait((int)pid, process_pid(p), &code, &state, 3600 * 1000);
+    int code = 0, state = 0, r;
+    /* ohne Zeitgrenze warten (frueher: eine Stunde - danach las die Shell wieder Tasten, obwohl ihr Kind, z.B. der
+     * Desktop, noch lief) */
+    while ((r = process_wait((int)pid, process_pid(p), &code, &state, 3600 * 1000)) == -1 &&
+           process_poll((int)pid, process_pid(p)) == 0)
+        ;
     if (r == -2)
         return ERR_CHILD;
     if (r == ERR_INTR)
@@ -378,7 +382,9 @@ static void syscall_do(SyscallFrame *f)
     case SYS_YIELD:    thread_yield(); ret = 0; break;
     case SYS_SLEEP_MS: sys_sleep(f->rdi); ret = 0; break;
     case SYS_TICKS:    ret = f->rdi == 1 ? (int64_t)time_us() : (int64_t)apic_ticks(); break;
-    case SYS_GETCHAR:  ret = keyboard_getchar(); break;
+    case SYS_GETCHAR: /* hat ein Grafikprogramm den Bildschirm, gehoeren die Tasten nur ihm */
+        ret = console_gfx_active() && !console_gfx_owner(process_pid(process_current())) ? -1 : keyboard_getchar();
+        break;
     case SYS_OPEN:     ret = sys_open(f->rdi, f->rsi); break;
     case SYS_READ:     ret = sys_read(f->rdi, f->rsi, f->rdx); break;
     case SYS_CLOSE:    ret = process_fd_close(process_current(), (int)f->rdi); break;

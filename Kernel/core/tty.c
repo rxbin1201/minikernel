@@ -4,6 +4,7 @@
 #include "lib/kprintf.h"
 #include "core/process.h"
 #include "lib/string.h"
+#include "console/console.h"
 
 #define LINE_MAX 256
 
@@ -56,6 +57,13 @@ static void echo(char c)
 static int next_key(void)
 {
     for (;;) {
+        /* Waehrend ein Grafikprogramm den Bildschirm hat (z.B. der Desktop), gehoeren ihm die Tasten: eine Shell auf der
+         * unsichtbaren Konsole wartet so lange, statt ihm Tasten wegzunehmen */
+        if (console_gfx_active() && !console_gfx_owner(process_pid(process_current()))) {
+            if (process_wait_tick() != 0)
+                return -1;
+            continue;
+        }
         int c = keyboard_getchar();
         if (c == KEY_ALT) { /* Alt-Kombination: gehoert den Grafikprogrammen */
             keyboard_getchar();

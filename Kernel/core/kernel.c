@@ -165,9 +165,11 @@ void kmain(BootInfo *info)
         init = "/bin/sh";
     for (;;) {
         int pid = info->module ? process_spawn(init, init, 0) : -1;
-        if (pid > 0)
-            process_wait(pid, 0, 0, 0, 3600 * 1000);
-        else {
+        if (pid > 0) {
+            /* ohne Zeitgrenze: eine zweite Shell, waehrend die erste noch laeuft, wuerde ihr die Tasten wegnehmen */
+            while (process_wait(pid, 0, 0, 0, 3600 * 1000) == -1 && process_poll(pid, 0) == 0)
+                ;
+        } else {
             kprintf("init '%s' laesst sich nicht starten\n", init);
             thread_sleep_ms(1000);
         }
