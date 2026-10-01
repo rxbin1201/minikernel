@@ -36,10 +36,12 @@ typedef struct {
 
 /* Auftrag aus dem Programm (gleiches Layout in Userland/include/user.h) */
 typedef struct {
-    uint16_t kind; /* 1 kopieren, 2 mischen */
+    uint16_t kind; /* 1 kopieren, 2 mischen, 3 senkrecht skalieren, 4 waagerecht skalieren */
     uint16_t dst, src;
     uint16_t pad;
     int32_t  dx, dy, sx, sy, w, h;
+    int32_t  alpha; /* mischen: Deckung 0-256 (256 = Alpha der Quelle unveraendert) */
+    int32_t  step;  /* skalieren: Schritt in der Quelle je Zielzeile/-spalte, 8.8 Festkomma (hoechstens 65535) */
 } GpuOp;
 
 static CompSurf  surfs[COMP_SURFS];
@@ -142,11 +144,34 @@ void igd_comp_release(uint32_t pid)
 
 /* ---------- Ausfuehren ---------- */
 
+enum { K_COPY, K_BLEND, K_VSCALE, K_HSCALE };
 typedef struct {
-    int       blend;
+    int       kind;       /* K_* */
     CompSurf *d, *s;
     int       dx, dy, sx, sy, w, h;
+    int       g;          /* K_BLEND: Deckung 0-256 */
+    int       step;       /* K_*SCALE: 8.8 */
 } KOp;
+
+/* Skalieren: Zielzeile y (bzw. -spalte x) kommt aus Quellzeile sy + (y * step >> 8) */
+static int scale_src(const KOp *o, int i) { return (int)(((uint32_t)i * (uint32_t)o->step) >> 8); }
+
+/* Rechteck in der Quelle, das ein Auftrag liest (zum Pruefen und Zurueckschreiben) */
+static void src_rect(const KOp *o, int *w, int *h)
+{
+    *w = o->kind == K_HSCALE ? scale_src(o, o->w - 1) + 1 : o->w;
+    *h = o->kind == K_VSCALE ? scale_src(o, o->h - 1) + 1 : o->h;
+}
+
+/* Skalieren wird nicht beschnitten: alles muss passen, die Groesse in Bloecken von 8 x 8 aufgehen */
+static int scale_ok(const KOp *o)
+{
+    int sw, sh;
+    src_rect(o, &sw, &sh);
+    return o->w > 0 && o->h > 0 && !(o->w & 7) && !(o->h & 7) && o->step > 0 && o->step <= 0xFFFF && o->dx >= 0 &&
+           o->dy >= 0 && o->sx >= 0 && o->sy >= 0 && o->dx + o->w <= (int)o->d->w && o->dy + o->h <= (int)o->d->h &&
+           o->sx + sw <= (int)o->s->w && o->sy + sh <= (int)o->s->h;
+}
 
 /* Rechteck an beide Flaechen anpassen; 0 = leer */
 static int clip_op(KOp *o)
@@ -167,10 +192,11 @@ static inline uint32_t *spx(const CompSurf *s, uint64_t off)
     return (uint32_t *)(s->frames[off >> 12] + (off & 0xFFF));
 }
 
-/* dieselbe Rechnung wie der Mischen-Kernel: je Byte (s * a + d * (255 - a)) / 255 gerundet, a = Byte 3 der Quelle */
-static uint32_t blend_px(uint32_t s, uint32_t d)
+/* dieselbe Rechnung wie der Mischen-Kernel: je Byte (s * a + d * (255 - a)) / 255 gerundet, a = (Byte 3 der Quelle
+ * mal Deckung g) / 256 */
+static uint32_t blend_px(uint32_t s, uint32_t d, uint32_t g)
 {
-    uint32_t a = s >> 24, r = 0;
+    uint32_t a = ((s >> 24) * g) >> 8, r = 0;
     for (int c = 0; c < 32; c += 8) {
         uint32_t x = ((s >> c) & 0xFF) * a + ((d >> c) & 0xFF) * (255 - a) + 128;
         r |= ((x + (x >> 8)) >> 8) << c;
@@ -181,6 +207,16 @@ static uint32_t blend_px(uint32_t s, uint32_t d)
 /* CPU-Ersatz (gpucomp=soft, Selbsttest): direkt in den Frames */
 static void exec_soft(const KOp *o)
 {
+    if (o->kind >= K_VSCALE) {
+        for (int y = 0; y < o->h; y++)
+            for (int x = 0; x < o->w; x++) {
+                int sx = o->sx + (o->kind == K_HSCALE ? scale_src(o, x) : x);
+                int sy = o->sy + (o->kind == K_VSCALE ? scale_src(o, y) : y);
+                *spx(o->d, ((uint64_t)(o->dy + y) * o->d->w + (uint64_t)(o->dx + x)) * 4) =
+                    *spx(o->s, ((uint64_t)sy * o->s->w + (uint64_t)sx) * 4);
+            }
+        return;
+    }
     for (int r = 0; r < o->h; r++) {
         uint64_t doff = ((uint64_t)(o->dy + r) * o->d->w + (uint64_t)o->dx) * 4;
         uint64_t soff = ((uint64_t)(o->sy + r) * o->s->w + (uint64_t)o->sx) * 4;
@@ -191,11 +227,11 @@ static void exec_soft(const KOp *o)
             if (n > sn) n = sn;
             uint32_t *dp = spx(o->d, doff);
             const uint32_t *sp = spx(o->s, soff);
-            if (!o->blend)
+            if (o->kind == K_COPY)
                 memcpy(dp, sp, n * 4);
             else
                 for (uint32_t i = 0; i < n; i++)
-                    dp[i] = blend_px(sp[i], dp[i]);
+                    dp[i] = blend_px(sp[i], dp[i], (uint32_t)o->g);
             left -= n;
             doff += n * 4;
             soff += n * 4;
@@ -231,6 +267,22 @@ static IgdSurf gsurf(const CompSurf *s, uint32_t mocs)
  * der Stuecke (hoechstens 4). */
 static int split_op(const KOp *o, IgdCompOp *g)
 {
+    if (o->kind >= K_VSCALE) { /* Skalieren: immer ganze Bloecke (scale_ok) */
+        IgdCompOp *p = g;
+        p->op = o->kind == K_VSCALE ? IGD_OP_VSCALE : IGD_OP_HSCALE;
+        p->shape = IGD_BLK_8X8;
+        p->gx = (uint32_t)o->w / 8;
+        p->gy = (uint32_t)o->h / 8;
+        p->dst = gsurf(o->d, cache_mode == 2 ? IGD_MOCS_WB : 0);
+        p->src = gsurf(o->s, cache_mode >= 1 ? IGD_MOCS_WB : 0);
+        p->dx = (uint32_t)o->dx * 4;
+        p->dy = (uint32_t)o->dy;
+        p->sx = (uint32_t)o->sx * 4;
+        p->sy = (uint32_t)o->sy;
+        p->galpha = 256;
+        p->step = (uint32_t)o->step;
+        return 1;
+    }
     int w8 = o->w & ~7, h8 = o->h & ~7, wr = o->w & 7, hr = o->h & 7, n = 0;
     const int part[4][5] = { /* x, y, w, h, Form */
         {0, 0, w8, h8, IGD_BLK_8X8}, {w8, 0, wr, h8, IGD_BLK_1X8}, {0, h8, w8, hr, IGD_BLK_8X1}, {w8, h8, wr, hr, IGD_BLK_1X1},
@@ -240,8 +292,10 @@ static int split_op(const KOp *o, IgdCompOp *g)
         if (w <= 0 || h <= 0)
             continue;
         IgdCompOp *p = &g[n++];
-        p->blend = o->blend;
+        p->op = o->kind == K_BLEND ? IGD_OP_BLEND : IGD_OP_COPY;
         p->shape = sh;
+        p->galpha = (uint32_t)o->g;
+        p->step = 0;
         p->gx = (uint32_t)(sh == IGD_BLK_8X8 || sh == IGD_BLK_8X1 ? w / 8 : w);
         p->gy = (uint32_t)(sh == IGD_BLK_8X8 || sh == IGD_BLK_1X8 ? h / 8 : h);
         p->dst = gsurf(o->d, cache_mode == 2 ? IGD_MOCS_WB : 0);
@@ -295,7 +349,9 @@ static int exec_ops(const KOp *ops, int n)
     for (int i = 0; i < n; i++) {
         const KOp *o = &ops[i];
         if (flush_mode) {
-            flush_rect(o->s, o->sx, o->sy, o->w, o->h);
+            int sw, sh;
+            src_rect(o, &sw, &sh);
+            flush_rect(o->s, o->sx, o->sy, sw, sh);
             flush_rect(o->d, o->dx, o->dy, o->w, o->h);
         }
         if (m + 4 > IGD_COMP_MAX_OPS) {
@@ -323,10 +379,14 @@ static int exec_ops(const KOp *ops, int n)
 /* Zeilenlaenge 1088 Byte: Vielfaches von 64, aber keine Zweierpotenz */
 enum { TW = 272, TH = 64, TPAGES = (TW * TH * 4 + 4095) / 4096 };
 
-static const int test_ops[][7] = { /* mischen, dx, dy, sx, sy, w, h - alle Blockformen, Raender, Ueberlappungen */
-    {0, 13, 5, 7, 3, 77, 29},   {1, 3, 17, 21, 2, 101, 37}, {0, 200, 40, 0, 0, 53, 24},
-    {1, 0, 0, 128, 1, 9, 7},    {1, 61, 30, 30, 11, 133, 21}, {0, 247, 0, 3, 50, 6, 14},
-    {0, 16, 8, 24, 16, 64, 32}, {1, 40, 24, 8, 8, 32, 16}, /* nur ganze 8 x 8-Bloecke */
+static const int test_ops[][9] = { /* K_*, dx, dy, sx, sy, w, h, Deckung, Schritt - Blockformen, Raender, Ueberlappungen */
+    {K_COPY, 13, 5, 7, 3, 77, 29, 256, 0},     {K_BLEND, 3, 17, 21, 2, 101, 37, 256, 0},
+    {K_COPY, 200, 40, 0, 0, 53, 24, 256, 0},   {K_BLEND, 0, 0, 128, 1, 9, 7, 256, 0},
+    {K_BLEND, 61, 30, 30, 11, 133, 21, 256, 0}, {K_COPY, 247, 0, 3, 50, 6, 14, 256, 0},
+    {K_COPY, 16, 8, 24, 16, 64, 32, 256, 0},   {K_BLEND, 40, 24, 8, 8, 32, 16, 256, 0}, /* nur ganze 8 x 8-Bloecke */
+    {K_BLEND, 100, 2, 50, 20, 67, 33, 97, 0},  /* halb ausgeblendet (Animationen) */
+    {K_VSCALE, 8, 8, 5, 3, 48, 32, 256, 300},  {K_VSCALE, 160, 0, 33, 7, 40, 56, 256, 180}, /* strecken / stauchen */
+    {K_HSCALE, 16, 40, 2, 4, 40, 16, 256, 600}, {K_HSCALE, 64, 0, 9, 1, 104, 24, 256, 129},
 };
 #define TEST_OPS ((int)(sizeof(test_ops) / sizeof(test_ops[0])))
 
@@ -348,7 +408,7 @@ static int selftest_run(CompSurf *a, CompSurf *b, CompSurf *ra, CompSurf *rb, ui
     KOp ops[TEST_OPS];
     for (int i = 0; i < count; i++) {
         const int *t = test_ops[first + i];
-        ops[i] = (KOp){t[0], b, a, t[1], t[2], t[3], t[4], t[5], t[6]};
+        ops[i] = (KOp){t[0], b, a, t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8]};
         KOp ref = ops[i];
         ref.d = rb;
         ref.s = ra;
@@ -453,7 +513,7 @@ static void benchmark(void)
     for (int m = 0; i0 && i1 && m < 3; m++) {
         cache_mode = m;
         for (int bl = 0; bl < 2; bl++) {
-            KOp o = {bl, &surfs[i1 - 1], &surfs[i0 - 1], 0, 0, 0, 0, BW, BH};
+            KOp o = {bl ? K_BLEND : K_COPY, &surfs[i1 - 1], &surfs[i0 - 1], 0, 0, 0, 0, BW, BH, 256, 0};
             uint64_t us = 0;
             for (int rep = 0; rep < 2; rep++) { /* der zweite Lauf zaehlt */
                 uint64_t t0 = time_us();
@@ -506,7 +566,7 @@ static int blit_check(void)
             *spx(e, i * 4) = 0;
         }
         igd_clflush(mem, 3 * TPAGES * 4096); /* alles im RAM, nichts mehr im CPU-Cache */
-        KOp o = {0, d, a, 0, 0, 0, 0, TW, TH};
+        KOp o = {K_COPY, d, a, 0, 0, 0, 0, TW, TH, 256, 0};
         if (exec_ops(&o, 1) != 0 || igd_blt_copy_gtt(e->ggtt << 12, TW * 4, d->ggtt << 12, TW * 4, TW, TH) != 0)
             break;
         igd_clflush(mem + 2 * TPAGES * 4096, TPAGES * 4096);
@@ -659,11 +719,15 @@ int64_t igd_comp_sys(uint32_t pid, uint64_t op, uint64_t a, uint64_t b)
             GpuOp u;
             memcpy(&u, (const void *)(a + i * sizeof(GpuOp)), sizeof(u));
             CompSurf *d = surf_get(pid, u.dst), *s = surf_get(pid, u.src);
-            if (!d || !s || d == s || (u.kind != 1 && u.kind != 2))
+            if (!d || !s || d == s || u.kind < 1 || u.kind > 4)
                 return ERR_INVAL;
-            KOp o = {u.kind == 2, d, s, u.dx, u.dy, u.sx, u.sy, u.w, u.h};
-            if (!clip_op(&o))
+            KOp o = {u.kind - 1, d, s, u.dx, u.dy, u.sx, u.sy, u.w, u.h, u.alpha < 0 ? 0 : u.alpha > 256 ? 256 : u.alpha,
+                     u.step};
+            if (o.kind >= K_VSCALE ? !scale_ok(&o) : !clip_op(&o)) {
+                if (o.kind >= K_VSCALE)
+                    return ERR_INVAL; /* Skalieren muss genau passen */
                 continue;
+            }
             kops[n++] = o;
             if (n == (int)(sizeof(kops) / sizeof(kops[0])) || i + 1 == b) {
                 if (exec_ops(kops, n) != 0)

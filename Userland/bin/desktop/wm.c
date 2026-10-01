@@ -470,20 +470,22 @@ static void draw_window(Win *w)
     gfx_no_clip();
 }
 
-/* Deckung der runden Ecken in Byte 3 der oberen und unteren RADIUS Zeilen (im neu gezeichneten Teil) */
+/* Deckung in Byte 3 (im neu gezeichneten Teil): in den oberen und unteren RADIUS Zeilen die der runden Ecken,
+ * sonst 255 - so setzt die GPU das Fensterbild auch skaliert (Animationen) richtig auf */
 static void corner_alpha(Win *w)
 {
     int x0 = w->rx0 < 0 ? 0 : w->rx0, x1 = w->rx1 > w->w ? w->w : w->rx1;
-    for (int band = 0; band < 2; band++) {
-        int y0 = band ? w->h - RADIUS : 0, y1 = band ? w->h : RADIUS;
-        if (y0 < w->ry0) y0 = w->ry0;
-        if (y1 > w->ry1) y1 = w->ry1;
-        for (int y = y0; y < y1; y++) {
-            u32 *p = w->buf.px + (u64)y * (u64)w->buf.w;
-            for (int x = x0; x < x1; x++) {
-                int c = gfx_round_cov(x, y, 0, 0, w->w, w->h, RADIUS);
-                p[x] = (p[x] & 0xFFFFFF) | (u32)(c > 255 ? 255 : c) << 24;
-            }
+    int y0 = w->ry0 < 0 ? 0 : w->ry0, y1 = w->ry1 > w->h ? w->h : w->ry1;
+    for (int y = y0; y < y1; y++) {
+        u32 *p = w->buf.px + (u64)y * (u64)w->buf.w;
+        if (y >= RADIUS && y < w->h - RADIUS) {
+            for (int x = x0; x < x1; x++)
+                p[x] |= 0xFF000000u;
+            continue;
+        }
+        for (int x = x0; x < x1; x++) {
+            int c = gfx_round_cov(x, y, 0, 0, w->w, w->h, RADIUS);
+            p[x] = (p[x] & 0xFFFFFF) | (u32)(c > 255 ? 255 : c) << 24;
         }
     }
 }
@@ -519,14 +521,60 @@ static void render_window(Win *w)
     w->rx0 = w->rx1 = 0;
 }
 
-/* Kann die GPU dieses Bild zusammensetzen? (nicht waehrend Animationen: die skalieren das Fensterbild) */
+/* Kann die GPU dieses Bild zusammensetzen? */
 static int gpu_usable(void)
 {
-    if (!gpu_mode || !gsurf_handle(&gfx_screen) || !gsurf_handle(&bg))
+    return gpu_mode && gsurf_handle(&gfx_screen) && gsurf_handle(&bg);
+}
+
+/* Fenster in der Animation: Bild (und Schatten) auf der GPU skalieren und mit der Deckung der Animation mischen.
+ * Wie compose_cpu: Rechteck und Deckung aus anim_state, Schatten um shadow_dy * Massstab versetzt; die Schattenstreifen
+ * werden nur entlang der Kante gestreckt (die Weichheit bleibt). 0 = geht nicht (dann die CPU) */
+static int queue_anim(Win *w, Win *f, const Clip *c)
+{
+    int r[4], a;
+    anim_state(w, r, &a);
+    if (a <= 0 || r[2] < 8 || r[3] < 8) /* unsichtbar bzw. winzig */
+        return 1;
+    int S = SHADOW, R = RADIUS, band = S + R, b8 = shadow_b8();
+    int sc = r[2] < w->w ? r[2] : w->w, ww = w->w ? w->w : 1;
+    int X = r[0], Y = r[1], dw = r[2], dh = r[3], dys = shadow_dy() * sc / ww;
+    if (X - S >= c->x1 || X + dw + S <= c->x0 || Y + dys - S >= c->y1 || Y + dys + dh + S <= c->y0)
+        return 1;
+    Surface *t = anim_temps();
+    int w8 = (w->w + 7) & ~7, dw8 = (dw + 7) & ~7, dh8 = (dh + 7) & ~7;
+    if (!t || w8 > t[0].w || dh8 > t[0].h || dw8 > t[1].w || dh8 > t[1].h)
         return 0;
-    for (int i = 0; i < nord; i++)
-        if (order[i]->buf.px && order[i]->anim)
-            return 0;
+    int sty = (w->h - 1) * 256 / (dh8 - 1), stx = (w->w - 1) * 256 / (dw8 - 1);
+    if (sty < 1 || sty > 0xFFFF || stx < 1 || stx > 0xFFFF)
+        return 0;
+    int g = a + (a >> 7); /* 0-255 -> 0-256 */
+    gq_scale(1, &t[0], 0, 0, &w->buf, 0, 0, w8, dh8, sty);
+    gq_scale(0, &t[1], 0, 0, &t[0], 0, 0, dw8, dh8, stx);
+    if (shadow_ready(w, w == f ? 95 : 55)) {
+        /* oben/unten: die Ecken (je S + R breit) unveraendert, nur das gerade Mittelstueck strecken */
+        int tw = dw + 2 * S, mw = dw - 2 * R, mw8 = (mw + 7) & ~7, srcm = w->w - 2 * R;
+        int sxs = mw >= 8 && srcm > 1 ? (srcm - 1) * 256 / (mw8 - 1) : 0;
+        if (sxs >= 1 && sxs <= 0xFFFF && band + mw8 + band <= t[2].w) {
+            Clip all = {0, 0, t[2].w, t[2].h};
+            for (int half = 0; half <= b8; half += b8) {
+                gq_scale(0, &t[2], band, half, &w->shd_tb, band, half, mw8, b8, sxs);
+                gq_copy(&t[2], 0, half, &w->shd_tb, 0, half, band, band, &all);
+                gq_copy(&t[2], band + mw, half, &w->shd_tb, w->w + 2 * S - band, half, band, band, &all);
+            }
+            gq_blend_a(&gfx_screen, X - S, Y + dys - S, &t[2], 0, 0, tw, band, g, c);
+            gq_blend_a(&gfx_screen, X - S, Y + dys + dh - R, &t[2], 0, b8, tw, band, g, c);
+        }
+        int lh = dh - 2 * R, lh8 = (lh + 7) & ~7, lrh = w->h - 2 * R;
+        int sys = lh >= 8 && lrh > 1 ? (lrh - 1) * 256 / (lh8 - 1) : 0;
+        if (sys >= 1 && sys <= 0xFFFF && lh8 <= t[3].h) {
+            gq_scale(1, &t[3], 0, 0, &w->shd_lr, 0, 0, b8, lh8, sys);
+            gq_scale(1, &t[3], b8, 0, &w->shd_lr, b8, 0, b8, lh8, sys);
+            gq_blend_a(&gfx_screen, X - S, Y + dys + R, &t[3], 0, 0, band, lh, g, c);
+            gq_blend_a(&gfx_screen, X + dw - R, Y + dys + R, &t[3], b8, 0, band, lh, g, c);
+        }
+    }
+    gq_blend_a(&gfx_screen, X, Y, &t[1], 0, 0, dw, dh, g, c);
     return 1;
 }
 
@@ -535,21 +583,26 @@ static int gpu_usable(void)
 static int queue_gpu(const Clip *r)
 {
     Win *f = focused();
-    int S = SHADOW, R = RADIUS, band = S + R, dy = shadow_dy();
+    int S = SHADOW, R = RADIUS, band = S + R, b8 = shadow_b8(), dy = shadow_dy();
     gq_copy(&gfx_screen, r->x0, r->y0, &bg, r->x0, r->y0, r->x1 - r->x0, r->y1 - r->y0, r);
     for (int i = 0; i < nord; i++) {
         Win *w = order[i];
-        if (!w->buf.px || w->minimized)
+        if (!w->buf.px || (w->minimized && w->anim != ANIM_MIN))
             continue;
+        if (w->anim) {
+            if (!queue_anim(w, f, r))
+                return 0;
+            continue;
+        }
         if (w->x - S >= r->x1 || w->x + w->w + S <= r->x0 || w->y + dy - S >= r->y1 || w->y + w->h + dy + S <= r->y0)
             continue;
         if (!shadow_ready(w, w == f ? 95 : 55))
             return 0;
         int X = w->x, Y = w->y, lrh = w->h - 2 * R;
         gq_blend(&gfx_screen, X - S, Y + dy - S, &w->shd_tb, 0, 0, w->w + 2 * S, band, r);
-        gq_blend(&gfx_screen, X - S, Y + dy + w->h - R, &w->shd_tb, 0, band, w->w + 2 * S, band, r);
+        gq_blend(&gfx_screen, X - S, Y + dy + w->h - R, &w->shd_tb, 0, b8, w->w + 2 * S, band, r);
         gq_blend(&gfx_screen, X - S, Y + dy + R, &w->shd_lr, 0, 0, band, lrh, r);
-        gq_blend(&gfx_screen, X + w->w - R, Y + dy + R, &w->shd_lr, band, 0, band, lrh, r);
+        gq_blend(&gfx_screen, X + w->w - R, Y + dy + R, &w->shd_lr, b8, 0, band, lrh, r);
         gq_blend(&gfx_screen, X, Y, &w->buf, 0, 0, w->w, R, r);
         gq_copy(&gfx_screen, X, Y + R, &w->buf, 0, R, w->w, w->h - 2 * R, r);
         gq_blend(&gfx_screen, X, Y + w->h - R, &w->buf, 0, w->h - R, w->w, R, r);

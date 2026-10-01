@@ -59,6 +59,9 @@ typedef struct {
     char open_path[WP_PATH_MAX];  /* WP_OPEN: Pfad wird aus Stuecken zusammengesetzt */
 } Win;
 
+/* Schattenbilder (gpu.c): Streifen beginnen an Vielfachen von 8 (die GPU skaliert sie in Bloecken von 8 x 8) */
+static inline int shadow_b8(void) { return (SHADOW + RADIUS + 7) & ~7; }
+
 /* Hoehe der Titelleiste (0 bei rahmenlosen Fenstern, die zeichnen ihre Knoepfe selbst) */
 static inline int win_th(const Win *w) { return (w->flags & WPF_FRAMELESS) ? 0 : TITLE_H; }
 
@@ -154,6 +157,11 @@ int  gsurf_handle(const Surface *s);      /* Nummer beim Kernel, 0 = nur CPU */
 int  gsurf_width(int w);                  /* Breite fuer gsurf_new: die GPU braucht Vielfache von 16 Pixeln */
 void gq_copy(const Surface *d, int dx, int dy, const Surface *s, int sx, int sy, int w, int h, const Clip *c);
 void gq_blend(const Surface *d, int dx, int dy, const Surface *s, int sx, int sy, int w, int h, const Clip *c);
+void gq_blend_a(const Surface *d, int dx, int dy, const Surface *s, int sx, int sy, int w, int h, int alpha,
+                const Clip *c);       /* mischen mit Deckung alpha (0-256) */
+void gq_scale(int vertical, const Surface *d, int dx, int dy, const Surface *s, int sx, int sy, int w, int h, int step);
+Surface *anim_temps(void);  /* 4 Hilfsflaechen fuer Animationen (Bild senkrecht, waagerecht, Schatten oben/unten,
+                             * links/rechts), 0 = keine */
 void gq_cancel(void);
 int  gq_submit(void);  /* 0 = alles fertig gezeichnet, sonst muss die CPU den Bereich zeichnen */
 void gpu_stat(int gpu, s64 us, s64 px);

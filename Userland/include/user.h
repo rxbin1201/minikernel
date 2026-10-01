@@ -287,10 +287,13 @@ static inline s64 sys_shm_size(unsigned id)                { return syscall3(SYS
  * (nummer, breite | hoehe << 16) -> Nummer; 2 abmelden; 3 Auftraege ausfuehren (GpuOp *, anzahl) -> 0 wenn fertig;
  * 4 Messwert (0 CPU / 1 GPU, mikrosekunden | pixel << 32) */
 typedef struct {
-    unsigned short kind; /* 1 kopieren, 2 mischen (Quelle mit ihrem Alpha in Byte 3 ueber das Ziel) */
+    unsigned short kind; /* 1 kopieren, 2 mischen (Quelle mit ihrem Alpha in Byte 3 ueber das Ziel), 3 senkrecht und
+                          * 4 waagerecht skalieren (w, h Vielfache von 8, alles muss in die Flaechen passen) */
     unsigned short dst, src;
     unsigned short pad;
     int dx, dy, sx, sy, w, h;
+    int alpha;           /* mischen: Deckung 0-256 (256 = Alpha der Quelle unveraendert) */
+    int step;            /* skalieren: Quellzeile/-spalte = Anfang + (i * step >> 8), 1-65535 */
 } GpuOp;
 static inline s64 sys_gpucomp(u64 op, u64 a, u64 b)          { return syscall3(SYS_GPUCOMP, op, a, b); }
 /* Benannte Dienste: anmelden, abmelden, verbinden (fds: lesen, schreiben), annehmen (fds: lesen, schreiben, PID;

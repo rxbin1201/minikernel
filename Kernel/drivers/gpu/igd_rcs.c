@@ -619,6 +619,8 @@ static int asm_blend_blk(uint32_t (*k)[4], int bw, int bh)
             EuOp a = eu_r(EU_UB, 21 + row, off + 3, 3, 2, 0); /* <4;4,0>: Alpha je Pixel viermal */
             eu_inst(k[n++], EU_MOV, 4, 0, eu_d(EU_UW, 45, 0), s, eu_none());
             eu_inst(k[n++], EU_MOV, 4, 0, eu_d(EU_UW, 46, 0), a, eu_none());
+            eu_inst(k[n++], EU_MUL, 4, 0, eu_d(EU_UW, 46, 0), aw, eu_r(EU_UW, 1, 16, SCALAR)); /* a * Deckung */
+            eu_inst(k[n++], EU_SHR, 4, 0, eu_d(EU_UW, 46, 0), aw, eu_imm(EU_UW, 8));             /* / 256 */
             eu_inst(k[n++], EU_MOV, 4, 0, eu_d(EU_UW, 47, 0), d, eu_none());
             eu_inst(k[n++], EU_MUL, 4, 0, eu_d(EU_UW, 40, 0), sw, aw);                       /* x = s * a */
             eu_inst(k[n++], EU_XOR, 4, 0, eu_d(EU_UW, 41, 0), aw, eu_imm(EU_UW, 0xFF));      /* 255 - a */
@@ -646,6 +648,52 @@ static int asm_blend_blk(uint32_t (*k)[4], int bw, int bh)
 static int asm_blend32x8(uint32_t (*k)[4])
 {
     return asm_blend_blk(k, 32, 8);
+}
+
+/* Skalieren (Animationen) in zwei Durchgaengen mit Bloecken, die die Hardware nachweislich richtig liest/schreibt.
+ * Konstanten: r1.0/1 Ziel x (Bytes)/y, r1.2/3 Quelle x (Bytes)/y, r1.5 Schritt (8.8). Ein Thread = 8 x 8 Zielpixel.
+ * Senkrecht: Zielzeile y kommt aus Quellzeile sy + (y * step >> 8): 8 Zeilen 32 x 1 lesen, als ein Block schreiben. */
+static int asm_vscale(uint32_t (*k)[4])
+{
+    int n = asm_positions(k, 0, 32, 8); /* r2 = Ziel (x, y), r3.0 = Quelle x */
+    eu_inst(k[n++], EU_MUL, 0, 0, eu_d(EU_UD, 6, 0), eu_r(EU_UD, 0, 24, SCALAR), eu_imm(EU_UD, 8)); /* Zeile ty * 8 */
+    eu_inst(k[n++], EU_MOV, 0, 0, eu_d(EU_UD, 8, 0), eu_r(EU_UD, 3, 0, SCALAR), eu_none());
+    for (int r = 0; r < 8; r++) {
+        eu_inst(k[n++], EU_ADD, 0, 0, eu_d(EU_UD, 7, 0), eu_r(EU_UD, 6, 0, SCALAR), eu_imm(EU_UD, (uint32_t)r));
+        eu_inst(k[n++], EU_MUL, 0, 0, eu_d(EU_UD, 7, 0), eu_r(EU_UD, 7, 0, SCALAR), eu_r(EU_UW, 1, 20, SCALAR));
+        eu_inst(k[n++], EU_SHR, 0, 0, eu_d(EU_UD, 7, 0), eu_r(EU_UD, 7, 0, SCALAR), eu_imm(EU_UD, 8));
+        eu_inst(k[n++], EU_ADD, 0, 0, eu_d(EU_UD, 8, 4), eu_r(EU_UD, 7, 0, SCALAR), eu_r(EU_UD, 1, 12, SCALAR));
+        n = asm_block_header(k, n, 70 + r, 8, 32, 1);
+        eu_send(k[n++], 4, SFID_DP1, eu_d(EU_UD, 21 + r, 0), 70 + r, mbr_desc(1, 1));
+    }
+    n = asm_block_header(k, n, 20, 2, 32, 8);
+    eu_send(k[n++], 4, SFID_DP1, eu_null(), 20, mbw_desc(9, 0));
+    return asm_end(k, n);
+}
+
+/* Waagerecht: Zielspalte x kommt aus Quellspalte sx + (x * step >> 8): 8 Spalten 4 x 8 lesen und einzeln schreiben
+ * (Spalte c liegt in r51 + 2c, ihr Kopf zum Schreiben in r50 + 2c) */
+static int asm_hscale(uint32_t (*k)[4])
+{
+    int n = asm_positions(k, 0, 32, 8); /* r2 = Ziel (x, y), r3.1 = Quelle y */
+    eu_inst(k[n++], EU_MUL, 0, 0, eu_d(EU_UD, 6, 0), eu_r(EU_UD, 0, 4, SCALAR), eu_imm(EU_UD, 8)); /* Spalte tx * 8 */
+    eu_inst(k[n++], EU_MOV, 0, 0, eu_d(EU_UD, 8, 4), eu_r(EU_UD, 3, 4, SCALAR), eu_none());
+    eu_inst(k[n++], EU_MOV, 0, 0, eu_d(EU_UD, 9, 4), eu_r(EU_UD, 2, 4, SCALAR), eu_none());
+    for (int c = 0; c < 8; c++) {
+        eu_inst(k[n++], EU_ADD, 0, 0, eu_d(EU_UD, 7, 0), eu_r(EU_UD, 6, 0, SCALAR), eu_imm(EU_UD, (uint32_t)c));
+        eu_inst(k[n++], EU_MUL, 0, 0, eu_d(EU_UD, 7, 0), eu_r(EU_UD, 7, 0, SCALAR), eu_r(EU_UW, 1, 20, SCALAR));
+        eu_inst(k[n++], EU_SHR, 0, 0, eu_d(EU_UD, 7, 0), eu_r(EU_UD, 7, 0, SCALAR), eu_imm(EU_UD, 8));
+        eu_inst(k[n++], EU_SHL, 0, 0, eu_d(EU_UD, 7, 0), eu_r(EU_UD, 7, 0, SCALAR), eu_imm(EU_UD, 2)); /* Bytes */
+        eu_inst(k[n++], EU_ADD, 0, 0, eu_d(EU_UD, 8, 0), eu_r(EU_UD, 7, 0, SCALAR), eu_r(EU_UD, 1, 8, SCALAR));
+        n = asm_block_header(k, n, 70 + c, 8, 4, 8);
+        eu_send(k[n++], 4, SFID_DP1, eu_d(EU_UD, 51 + 2 * c, 0), 70 + c, mbr_desc(1, 1));
+    }
+    for (int c = 0; c < 8; c++) {
+        eu_inst(k[n++], EU_ADD, 0, 0, eu_d(EU_UD, 9, 0), eu_r(EU_UD, 2, 0, SCALAR), eu_imm(EU_UD, 4u * (uint32_t)c));
+        n = asm_block_header(k, n, 50 + 2 * c, 9, 4, 8);
+        eu_send(k[n++], 4, SFID_DP1, eu_null(), 50 + 2 * c, mbw_desc(2, 0));
+    }
+    return asm_end(k, n);
 }
 
 /* Dieselbe Rechnung auf der CPU (zum Vergleich) */
@@ -811,7 +859,7 @@ static int gpgpu_fill(const char *what, const uint32_t (*kern)[4], int nk, int b
 static int gpgpu_rect(const char *what, const uint32_t (*kern)[4], int nk, const GpuSurf *dst, uint32_t dx, uint32_t dy,
                       const GpuSurf *src, uint32_t sx, uint32_t sy, uint32_t w, uint32_t h, uint64_t *us)
 {
-    uint32_t c[8] = {dx, dy, sx, sy, 0, 0, 0, 0};
+    uint32_t c[8] = {dx, dy, sx, sy, 256, 0, 0, 0}; /* Deckung beim Mischen: unveraendert */
     return gpgpu_go(what, kern, nk, c, dst, src, w / 32, h / 8, EU_THREADS, us);
 }
 
@@ -1091,7 +1139,7 @@ int igd_gpgpu_test(void)
 #define L3_MOCS(r)  (0xB020 + 4u * (uint32_t)(r)) /* L3-Cache-Steuerung (LNCFCMOCS), Eintraege 2r und 2r + 1 */
 #define L3_UC       0x10u /* L3 uncached */
 
-static uint32_t ck_off[8];  /* Lage der Kernel (Blockform * 2 + mischen) in C_CKERN */
+static uint32_t ck_off[10]; /* Lage der Kernel in C_CKERN: Blockform * 2 + mischen, 8 senkrecht, 9 waagerecht skalieren */
 
 static int comp_start(void)
 {
@@ -1123,10 +1171,11 @@ static int comp_start(void)
     static const int shape[4][2] = {{32, 8}, {4, 8}, {32, 1}, {4, 1}}; /* IGD_BLK_8X8, 1X8, 8X1, 1X1 */
     uint8_t *k = core_ptr(C_CKERN);
     uint32_t at = 0;
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 10; i++) {
         static uint32_t tmp[512][4];
-        int bw = shape[i / 2][0], bh = shape[i / 2][1];
-        int nk = (i & 1) ? asm_blend_blk(tmp, bw, bh) : asm_copy_blk(tmp, bw, bh);
+        int bw = shape[(i / 2) & 3][0], bh = shape[(i / 2) & 3][1];
+        int nk = i == 8 ? asm_vscale(tmp) : i == 9 ? asm_hscale(tmp) : (i & 1) ? asm_blend_blk(tmp, bw, bh)
+                                                                              : asm_copy_blk(tmp, bw, bh);
         if (at + (uint32_t)nk * 16 > CK_PAGES * 4096) {
             kprintf("igdcomp: Kernel passen nicht in %d Seiten\n", CK_PAGES);
             return 0;
@@ -1137,7 +1186,7 @@ static int comp_start(void)
     }
     igd_clflush((uint64_t)k, CK_PAGES * 4096);
     comp_ready = 1;
-    kprintf("igdcomp: Render-Engine eingerichtet (8 Kernel, %u Bytes)\n", at);
+    kprintf("igdcomp: Render-Engine eingerichtet (10 Kernel, %u Bytes)\n", at);
     return 1;
 }
 
@@ -1190,7 +1239,8 @@ int igd_rcs_comp(const IgdCompOp *ops, int n, uint64_t *us)
         const IgdCompOp *o = &ops[i];
         uint32_t off = CS_OPS + (uint32_t)i * 256;
         uint32_t *idd = (uint32_t *)(st + off), *cb = (uint32_t *)(st + off + 64), *bt = (uint32_t *)(st + off + 96);
-        idd[0] = ck_off[(o->shape & 3) * 2 + (o->blend != 0)];
+        idd[0] = o->op == IGD_OP_VSCALE ? ck_off[8] : o->op == IGD_OP_HSCALE ? ck_off[9]
+                                                       : ck_off[(o->shape & 3) * 2 + (o->op == IGD_OP_BLEND)];
         idd[2] = 1u << 18;       /* Single Program Flow */
         idd[4] = off + 96;       /* Binding Table */
         idd[5] = 1u << 16;       /* Konstanten: 1 Register */
@@ -1199,6 +1249,8 @@ int igd_rcs_comp(const IgdCompOp *ops, int n, uint64_t *us)
         cb[1] = o->dy;
         cb[2] = o->sx;           /* Quelle x, y */
         cb[3] = o->sy;
+        cb[4] = o->galpha;       /* Deckung beim Mischen (256 = unveraendert) */
+        cb[5] = o->step;         /* Skalieren: 8.8 */
         bt[0] = off + 128;
         bt[1] = off + 192;
         surf_state((uint32_t *)(st + off + 128), &o->dst);

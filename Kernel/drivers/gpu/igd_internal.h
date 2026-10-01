@@ -49,8 +49,12 @@ typedef struct {
 } IgdSurf;
 #define IGD_MOCS_WB 4 /* Gen9: Tabellenindex 2 << 1 (fuer den Fall "Index direkt" ist Eintrag 4 genauso gesetzt) */
 enum { IGD_BLK_8X8, IGD_BLK_1X8, IGD_BLK_8X1, IGD_BLK_1X1 }; /* Pixel je Thread: die Bloecke muessen genau aufgehen */
+enum { IGD_OP_COPY, IGD_OP_BLEND, IGD_OP_VSCALE, IGD_OP_HSCALE };
 typedef struct {
-    int      blend;            /* 0 kopieren, 1 Quelle mit ihrem Alpha (Byte 3) ueber das Ziel mischen */
+    int      op;               /* IGD_OP_*: kopieren, Quelle mit ihrem Alpha (Byte 3) mal galpha/256 ueber das Ziel
+                                * mischen, senkrecht / waagerecht skalieren (nur IGD_BLK_8X8) */
+    uint32_t galpha;           /* mischen: Deckung 0-256 */
+    uint32_t step;             /* skalieren: Quellzeile bzw. -spalte = Anfang + (i * step >> 8) */
     int      shape;            /* IGD_BLK_* */
     uint32_t gx, gy;           /* Bloecke (Threads) in x und y */
     IgdSurf  dst, src;         /* ganze Flaechen (Anfang an 4 KiB, Zeilenlaenge Vielfaches von 64 Byte) */

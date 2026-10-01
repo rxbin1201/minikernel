@@ -102,31 +102,75 @@ void gpu_quit(void)
 static GpuOp q[QMAX];
 static int   nq, q_bad; /* q_bad: eine Flaeche ist nicht angemeldet oder die Liste ist voll */
 
-static void gq_add(int kind, const Surface *d, int dx, int dy, const Surface *s, int sx, int sy, int w, int h,
-                   const Clip *c)
+static void gq_put(int kind, const Surface *d, int dx, int dy, const Surface *s, int sx, int sy, int w, int h, int a,
+                   int step)
 {
-    if (dx < c->x0) { sx += c->x0 - dx; w -= c->x0 - dx; dx = c->x0; }
-    if (dy < c->y0) { sy += c->y0 - dy; h -= c->y0 - dy; dy = c->y0; }
-    if (dx + w > c->x1) w = c->x1 - dx;
-    if (dy + h > c->y1) h = c->y1 - dy;
-    if (w <= 0 || h <= 0)
-        return;
     int hd = gsurf_handle(d), hs = gsurf_handle(s);
     if (!hd || !hs || nq == QMAX) {
         q_bad = 1;
         return;
     }
-    q[nq++] = (GpuOp){(unsigned short)kind, (unsigned short)hd, (unsigned short)hs, 0, dx, dy, sx, sy, w, h};
+    q[nq++] = (GpuOp){(unsigned short)kind, (unsigned short)hd, (unsigned short)hs, 0, dx, dy, sx, sy, w, h, a, step};
+}
+
+static void gq_add(int kind, const Surface *d, int dx, int dy, const Surface *s, int sx, int sy, int w, int h,
+                   const Clip *c, int a)
+{
+    if (dx < c->x0) { sx += c->x0 - dx; w -= c->x0 - dx; dx = c->x0; }
+    if (dy < c->y0) { sy += c->y0 - dy; h -= c->y0 - dy; dy = c->y0; }
+    if (dx + w > c->x1) w = c->x1 - dx;
+    if (dy + h > c->y1) h = c->y1 - dy;
+    if (w <= 0 || h <= 0 || a <= 0)
+        return;
+    gq_put(kind, d, dx, dy, s, sx, sy, w, h, a, 0);
 }
 
 void gq_copy(const Surface *d, int dx, int dy, const Surface *s, int sx, int sy, int w, int h, const Clip *c)
 {
-    gq_add(1, d, dx, dy, s, sx, sy, w, h, c);
+    gq_add(1, d, dx, dy, s, sx, sy, w, h, c, 256);
 }
 
 void gq_blend(const Surface *d, int dx, int dy, const Surface *s, int sx, int sy, int w, int h, const Clip *c)
 {
-    gq_add(2, d, dx, dy, s, sx, sy, w, h, c);
+    gq_add(2, d, dx, dy, s, sx, sy, w, h, c, 256);
+}
+
+void gq_blend_a(const Surface *d, int dx, int dy, const Surface *s, int sx, int sy, int w, int h, int alpha,
+                const Clip *c)
+{
+    gq_add(2, d, dx, dy, s, sx, sy, w, h, c, alpha);
+}
+
+/* Skalieren (ohne Beschneiden): Ziel w x h (Vielfache von 8), Quelle ab (sx, sy) mit Schritt step (8.8) */
+void gq_scale(int vertical, const Surface *d, int dx, int dy, const Surface *s, int sx, int sy, int w, int h, int step)
+{
+    gq_put(vertical ? 3 : 4, d, dx, dy, s, sx, sy, w, h, 256, step);
+}
+
+/* Hilfsflaechen fuer Animationen, beim ersten Gebrauch angelegt: [0] Fensterbild senkrecht skaliert, [1] fertig
+ * skaliert, [2] Schatten oben/unten, [3] Schatten links/rechts */
+static Surface tmp[4];
+static int     tmp_failed;
+
+Surface *anim_temps(void)
+{
+    if (tmp[0].px)
+        return tmp;
+    if (tmp_failed)
+        return 0;
+    int b8 = shadow_b8();
+    int ok = gsurf_new(&tmp[0], gsurf_width(W + 16), H + 16) == 0 && gsurf_new(&tmp[1], gsurf_width(W + 16), H + 16) == 0 &&
+             gsurf_new(&tmp[2], gsurf_width(W + 2 * SHADOW + 16), 2 * b8) == 0 &&
+             gsurf_new(&tmp[3], gsurf_width(2 * b8), H + 16) == 0;
+    for (int i = 0; ok && i < 4; i++)
+        ok = gsurf_handle(&tmp[i]) != 0;
+    if (!ok) {
+        for (int i = 0; i < 4; i++)
+            gsurf_free(&tmp[i]);
+        tmp_failed = 1;
+        return 0;
+    }
+    return tmp;
 }
 
 void gq_cancel(void)
@@ -150,26 +194,27 @@ void gpu_stat(int gpu, s64 us, s64 px)
 
 /* ---------- Schatten als Bild ----------
  * Der Schatten eines Fensters (wie gfx_shadow, Rechteck um shadow_dy nach unten versetzt) liegt in zwei Flaechen:
- * shd_tb = oberer und unterer Streifen (Breite w + 2S, je S + R hoch), shd_lr = linker und rechter Streifen (je S + R
- * breit, h - 2R hoch). Was dazwischen liegt, verdeckt das Fenster. Neu berechnet bei neuer Groesse oder Fokus. */
+ * shd_tb = oberer und unterer Streifen (Breite w + 2S, je S + R hoch, der untere ab Zeile shadow_b8), shd_lr = linker
+ * und rechter Streifen (je S + R breit, der rechte ab Spalte shadow_b8, h - 2R hoch). Was dazwischen liegt, verdeckt das Fenster. Neu berechnet bei neuer Groesse oder Fokus. */
 
 int shadow_ready(Win *w, int alpha)
 {
     if (w->shd_tb.px && w->shd_w == w->w && w->shd_h == w->h && w->shd_a == alpha)
         return gsurf_handle(&w->shd_tb) && gsurf_handle(&w->shd_lr);
     shadow_free(w);
-    int S = SHADOW, R = RADIUS, band = S + R, lrh = w->h - 2 * R;
+    int S = SHADOW, R = RADIUS, band = S + R, b8 = shadow_b8(), lrh = w->h - 2 * R;
     if (lrh < 1 || w->w < 2 * R)
         return 0;
-    if (gsurf_new(&w->shd_tb, gsurf_width(w->w + 2 * S), 2 * band) != 0 ||
-        gsurf_new(&w->shd_lr, gsurf_width(2 * band), lrh) != 0) {
+    if (gsurf_new(&w->shd_tb, gsurf_width(w->w + 2 * S), 2 * b8) != 0 ||
+        gsurf_new(&w->shd_lr, gsurf_width(2 * b8), lrh) != 0) {
         shadow_free(w);
         return 0;
     }
+    /* oben ab Zeile 0, unten ab Zeile b8; links ab Spalte 0, rechts ab Spalte b8 */
     gfx_shadow_image(&w->shd_tb, 0, 0, w->w + 2 * S, band, S, S, w->w, w->h, R, S, alpha);
-    gfx_shadow_image(&w->shd_tb, 0, band, w->w + 2 * S, band, S, S - w->h + 2 * R, w->w, w->h, R, S, alpha);
+    gfx_shadow_image(&w->shd_tb, 0, b8, w->w + 2 * S, band, S, b8 + R - w->h, w->w, w->h, R, S, alpha);
     gfx_shadow_image(&w->shd_lr, 0, 0, band, lrh, S, -R, w->w, w->h, R, S, alpha);
-    gfx_shadow_image(&w->shd_lr, band, 0, band, lrh, S - w->w + 2 * R, -R, w->w, w->h, R, S, alpha);
+    gfx_shadow_image(&w->shd_lr, b8, 0, band, lrh, b8 + R - w->w, -R, w->w, w->h, R, S, alpha);
     w->shd_w = w->w;
     w->shd_h = w->h;
     w->shd_a = alpha;
