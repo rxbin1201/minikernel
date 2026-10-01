@@ -817,7 +817,7 @@ static int show_date(void) { return col_date() > side_w() + U(200); }
 
 /* Klickbare Flaechen: beim Zeichnen gesammelt, beim naechsten Ereignis abgefragt */
 enum { H_NONE, H_TAB, H_TABX, H_TABNEW, H_MENU, H_BACK, H_FWD, H_UP, H_CRUMB, H_REFRESH, H_SEARCH, H_SIDE, H_SIDECHEV,
-       H_TILE, H_RECENT, H_COL };
+       H_TILE, H_RECENT, H_COL, H_DRAG, H_WMIN, H_WMAX, H_WCLOSE };
 typedef struct {
     int kind, idx, x, y, w, h;
 } Hit;
@@ -1380,6 +1380,7 @@ static void draw_side(Surface *s, int H)
     float k = (float)U(1);
     gfx_fill(s, 0, 0, sw, H, C_SIDE);
     gfx_fill(s, sw - 1, 0, 1, H, 0xDCE0E8);
+    hit_add(H_DRAG, 0, 0, 0, sw, tabs_h()); /* Kopf: Fenster verschieben (es hat keine Titelleiste) */
     ui_app_icon(s, ICON_FILES, U(14), (tabs_h() - U(22)) / 2 + U(2), U(22));
     text_draw(s, font_bold, U(15), U(44), (tabs_h() - text_height(font_bold, U(15))) / 2 + U(2), "Dateien", C_TEXT);
 
@@ -1443,7 +1444,9 @@ static void draw_tabs(Surface *s, int W)
     int sw = side_w(), th = tabs_h(), x = sw + U(8);
     float k = (float)U(1);
     gfx_fill(s, sw, 0, W - sw, th, C_STRIP);
-    int avail = W - x - U(46), tw = ntabs ? avail / ntabs : avail;
+    hit_add(H_DRAG, 0, sw, 0, W - sw, th); /* freie Flaeche: Fenster verschieben, Doppelklick maximiert */
+    int wb = gfx_windowed() ? U(46) : 0; /* Fensterknoepfe rechts (nur unter dem Desktop) */
+    int avail = W - x - U(46) - 3 * wb - U(40), tw = ntabs ? avail / ntabs : avail;
     if (tw > U(210))
         tw = U(210);
     for (int i = 0; i < ntabs; i++) {
@@ -1480,6 +1483,40 @@ static void draw_tabs(Surface *s, int W)
         gfx_round_rect(s, bx, by, U(28), U(28), U(7), 0x000000, 18);
     plus_icon(s, bx + U(14), by + U(14), k, C_TEXT);
     hit_add(H_TABNEW, 0, bx, by, U(28), U(28));
+
+    /* Minimieren, Maximieren (bzw. Wiederherstellen), Schliessen - wie bei Windows */
+    if (!wb)
+        return;
+    int kinds[3] = {H_WMIN, H_WMAX, H_WCLOSE};
+    for (int i = 0; i < 3; i++) {
+        int x0 = W - (3 - i) * wb, hv = hovered(kinds[i], 0);
+        float cx = x0 + wb * 0.5f, cy = th * 0.5f;
+        if (hv)
+            gfx_fill(s, x0, 0, wb, th, i == 2 ? 0xE81123 : 0xD8DDE8);
+        u32 c = hv && i == 2 ? 0xFFFFFF : C_TEXT;
+        if (i == 0) {
+            gfx_capsule(s, cx - 5 * k, cy, cx + 5 * k, cy, 1.1f * k, c, 255);
+        } else if (i == 1) {
+            if (gfx_window_zoomed()) { /* zwei Fenster: wiederherstellen */
+                gfx_capsule(s, cx - 2.5f * k, cy - 5 * k, cx + 5 * k, cy - 5 * k, 1.1f * k, c, 255);
+                gfx_capsule(s, cx + 5 * k, cy - 5 * k, cx + 5 * k, cy + 2.5f * k, 1.1f * k, c, 255);
+                gfx_fill(s, (int)(cx - 5 * k), (int)(cy - 2.5f * k), (int)(7.5f * k), (int)(7.5f * k), hv ? 0xD8DDE8 : C_STRIP);
+                gfx_capsule(s, cx - 5 * k, cy - 2.5f * k, cx + 2.5f * k, cy - 2.5f * k, 1.1f * k, c, 255);
+                gfx_capsule(s, cx + 2.5f * k, cy - 2.5f * k, cx + 2.5f * k, cy + 5 * k, 1.1f * k, c, 255);
+                gfx_capsule(s, cx + 2.5f * k, cy + 5 * k, cx - 5 * k, cy + 5 * k, 1.1f * k, c, 255);
+                gfx_capsule(s, cx - 5 * k, cy + 5 * k, cx - 5 * k, cy - 2.5f * k, 1.1f * k, c, 255);
+            } else {
+                gfx_capsule(s, cx - 5 * k, cy - 5 * k, cx + 5 * k, cy - 5 * k, 1.1f * k, c, 255);
+                gfx_capsule(s, cx + 5 * k, cy - 5 * k, cx + 5 * k, cy + 5 * k, 1.1f * k, c, 255);
+                gfx_capsule(s, cx + 5 * k, cy + 5 * k, cx - 5 * k, cy + 5 * k, 1.1f * k, c, 255);
+                gfx_capsule(s, cx - 5 * k, cy + 5 * k, cx - 5 * k, cy - 5 * k, 1.1f * k, c, 255);
+            }
+        } else {
+            gfx_capsule(s, cx - 5 * k, cy - 5 * k, cx + 5 * k, cy + 5 * k, 1.2f * k, c, 255);
+            gfx_capsule(s, cx - 5 * k, cy + 5 * k, cx + 5 * k, cy - 5 * k, 1.2f * k, c, 255);
+        }
+        hit_add(kinds[i], 0, x0, 0, wb, th);
+    }
 }
 
 /* Pfade der Pfadleiste (beim Zeichnen gemerkt) */
@@ -2163,6 +2200,21 @@ static void click(Event *e, s64 *last_click, int *last_i)
         search_focus = 0;
     if (h) {
         switch (h->kind) {
+        case H_DRAG: { /* Fenster verschieben, Doppelklick maximiert */
+            static s64 last_drag;
+            s64 now = sys_ticks();
+            if (now - last_drag < 40) {
+                last_drag = 0;
+                gfx_window_cmd(GFX_WIN_ZOOM);
+            } else {
+                last_drag = now;
+                gfx_window_cmd(GFX_WIN_MOVE);
+            }
+            return;
+        }
+        case H_WMIN: gfx_window_cmd(GFX_WIN_MINIMIZE); return;
+        case H_WMAX: gfx_window_cmd(GFX_WIN_ZOOM); return;
+        case H_WCLOSE: gfx_window_cmd(GFX_WIN_CLOSE); return;
         case H_TAB: tab_switch(h->idx); return;
         case H_TABX: tab_close(h->idx); return;
         case H_TABNEW: action(M_NEWTAB); return;
@@ -2248,7 +2300,7 @@ void _start(int argc, char **argv)
     if (argc > 1)
         snprintf(start, sizeof(start), "%s", argv[1]);
     ui_setup(0);
-    if (gfx_open_window_ex(U(980), U(640), "Dateien", GFX_RESIZABLE) != 0)
+    if (gfx_open_window_ex(U(980), U(640), "Dateien", GFX_RESIZABLE | GFX_FRAMELESS) != 0)
         sys_exit(1);
     if (!gfx_windowed())
         ui_setup(0);

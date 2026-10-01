@@ -16,6 +16,7 @@ s64      now_us;
 static int  drag_dx, drag_dy, press_x, press_y;
 static int  snap_zone; /* beim Ziehen an den Rand: SNAP_* */
 static s64  last_click_tick;
+static int  mouse_held; /* linke Maustaste gedrueckt */
 static int  last_click_x, last_click_y;
 static int  quit;
 static Win *app_grab; /* Fenster, in dessen Inhalt die Maustaste gedrueckt wurde: bekommt alles bis zum Loslassen */
@@ -73,6 +74,31 @@ void do_action(int a)
     case A_RESTART:
     case A_POWEROFF: dialog_open(a); break;
     case A_NET_DHCP: net_dhcp(); break;
+    }
+}
+
+/* Wunsch eines rahmenlosen Fensters (es zeichnet seine Knoepfe selbst) */
+void window_cmd(Win *w, int cmd)
+{
+    if (!w->used || !(w->flags & WPF_FRAMELESS))
+        return;
+    switch (cmd) {
+    case WPC_MOVE: /* wie ein Griff an der Titelleiste - nur, solange die Taste noch gedrueckt ist */
+        if (!mouse_held || drag_mode)
+            return;
+        if (app_grab == w) /* das Programm bekommt die Taste los, ab jetzt zieht der Desktop */
+            app_input(w, EV_UP, 0, mouse_x, mouse_y, 1, 0);
+        app_grab = 0;
+        drag_mode = 1;
+        drag_win = w;
+        drag_dx = mouse_x - w->x;
+        drag_dy = mouse_y - w->y;
+        press_x = mouse_x;
+        press_y = mouse_y;
+        break;
+    case WPC_MINIMIZE: minimize(w); break;
+    case WPC_ZOOM: zoom_win(w); break;
+    case WPC_CLOSE: close_win(w); break;
     }
 }
 
@@ -153,7 +179,7 @@ static void mouse_down(Event *e)
         last_click_x = e->x;
         last_click_y = e->y;
     }
-    if (e->y < w->y + TITLE_H) {
+    if (e->y < w->y + win_th(w)) {
         if (e->button != 1)
             return;
         int b = title_button_at(w, e->x, e->y);
@@ -188,7 +214,7 @@ static void mouse_down(Event *e)
 static void update_button_hover(int x, int y)
 {
     Win *w = window_at(x, y);
-    set_button_hover(w && y < w->y + TITLE_H && x < w->x + U(70) ? w : 0);
+    set_button_hover(w && y < w->y + win_th(w) && x < w->x + U(70) ? w : 0);
 }
 
 static void mouse_move(Event *e)
@@ -210,7 +236,12 @@ static void mouse_move(Event *e)
         dock_hover_at(e->x, e->y);
         update_button_hover(e->x, e->y);
         Win *a = app_grab ? app_grab : window_at(e->x, e->y);
-        if (a && (app_grab || e->y >= a->y + TITLE_H))
+        int inside = a && (app_grab || e->y >= a->y + win_th(a));
+        static Win *last_in; /* Maus hat ein Fenster verlassen: noch eine Bewegung (ausserhalb), damit es Hervorhebungen loescht */
+        if (last_in && last_in != (inside ? a : 0) && last_in->used)
+            app_input(last_in, EV_MOVE, 0, e->x, e->y, 0, 0);
+        last_in = inside ? a : 0;
+        if (inside)
             app_input(a, EV_MOVE, 0, e->x, e->y, 0, 0);
         return;
     }
@@ -304,8 +335,15 @@ void _start(int argc, char **argv)
         while (n < 64 && gfx_poll(&e)) {
             n++;
             if (e.type == EV_KEY) key(e.key);
-            else if (e.type == EV_DOWN) { mouse_down(&e); update_button_hover(e.x, e.y); }
+            else if (e.type == EV_DOWN) {
+                mouse_x = e.x;
+                mouse_y = e.y;
+                mouse_held |= e.button == 1;
+                mouse_down(&e);
+                update_button_hover(e.x, e.y);
+            }
             else if (e.type == EV_UP) {
+                mouse_held = 0;
                 if (drag_mode == 1 && snap_zone && drag_win && drag_win->used)
                     snap_win(drag_win, snap_zone);
                 snap_zone = SNAP_NONE;

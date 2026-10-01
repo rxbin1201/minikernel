@@ -632,6 +632,21 @@ static void gfx_win_resize(int w, int h)
     gfx_push(e);
 }
 
+static int gfx_zoomed;
+
+void gfx_window_cmd(int cmd)
+{
+    if (!gfx_win)
+        return;
+    WpMsg m = {WP_WINCMD, cmd, 0, 0, 0, 0, 0, 0, {0}};
+    wp_send(&m);
+}
+
+int gfx_window_zoomed(void)
+{
+    return gfx_zoomed;
+}
+
 static void gfx_win_collect(void)
 {
     WpMsg m;
@@ -648,7 +663,13 @@ static void gfx_win_collect(void)
         } else if (m.type == WP_FRAME) {
             gfx_win_frame = 1;
         } else if (m.type == WP_RESIZE) {
-            gfx_win_resize(m.a, m.b);
+            gfx_zoomed = m.c;
+            if (m.a != gfx_screen.w || m.b != gfx_screen.h)
+                gfx_win_resize(m.a, m.b);
+            else { /* nur der Zustand (maximiert) hat sich geaendert: neu zeichnen lassen */
+                Event e = {EV_RESIZE, 0, m.a, m.b, 0, 0};
+                gfx_push(e);
+            }
         }
     }
     static int reported;
@@ -728,7 +749,8 @@ static int gfx_win_open(int w, int h, const char *title, int flags)
     gfx_qh = gfx_qt = 0;
     gfx_dx0 = gfx_dx1 = 0;
     gfx_win = 1;
-    WpMsg m = {WP_CREATE, w, h, (int)gfx_shm_id, flags & GFX_RESIZABLE ? WPF_RESIZABLE : 0, 0, 0, 0, {0}};
+    int wf = (flags & GFX_RESIZABLE ? WPF_RESIZABLE : 0) | (flags & GFX_FRAMELESS ? WPF_FRAMELESS : 0);
+    WpMsg m = {WP_CREATE, w, h, (int)gfx_shm_id, wf, 0, 0, 0, {0}};
     snprintf(m.text, sizeof(m.text), "%s", title ? title : "");
     wp_send(&m);
     return 0;

@@ -51,9 +51,12 @@ typedef struct {
     int  app_frame, app_done;     /* wartet auf WP_FRAME; Pipe ist zu */
     int  app_move, app_mx, app_my; /* gesammelte Mausbewegung (eine je Bild) */
     int  app_close_n;             /* so oft wurde um das Schliessen gebeten */
-    int  req_w, req_h;            /* zuletzt mit WP_RESIZE verlangte Groesse */
+    int  req_w, req_h, req_zoom;  /* zuletzt mit WP_RESIZE gemeldete Groesse und Zustand */
     char open_path[WP_PATH_MAX];  /* WP_OPEN: Pfad wird aus Stuecken zusammengesetzt */
 } Win;
+
+/* Hoehe der Titelleiste (0 bei rahmenlosen Fenstern, die zeichnen ihre Knoepfe selbst) */
+static inline int win_th(const Win *w) { return (w->flags & WPF_FRAMELESS) ? 0 : TITLE_H; }
 
 /* Aktionen (Menues und Taskleiste). Die ersten sind zugleich die Programmsymbole (ICON_* in ui.h). */
 enum { A_NONE, A_TERM, A_FILES, A_CALC, A_CLOCK, A_ABOUT, A_PAINT, A_SNAKE, A_TETRIS, A_EDIT, A_MUSIC, A_QUIT = 20, A_SEP,
@@ -80,6 +83,7 @@ extern Win     *drag_win;
 extern int      mouse_x, mouse_y;
 extern s64      now_us;      /* Zeit dieses Bildes (Mikrosekunden) */
 void do_action(int a);
+void window_cmd(Win *w, int cmd); /* WP_WINCMD eines rahmenlosen Fensters */
 
 /* ---------- chrome.c: Masse, Hintergrund, Taskleiste, Menues ---------- */
 

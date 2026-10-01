@@ -152,9 +152,9 @@ void anim_tick(void)
 void content_rect(const Win *w, int *x, int *y, int *cw, int *ch)
 {
     *x = w->x;
-    *y = w->y + TITLE_H;
+    *y = w->y + win_th(w);
     *cw = w->w;
-    *ch = w->h - TITLE_H;
+    *ch = w->h - win_th(w);
 }
 
 Win *new_window(const char *title, int w, int h)
@@ -397,7 +397,7 @@ static float btn_cx(int i) { return (float)U(20) + (float)i * U(20); } /* Mitte 
 int title_button_at(const Win *w, int x, int y)
 {
     int ly = y - w->y, lx = x - w->x;
-    if (ly < 0 || ly >= TITLE_H)
+    if (ly < 0 || ly >= win_th(w))
         return 0;
     for (int i = 0; i < 3; i++) {
         float dx = lx - btn_cx(i), dy = ly - TITLE_H * 0.5f;
@@ -449,16 +449,18 @@ static void draw_window(Win *w)
     Surface *s = tgt;
     int active = w == focused();
     gfx_no_clip();
-    gfx_gradient(s, w->x, w->y, w->w, TITLE_H, active ? C_TITLE_TOP : 0xF8F8F8, active ? C_TITLE_BOT : 0xF2F2F2);
-    gfx_fill(s, w->x, w->y + TITLE_H - 1, w->w, 1, C_HAIRLINE);
-    draw_buttons(s, w, active);
-    int tw = text_width(font_bold, FS, w->title), tx = w->x + (w->w - tw) / 2;
-    if (tx < w->x + U(80))
-        tx = w->x + U(80);
-    gfx_set_clip(w->x + U(80), w->y, w->w - U(90), TITLE_H);
-    text_draw(s, font_bold, FS, tx, w->y + (TITLE_H - text_height(font_bold, FS)) / 2, w->title,
-              active ? 0x4D4D4D : 0xA8A8AC);
-    gfx_no_clip();
+    if (win_th(w)) { /* rahmenlose Fenster zeichnen ihren Kopf selbst */
+        gfx_gradient(s, w->x, w->y, w->w, TITLE_H, active ? C_TITLE_TOP : 0xF8F8F8, active ? C_TITLE_BOT : 0xF2F2F2);
+        gfx_fill(s, w->x, w->y + TITLE_H - 1, w->w, 1, C_HAIRLINE);
+        draw_buttons(s, w, active);
+        int tw = text_width(font_bold, FS, w->title), tx = w->x + (w->w - tw) / 2;
+        if (tx < w->x + U(80))
+            tx = w->x + U(80);
+        gfx_set_clip(w->x + U(80), w->y, w->w - U(90), TITLE_H);
+        text_draw(s, font_bold, FS, tx, w->y + (TITLE_H - text_height(font_bold, FS)) / 2, w->title,
+                  active ? 0x4D4D4D : 0xA8A8AC);
+        gfx_no_clip();
+    }
 
     int x, y, cw, ch;
     content_rect(w, &x, &y, &cw, &ch);

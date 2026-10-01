@@ -109,7 +109,10 @@ Milchglas ueber einem berechneten Farbverlauf:
 - **System:** Netzwerk, Lautstaerke (Klick: stumm/zurueck, Mausrad: lauter/leiser) und ^ (Ueber MiniKernel, Neu
   starten, Ausschalten, Zur Konsole)
 
-Menues oeffnen sich nach oben ueber ihrem Knopf, Esc schliesst sie. Fenster haben runde Ecken, weiche Schatten und die
+Menues oeffnen sich nach oben ueber ihrem Knopf, Esc schliesst sie. Programme koennen ihr Fenster ohne Titelleiste
+oeffnen (`GFX_FRAMELESS`, z.B. Dateien): sie zeichnen dann selbst Knoepfe wie bei Windows (Minimieren, Maximieren,
+Schliessen) und bitten den Desktop mit `gfx_window_cmd` ums Verschieben (Ziehen an einer freien Flaeche, Doppelklick
+maximiert), Minimieren, Maximieren und Schliessen. Fenster haben runde Ecken, weiche Schatten und die
 drei Knoepfe (schliessen, minimieren, zoomen; Doppelklick auf die Titelleiste zoomt). Ab 1300 Pixel Hoehe wird alles um
 25 % groesser.
 

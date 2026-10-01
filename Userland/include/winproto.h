@@ -8,7 +8,8 @@
  * anlegen, Bereich geaendert, Titel, naechstes Bild). Alle Nachrichten sind WpMsg (64 Byte).
  *
  * Den Inhalt zeichnet das Programm in geteilten Speicher (SYS_SHM), den der Desktop mit einblendet; der Desktop zeichnet
- * Rahmen, Titelleiste und Schatten. Aendert der Benutzer die Groesse (nur bei WPF_RESIZABLE), schickt der Desktop
+ * Rahmen, Titelleiste und Schatten. Rahmenlose Fenster (WPF_FRAMELESS) haben keine Titelleiste: das Programm zeichnet
+ * eigene Knoepfe und bittet mit WP_WINCMD ums Verschieben, Minimieren, Maximieren oder Schliessen. Aendert der Benutzer die Groesse (nur bei WPF_RESIZABLE), schickt der Desktop
  * WP_RESIZE; das Programm legt einen neuen Puffer an, zeichnet hinein und meldet ihn mit WP_BUFFER (bis dahin zeigt
  * der Desktop den alten). Das alles erledigt die Grafikbibliothek (gfx.c): ein Programm, das unter dem
  * Desktop gfx_open() aufruft, bekommt ein Fenster statt des ganzen Bildschirms.
@@ -27,7 +28,7 @@ enum {
     WP_FOCUS,     /* a = 1: Fenster ist jetzt aktiv, 0: nicht mehr */
     WP_CLOSE,     /* Schliessen-Knopf (das Programm beendet sich oder fragt nach; beim dritten Mal beendet es der Desktop) */
     WP_FRAME,     /* Antwort auf WP_WANT_FRAME: ein Bild ist gezeigt, das naechste kann kommen */
-    WP_RESIZE,    /* a, b = neue Groesse des Inhalts */
+    WP_RESIZE,    /* a, b = neue Groesse des Inhalts, c = 1: maximiert bzw. angedockt */
 
     /* Programm -> Desktop */
     WP_CREATE = 16, /* a = Breite, b = Hoehe (Inhalt), c = Nummer des geteilten Speichers, d = WPF_*, text = Titel */
@@ -37,9 +38,13 @@ enum {
     WP_BUFFER,      /* a, b = Groesse, c = Nummer des neuen geteilten Speichers (nach WP_RESIZE) */
     WP_OPEN,        /* Datei/Ordner mit dem passenden Programm oeffnen (leerer Pfad: neues Textdokument): der Pfad kommt in
                      * Stuecken zu je hoechstens 32 Byte, a = Stelle im Pfad, c = Laenge des Stuecks, b = 1 beim letzten */
+    WP_WINCMD,      /* a = WPC_*: rahmenloses Fenster bittet den Desktop */
 };
 
+enum { WPC_MOVE = 1, WPC_MINIMIZE, WPC_ZOOM, WPC_CLOSE }; /* MOVE: mit der gedrueckten Maustaste verschieben */
+
 #define WPF_RESIZABLE 1 /* Groesse aenderbar (und zoombar) */
+#define WPF_FRAMELESS 2 /* ohne Titelleiste (das Programm zeichnet seine Knoepfe selbst) */
 #define WP_PATH_MAX   256
 
 typedef struct {

@@ -214,7 +214,7 @@ static void attach(Pending *p)
     int cw = m->a, ch = m->b;
     u32 *px = map_buffer((unsigned)m->c, cw, ch);
     m->text[sizeof(m->text) - 1] = 0;
-    Win *w = px ? new_window(m->text[0] ? m->text : p->name, cw, ch + TITLE_H) : 0;
+    Win *w = px ? new_window(m->text[0] ? m->text : p->name, cw, ch + ((m->d & WPF_FRAMELESS) ? 0 : TITLE_H)) : 0;
     if (!w) {
         if (px)
             sys_shm_unmap(px);
@@ -267,11 +267,14 @@ static void poll_window(Win *w)
     while ((r = read_msg(w->app_in, &m)) > 0) {
         if (m.type == WP_DAMAGE) {
             if (m.c > 0 && m.d > 0)
-                win_dirty(w, m.a, TITLE_H + m.b, m.c, m.d);
+                win_dirty(w, m.a, win_th(w) + m.b, m.c, m.d);
         } else if (m.type == WP_TITLE) {
             m.text[sizeof(m.text) - 1] = 0;
             snprintf(w->title, sizeof(w->title), "%s", m.text);
-            win_dirty(w, 0, 0, w->w, TITLE_H);
+            if (win_th(w))
+                win_dirty(w, 0, 0, w->w, TITLE_H);
+        } else if (m.type == WP_WINCMD) {
+            window_cmd(w, m.a);
         } else if (m.type == WP_WANT_FRAME) {
             w->app_frame = 1;
         } else if (m.type == WP_BUFFER) { /* neuer Puffer nach WP_RESIZE */
@@ -329,12 +332,13 @@ void apps_frame(void)
             send_msg(w->app_out, &m);
             w->app_move = 0;
         }
-        int cw = w->w, ch = w->h - TITLE_H;
-        if ((w->flags & WPF_RESIZABLE) && (cw != w->req_w || ch != w->req_h)) {
-            WpMsg m = {WP_RESIZE, cw, ch, 0, 0, 0, 0, 0, {0}};
+        int cw = w->w, ch = w->h - win_th(w), zoom = w->zoomed != 0;
+        if ((w->flags & WPF_RESIZABLE) && (cw != w->req_w || ch != w->req_h || zoom != w->req_zoom)) {
+            WpMsg m = {WP_RESIZE, cw, ch, zoom, 0, 0, 0, 0, {0}};
             send_msg(w->app_out, &m);
             w->req_w = cw;
             w->req_h = ch;
+            w->req_zoom = zoom;
         }
         if (w->app_frame) {
             WpMsg m = {WP_FRAME, 0, 0, 0, 0, 0, 0, 0, {0}};
