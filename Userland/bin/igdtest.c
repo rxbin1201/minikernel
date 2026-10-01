@@ -16,6 +16,7 @@
  *   igdtest dptrain DP-Verbindung abschalten (1 s schwarz) und selbst neu einmessen, dann Bild wieder an
  *   igdtest output  Anschluesse B-D anzeigen; "igdtest output c" legt das Bild von Grund auf auf Port C, nach 12 s zurueck
  *   igdtest vblank  nichts Sichtbares: Bildwechsel-Interrupts eine Sekunde lang zaehlen und die Wartezeiten messen
+ *   igdtest bltmode N  Bild-Updates per Blitter umschalten (0 = aus, 1-6 Testmodi, siehe Ausgabe)
  * Die Messwerte stehen im Kernel-Log: danach "dmesg > /disk/igd.txt" und die Datei schicken. */
 void _start(int argc, char **argv)
 {
@@ -45,6 +46,27 @@ void _start(int argc, char **argv)
     } else if (argc > 1 && strcmp(argv[1], "mode") == 0) {
         op = 7;
         what = "Moduswechsel, der Monitor wird dabei jeweils kurz schwarz";
+    } else if (argc > 1 && strcmp(argv[1], "bltmode") == 0) {
+        static const char *const modes[7] = {
+            "aus: die CPU kopiert die Bild-Updates (Standard)",
+            "Blitter, Cache-Steuerung (MOCS) wie vorgefunden",
+            "wie 1, Programmbild vorher aus dem CPU-Cache zurueckschreiben",
+            "Blitter, MOCS Write-Through",
+            "wie 3, Programmbild vorher zurueckschreiben",
+            "Blitter, MOCS uncached",
+            "wie 5, Programmbild vorher zurueckschreiben",
+        };
+        if (argc < 3 || argv[2][0] < '0' || argv[2][0] > '6' || argv[2][1]) {
+            printf("Aufruf: igdtest bltmode N\n");
+            for (int i = 0; i < 7; i++)
+                printf("  %d  %s\n", i, modes[i]);
+            printf("Danach Fenster ziehen, oeffnen und schliessen: bleiben Striche im Bild?\n");
+            sys_exit(2);
+        }
+        int m = argv[2][0] - '0';
+        s64 r = sys_gpu((u64)(13 | m << 8));
+        printf("igdtest: Modus %d (%s): %s\n", m, modes[m], r == 0 ? "gesetzt" : "geht nicht, siehe dmesg | grep igdblt");
+        sys_exit(r == 0 ? 0 : 1);
     } else if (argc > 1 && strcmp(argv[1], "blit") == 0) {
         op = 3;
         what = "farbige Rechtecke, dann scrollt das Bild";
@@ -55,7 +77,7 @@ void _start(int argc, char **argv)
                info ? "igdinfo" : dp ? "igd" : "igdmode");
         sys_exit(r == 0 ? 0 : 1);
     } else if (argc > 1) {
-        fprintf(2, "Aufruf: igdtest [cursor|blit|info|edid|scale|mode|dp|dpmode|dptrain|output [b|c|d]|vblank]\n");
+        fprintf(2, "Aufruf: igdtest [cursor|blit|info|edid|scale|mode|dp|dpmode|dptrain|output [b|c|d]|vblank|bltmode N]\n");
         sys_exit(2);
     }
     printf("igdtest: startet in 1 s (%s) ...\n", what);

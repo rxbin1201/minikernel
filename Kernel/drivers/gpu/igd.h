@@ -85,6 +85,7 @@ void igd_cursor_move(int x, int y, int visible); /* Spitze des Pfeils bei (x, y)
  * umgeschaltet. 1 = erledigt, 0 = nicht zustaendig (dann wie bisher in den Framebuffer). */
 int  igd_gfx_blit(const uint32_t *src, uint32_t pitch, int x, int y, int w, int h);
 void igd_gfx_end(void); /* Grafikmodus endet: wieder den Framebuffer der Firmware anzeigen */
-void igd_gfx_sync(void); /* bevor die Konsole selbst in den Framebuffer schreibt: Blitter-Auftraege abwarten */
+void igd_gfx_sync(void);
+int  igd_blt_set_mode(int mode); /* igdtest bltmode N: Bild-Updates per Blitter, 0 = aus (igd_blt.c) */ /* bevor die Konsole selbst in den Framebuffer schreibt: Blitter-Auftraege abwarten */
 
 #endif

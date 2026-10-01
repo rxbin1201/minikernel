@@ -80,13 +80,12 @@ In der Shell: `burn 5000 & burn 5000 & cpus` zeigt zwei ausgelastete CPUs.
   3440x1440 mit 100 Hz. `resolution` listet sie mit
   Bildrate und schaltet sofort um (`resolution 2560x1440@60`), die Konsole passt sich an. Fuer den naechsten Start
   speichert es `igdmode=2560x1440@60` und `mode=max` (der Framebuffer der Firmware muss gross genug sein)
-- **Blitter fuer die Bild-Updates** (`igd_blt.c`): statt der CPU kopiert die Blitter-Engine der GPU die fertigen
-  Bilder der Grafikprogramme (z.B. des Desktops) in den Bildspeicher. Das Programmbild wird dafuer in die GGTT
-  eingeblendet (nur wenn es sich aendert); Teil-Updates laufen im Hintergrund, ganze Bilder kopiert die CPU (schneller).
-  Die PPAT (Eintrag 0) setzt der Treiber auf Write-Through im LLC: die GPU liest ueber den mit der CPU geteilten Cache
-  (sieht die Daten der CPU ohne clflush) und schreibt zugleich in den RAM, aus dem die Anzeige liest. Ein Selbsttest beim
-  Start prueft das; sonst und mit `noblt` kopiert wie vorher die CPU.
-  `igdtest info` zeigt, wie viel der Blitter uebernommen hat
+- **Blitter fuer die Bild-Updates** (`igd_blt.c`, noch in Erprobung, standardmaessig aus): die Blitter-Engine kann
+  die Teil-Updates der Grafikprogramme im Hintergrund in den Bildspeicher kopieren (das Programmbild wird dafuer in
+  die GGTT eingeblendet). Auf dem Test-PC zeigt das bisher Striche mit altem Bildinhalt (Cache-Steuerung). Beim Start
+  laufen Ring und Selbsttest; `igdtest bltmode N` schaltet im Betrieb zwischen Testmodi um (Cache-Steuerung MOCS wie
+  vorgefunden / Write-Through / uncached, jeweils mit oder ohne vorheriges Zurueckschreiben des Programmbilds aus dem
+  CPU-Cache), `bltmode=N` in der Kommandozeile gleich beim Start, `noblt` laesst die Engine ganz aus
 - **Bildwechsel-Interrupt** (`igd_irq.c`): die Pipe meldet jeden Bildwechsel per MSI. Grafikprogramme warten mit
   `gfx_vsync()` darauf und laufen so genau im Takt des Monitors (Tetris, Snake, Desktop; `anim` zeigt es), die
   Doppelpufferung wartet darauf statt nachzusehen. Ohne Interrupt (QEMU) ersetzt eine 10-ms-Pause den Takt

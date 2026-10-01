@@ -283,7 +283,13 @@ static int bench(const char *label)
 #define WIN_PAGES   10240   /* Fenster fuer Programmbilder: 40 MiB (3840x2160x4 passt) */
 #define SMALL_PX    16384   /* kleinere Ausschnitte kopiert die CPU (der Auftrag kostet mehr als das Kopieren) */
 
-static int       blt_on;
+static int       blt_on;                        /* Bild-Updates per Blitter (bereit und Modus != 0) */
+static int       blt_ready;                     /* Engine laeuft, Selbsttest bestanden */
+static int       blt_mode;                      /* igdtest bltmode N (Standard 0 = aus) */
+static int       src_flush;                     /* Programmbild vor dem Kopieren aus dem CPU-Cache schreiben */
+static uint32_t  mocs_orig[62];
+static int       mocs_saved;
+#define BLT_MOCS(i) (0xCC00 + 4u * (uint32_t)(i)) /* Cache-Steuerung der Blitter-Engine (62 Eintraege) */
 static int       part_wait;                     /* "bltwait": auch Teil-Updates abwarten (zur Fehlersuche) */
 static int       tlb_stale;                     /* GGTT-Fenster geaendert: vor dem naechsten Auftrag TLB verwerfen */
 static uint32_t  pte_wb, pte_uc;                /* PAT-Bits im GGTT-Eintrag: Programmbilder bzw. Bildpuffer */
@@ -323,7 +329,7 @@ static void blt_fail(const char *why)
     igd_wr(GDRST, GRDOM_BLT);
     WAIT_UNTIL(!(igd_rd(GDRST) & GRDOM_BLT), 100);
     forcewake_put();
-    blt_on = 0;
+    blt_on = blt_ready = 0;
     win_as = 0;
     restore_pat();
 }
@@ -359,7 +365,7 @@ int igd_blt_on(void)
 /* Wartet, bis der Blitter alles erledigt hat (vor jedem Schreiben der CPU in die Bildpuffer). 0 = ok */
 int igd_blt_sync(void)
 {
-    if (!blt_on)
+    if (!blt_ready)
         return 0;
     if (wait_seqno(last_n, 200))
         return 0;
@@ -422,6 +428,9 @@ int igd_blt_copy_user(uint32_t dst, const uint32_t *src, uint32_t pitch, int x, 
         return 0;
     }
     /* Quelle: Seitenanfang im Fenster, Lage des Rechtecks darin als Koordinaten */
+    if (src_flush) /* Modus mit Zurueckschreiben: was noch im CPU-Cache liegt, in den RAM */
+        for (int r = 0; r < h; r++)
+            igd_clflush(va + (uint64_t)r * pitch * 4, (uint64_t)w * 4);
     uint64_t off = va - win_va, page_off = off & ~0xFFFULL, in = off & 0xFFF;
     uint32_t sgtt = (win_base << 12) + (uint32_t)page_off, spitch = pitch * 4;
     int sx = (int)((in % spitch) / 4), sy = (int)(in / spitch);
@@ -476,12 +485,12 @@ void igd_blt_report(void)
     uint32_t mhz = cur_mhz();
     forcewake_put();
     if (!blt_on) {
-        kprintf("igdinfo: Blitter: aus (Bild-Updates per CPU)\n");
+        kprintf("igdinfo: Blitter: aus (Bild-Updates per CPU)%s\n", blt_ready ? ", bereit: igdtest bltmode N" : "");
         return;
     }
-    kprintf("igdinfo: Blitter an, GPU-Takt jetzt %u MHz: %lu Teil-Updates (je %lu Pixel, Abschicken %lu us), "
+    kprintf("igdinfo: Blitter an (Modus %d), GPU-Takt jetzt %u MHz: %lu Teil-Updates (je %lu Pixel, Abschicken %lu us), "
             "%lu ganze Bilder (je %lu us, max %lu us)\n",
-            mhz, (unsigned long)bs.part_n, (unsigned long)(bs.part_n ? bs.part_px / bs.part_n : 0),
+            blt_mode, mhz, (unsigned long)bs.part_n, (unsigned long)(bs.part_n ? bs.part_px / bs.part_n : 0),
             (unsigned long)(bs.part_n ? bs.part_us / bs.part_n : 0), (unsigned long)bs.full_n,
             (unsigned long)(bs.full_n ? bs.full_us / bs.full_n : 0), (unsigned long)bs.full_max_us);
     kprintf("igdinfo: Blitter: %lu Mal Programmbild neu eingeblendet, %lu Mal doch per CPU\n", (unsigned long)bs.remaps,
@@ -571,7 +580,7 @@ int igd_blt_init(void)
     uint32_t *s = (uint32_t *)t_phys, *d = (uint32_t *)(t_phys + 4096);
     memset(d, 0, 4096);
     igd_clflush((uint64_t)d, 4096);
-    blt_on = 1;
+    blt_ready = 1;
     int bad = 0;
     uint64_t us = 0;
     for (int round = 0; round < 2 && !bad; round++) {
@@ -592,14 +601,55 @@ int igd_blt_init(void)
     }
     if (bad) {
         kprintf("igdblt: Selbsttest: %d von 1024 Pixeln falsch (GPU sieht die CPU-Daten nicht) - Bild-Updates per CPU\n", bad);
-        blt_on = 0;
+        blt_on = blt_ready = 0;
         restore_pat();
         return -1;
     }
     part_wait = cmdline_has("bltwait");
-    kprintf("igdblt: Blitter uebernimmt die Bild-Updates%s (Selbsttest ok, %lu us; GPU-Takt bis %u MHz)\n",
-            part_wait ? " (bltwait: auch Teil-Updates abgewartet)" : "",
-            (unsigned long)us, rp0 * 50);
+    forcewake_get();
+    kprintf("igdblt: Blitter bereit (Selbsttest ok, %lu us; GPU-Takt bis %u MHz), MOCS[0-3] %#x %#x %#x %#x\n",
+            (unsigned long)us, rp0 * 50, igd_rd(BLT_MOCS(0)), igd_rd(BLT_MOCS(1)), igd_rd(BLT_MOCS(2)), igd_rd(BLT_MOCS(3)));
+    forcewake_put();
+    const char *m = cmdline_get("bltmode");
+    igd_blt_set_mode(m && m[0] >= '0' && m[0] <= '6' ? m[0] - '0' : 0);
+    return 0;
+}
+
+/* Testmodi (igdtest bltmode N), solange Bild-Updates per Blitter noch Striche zeigen:
+ *   0 aus (CPU kopiert)
+ *   1 Blitter, Cache-Steuerung (MOCS) wie vorgefunden      2 wie 1, Programmbild vorher aus dem CPU-Cache schreiben
+ *   3 MOCS Write-Through/LLC                                4 wie 3, Programmbild vorher zurueckschreiben
+ *   5 MOCS uncached                                         6 wie 5, Programmbild vorher zurueckschreiben */
+int igd_blt_set_mode(int mode)
+{
+    if (mode < 0 || mode > 6)
+        return -1;
+    if (!blt_ready) {
+        kprintf("igdblt: Blitter nicht bereit (siehe dmesg | grep igdblt)\n");
+        return -2;
+    }
+    igd_blt_sync();
+    int mocs = mode <= 2 ? 0 : mode <= 4 ? 1 : 2; /* 0 wie vorgefunden, 1 WT/LLC, 2 uncached */
+    forcewake_get();
+    if (!mocs_saved) {
+        for (int i = 0; i < 62; i++)
+            mocs_orig[i] = igd_rd(BLT_MOCS(i));
+        mocs_saved = 1;
+    }
+    for (int i = 0; i < 62; i++)
+        igd_wr(BLT_MOCS(i), mocs == 0 ? mocs_orig[i] : mocs == 1 ? 0x36u : 0x09u); /* WT|LLC|LRU3 bzw. UC|LLC/eLLC */
+    uint32_t now0 = igd_rd(BLT_MOCS(0));
+    forcewake_put();
+    tlb_stale = 1;
+    src_flush = mode == 2 || mode == 4 || mode == 6;
+    blt_mode = mode;
+    blt_on = mode != 0;
+    static const char *const names[3] = {"wie vorgefunden", "Write-Through/LLC", "uncached"};
+    if (mode)
+        kprintf("igdblt: Modus %d: Blitter an, MOCS %s (MOCS[0] jetzt %#x)%s\n", mode, names[mocs], now0,
+                src_flush ? ", Programmbild vorher aus dem CPU-Cache zurueckschreiben" : "");
+    else
+        kprintf("igdblt: Modus 0: Bild-Updates per CPU\n");
     return 0;
 }
 
@@ -627,12 +677,12 @@ int igd_blit_test(void)
         return rc;
     }
     /* Laeuft der Blitter schon fuer die Bild-Updates: anhalten, der Test nimmt einen eigenen Ring; danach weiter */
-    int resume = blt_on;
+    int resume = blt_ready;
     uint32_t *keep_ring = ring, keep_rg = ring_gtt, keep_hg = hws_gtt, keep_seq = seqno;
     volatile uint32_t *keep_hws = hws;
     if (resume) {
         igd_blt_sync();
-        blt_on = 0;
+        blt_on = blt_ready = 0;
         forcewake_get();
         ring_stop();
         forcewake_put();
@@ -812,8 +862,9 @@ out_free:
         forcewake_get();
         ring_ok = ring_start();
         forcewake_put();
-        blt_on = ring_ok;
-        kprintf("igdblt: Dauerbetrieb %s\n", blt_on ? "laeuft wieder" : "startet nicht, Bild-Updates per CPU");
+        blt_ready = ring_ok;
+        blt_on = blt_ready && blt_mode;
+        kprintf("igdblt: Blitter %s\n", blt_ready ? "wieder bereit" : "startet nicht, Bild-Updates per CPU");
     }
     kprintf("igdtest: %s\n", rc == 0 ? "Blitter funktioniert" : "Blitter mit Fehlern, bitte Log schicken");
     return rc;
