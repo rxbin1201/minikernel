@@ -40,6 +40,10 @@ typedef struct {
      * nur kopiert (mit runden Ecken). Neu zu zeichnen ist das Rechteck [rx0, rx1) x [ry0, ry1) in Fensterkoordinaten. */
     Surface buf;
     int     rx0, ry0, rx1, ry1;
+    /* Rahmen (1 px, dunkel) ist ins Bild eingezeichnet, in den R oberen und unteren Zeilen steht in Byte 3 die Deckung
+     * der runden Ecken - so kann auch die GPU das Fenster aufsetzen (gpu.c). Dazu der Schatten als Bild: */
+    Surface shd_tb, shd_lr;
+    int     shd_w, shd_h, shd_a;      /* fuer diese Groesse und Staerke berechnet */
     /* Das Programm dahinter (client.c) */
     int  pid;
     int  app;                     /* Aktion (A_*) bzw. Symbol (ICON_*), mit der es gestartet wurde */
@@ -138,6 +142,22 @@ void anim_tick(void);        /* laufende Fenster-Animationen weiterfuehren */
 int  title_button_at(const Win *w, int x, int y); /* 1 schliessen, 2 minimieren, 3 zoomen, 0 keiner */
 void set_button_hover(Win *w);                    /* Maus ueber den Knoepfen: Symbole zeigen */
 void draw_all(void);
+
+/* ---------- gpu.c: Zusammensetzen auf der GPU ---------- */
+
+extern int gpu_mode;   /* 0 = CPU, 1 = GPU, 2 = CPU-Ersatz im Kernel (gpucomp=soft) */
+int  gpu_init(void);   /* nach gfx_open: Bildschirmbild in geteilten Speicher */
+void gpu_quit(void);   /* vor gfx_close */
+int  gsurf_new(Surface *s, int w, int h); /* Flaeche, die die GPU benutzen kann (sonst wie surface_new) */
+void gsurf_free(Surface *s);
+int  gsurf_handle(const Surface *s);      /* Nummer beim Kernel, 0 = nur CPU */
+void gq_copy(const Surface *d, int dx, int dy, const Surface *s, int sx, int sy, int w, int h, const Clip *c);
+void gq_blend(const Surface *d, int dx, int dy, const Surface *s, int sx, int sy, int w, int h, const Clip *c);
+void gq_cancel(void);
+int  gq_submit(void);  /* 0 = alles fertig gezeichnet, sonst muss die CPU den Bereich zeichnen */
+void gpu_stat(int gpu, s64 us, s64 px);
+int  shadow_ready(Win *w, int alpha);     /* Schattenbild passend zu Groesse und Staerke; 0 = geht nicht */
+void shadow_free(Win *w);
 
 /* ---------- dialog.c: Ausschalten / Neu starten ---------- */
 

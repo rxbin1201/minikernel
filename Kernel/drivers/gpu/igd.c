@@ -911,6 +911,7 @@ int igd_info_report(void)
     kprintf("igdinfo: Teil-Updates: %lu, je %lu Pixel, %lu us\n", (unsigned long)bstat.part_n,
             (unsigned long)us_avg(bstat.part_px, bstat.part_n), (unsigned long)us_avg(bstat.part_us, bstat.part_n));
     igd_blt_report();
+    igd_comp_report();
     if (!igd_flip_ready)
         return 0;
     igd_blt_sync();

@@ -78,6 +78,10 @@
                             1 einblenden (nummer) -> Adresse, 2 ausblenden (adresse), 3 Groesse (nummer) -> Bytes */
 #define SYS_SERVICE   66 /* (op, name, int *fds): benannte Dienste (service.h): 0 anmelden, 1 abmelden, 2 verbinden (fds[2]:
                             lesen, schreiben), 3 annehmen (fds[3]: lesen, schreiben, PID; ERR_AGAIN = keine wartet) */
+#define SYS_GPUCOMP   67 /* (op, a, b): Zusammensetzen auf der GPU (igd_comp.c). 0 Art -> 0 keins, 1 GPU, 2 CPU-Ersatz im Kernel;
+                            1 Flaeche anmelden (shm-Nummer, breite | hoehe << 16) -> Nummer; 2 abmelden (nummer);
+                            3 ausfuehren (GpuOp *, anzahl) -> 0, erst zurueck, wenn alles fertig ist;
+                            4 Messwert melden (0 CPU / 1 GPU, mikrosekunden | pixel << 32) */
 #define SYS_KLOG      61 /* (u64 *pos, buf, max) -> Bytes aus dem Kernel-Log ab *pos (wird weitergezaehlt), 0 = Ende */
 
 /* Argument fuer SYS_SENDTO/SYS_RECVFROM (gleiches Layout in Userland/user.h) */

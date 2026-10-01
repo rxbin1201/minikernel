@@ -96,6 +96,10 @@ void gfx_blend_fill(Surface *s, int x, int y, int w, int h, u32 c, int alpha);
 void gfx_round_rect(Surface *s, int x, int y, int w, int h, int r, u32 c, int alpha);  /* gefuellt, Radius r */
 void gfx_round_frame(Surface *s, int x, int y, int w, int h, int r, u32 c, int alpha); /* 1-px-Rahmen innen */
 void gfx_shadow(Surface *s, int x, int y, int w, int h, int r, int blur, int alpha);   /* weicher Schatten aussen */
+/* Schatten wie gfx_shadow als Bild (schwarz, Deckung in Byte 3) in das Rechteck (x0, y0, rw, rh) von s; das
+ * abgerundete Rechteck (x, y, w, h) darf ausserhalb liegen (zum Mischen auf der GPU) */
+void gfx_shadow_image(Surface *s, int x0, int y0, int rw, int rh, int x, int y, int w, int h, int r, int blur, int alpha);
+int  gfx_round_cov(int xx, int yy, int x, int y, int w, int h, int r); /* Deckung 0-256 im abgerundeten Rechteck */
 void gfx_gradient(Surface *s, int x, int y, int w, int h, u32 top, u32 bottom);
 void gfx_disc(Surface *s, float cx, float cy, float r, u32 c, int alpha);
 void gfx_ring(Surface *s, float cx, float cy, float r, float width, u32 c, int alpha);

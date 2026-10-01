@@ -81,6 +81,8 @@ int     process_munmap(Process *p, uint64_t addr, uint64_t len);
 /* Geteilter Speicher (SYS_SHM): 0 anlegen (bytes, u32 *nummer) -> Adresse, 1 einblenden (nummer) -> Adresse,
  * 2 ausblenden (adresse), 3 Groesse (nummer) -> Bytes */
 int64_t process_shm(Process *p, uint64_t op, uint64_t a, uint64_t b);
+void   *shm_get(uint32_t id, uint64_t *npages, const uint64_t **frames); /* Objekt mit Referenz (Treiber), 0 = gibt es nicht */
+void    shm_put(void *obj);
 
 /* Datei-Deskriptoren */
 struct FdObj *process_fd_get(Process *p, int fd);

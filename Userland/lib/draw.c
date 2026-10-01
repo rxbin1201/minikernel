@@ -220,6 +220,46 @@ void gfx_blur(Surface *s, int radius)
 }
 
 /* Deckung eines Pixels (xx, yy) im abgerundeten Rechteck (x, y, w, h, r): 0-256; innen schnell 256 */
+static inline int round_cov(int xx, int yy, int x, int y, int w, int h, int r);
+
+int gfx_round_cov(int xx, int yy, int x, int y, int w, int h, int r)
+{
+    return round_cov(xx, yy, x, y, w, h, r);
+}
+
+void gfx_shadow_image(Surface *s, int x0, int y0, int rw, int rh, int x, int y, int w, int h, int r, int blur, int alpha)
+{
+    int x1 = x0 + rw, y1 = y0 + rh;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > s->w) x1 = s->w;
+    if (y1 > s->h) y1 = s->h;
+    float cx = x + w * 0.5f, cy = y + h * 0.5f, hw = w * 0.5f, hh = h * 0.5f, inv = 1.0f / (float)(blur > 0 ? blur : 1);
+    for (int yy = y0; yy < y1; yy++) {
+        u32 *p = s->px + (u64)yy * (u64)s->w, flat = 0;
+        int have = 0;
+        for (int xx = x0; xx < x1; xx++) {
+            int straight = xx >= x + r && xx < x + w - r; /* gerades Stueck: in der ganzen Zeile derselbe Wert */
+            if (straight && have) {
+                p[xx] = flat;
+                continue;
+            }
+            float d = rrect_dist(xx + 0.5f, yy + 0.5f, cx, cy, hw, hh, (float)r);
+            u32 v = 0;
+            if (d < blur) {
+                float t = clampf(d * inv, 0, 1), f = 1 - t, a = f * f * f * (float)alpha;
+                if (a >= 1)
+                    v = (u32)(int)a << 24;
+            }
+            p[xx] = v;
+            if (straight) {
+                flat = v;
+                have = 1;
+            }
+        }
+    }
+}
+
 static inline int round_cov(int xx, int yy, int x, int y, int w, int h, int r)
 {
     int ix = xx < x + r ? x + r - xx : xx >= x + w - r ? xx - (x + w - r - 1) : 0;

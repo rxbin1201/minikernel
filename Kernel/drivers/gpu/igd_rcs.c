@@ -156,7 +156,27 @@ static void begin(uint32_t dwords)
 /* Fester Speicher der Render-Engine: beim ersten Test angelegt und danach behalten (wie beim Blitter). So bleiben die
  * Zuordnungen in der GGTT gleich - neu angelegte Seiten an alten Adressen sah die Engine beim zweiten Lauf noch mit
  * der alten Zuordnung. */
-enum { C_RING = 0, C_HWS = 4, C_BATCH = 5, C_STATE = 9, C_RES = 10, C_KERN = 11, C_PAGES = 13 };
+enum { C_RING = 0, C_HWS = 4, C_BATCH = 5, C_STATE = 9, C_RES = 10, C_KERN = 11, C_CKERN = 13, C_CSTATE = 15, C_PAGES = 23 };
+
+/* Die Engine gehoert entweder einem Test (igdtest render/gpgpu) oder dem Zusammensetzen; nach einem Test richtet das
+ * Zusammensetzen sie neu ein (comp_ready = 0) */
+static volatile int rcs_busy;
+static int comp_ready;
+
+static int rcs_acquire(int wait)
+{
+    while (__sync_lock_test_and_set(&rcs_busy, 1)) {
+        if (!wait)
+            return 0;
+        thread_yield();
+    }
+    return 1;
+}
+
+static void rcs_release(void)
+{
+    __sync_lock_release(&rcs_busy);
+}
 static uint64_t core_mem;
 static uint32_t core_base;
 
@@ -249,7 +269,7 @@ static uint32_t rd_scratch(volatile uint32_t *p)
     return *p;
 }
 
-int igd_render_test(void)
+static int render_test(void)
 {
     int pre = igd_preflight("Stufe 5 - Render-Engine");
     if (pre)
@@ -641,9 +661,7 @@ static uint8_t blend_ref(uint8_t s, uint8_t d, uint8_t a)
 #define ST_SURF0    0x1C0
 #define ST_SURF1    0x200
 
-typedef struct {
-    uint32_t gtt, w, h, pitch; /* Flaeche: GGTT-Adresse, Breite (Bytes), Hoehe, Zeilenlaenge */
-} GpuSurf;
+typedef IgdSurf GpuSurf; /* Flaeche: GGTT-Adresse, Breite (Bytes), Hoehe, Zeilenlaenge */
 
 static void surf_state(uint32_t *ss, const GpuSurf *s)
 {
@@ -802,7 +820,7 @@ static void big_wr(const uint64_t *pg, uint64_t off, uint32_t v)
     *(uint32_t *)(pg[off / 4096] + off % 4096) = v;
 }
 
-int igd_gpgpu_test(void)
+static int gpgpu_test(void)
 {
     int pre = igd_preflight("Stufe 5 - Programme auf den Recheneinheiten");
     if (pre)
@@ -1021,5 +1039,189 @@ out_mem:
     kfree(saved);
     kfree(big);
     kprintf("igdtest: %s\n", rc == 0 ? "GPGPU-Kernel laufen" : "GPGPU-Kernel mit Fehlern, bitte Log schicken");
+    return rc;
+}
+
+int igd_render_test(void)
+{
+    rcs_acquire(1);
+    comp_ready = 0;
+    int rc = render_test();
+    rcs_release();
+    return rc;
+}
+
+int igd_gpgpu_test(void)
+{
+    rcs_acquire(1);
+    comp_ready = 0;
+    int rc = gpgpu_test();
+    rcs_release();
+    return rc;
+}
+
+/* ---------- Zusammensetzen fuer den Desktop (igd_comp.c) ----------
+ * Kopieren und Mischen mit denselben Kernels wie igdtest gpgpu. Jeder Auftrag bekommt eigene Flaechen, die genau so
+ * gross sind wie sein Rechteck (Basisadresse = Ecke): was ein Thread ueber den Rand hinaus schreibt, verwirft die
+ * Hardware - so gehen beliebige Rechtecke, obwohl jeder Thread einen Block von 8 x 8 Pixeln bearbeitet.
+ * Zustandsbereich: je Auftrag 256 Bytes: Interface Descriptor, Konstanten (linker Rand des Rechtecks in Ziel und
+ * Quelle, falls die Flaechen an 64 Byte ausgerichtet beginnen), Binding Table (Ziel, Quelle), zwei Surface States.
+ * Zwischen zwei Auftraegen wartet ein PIPE_CONTROL, bis alle Threads fertig sind (spaetere Auftraege lesen, was
+ * fruehere geschrieben haben). */
+
+#define CK_BLEND    256   /* Mischen-Kernel hinter dem Kopier-Kernel (Kernelbasis = C_CKERN) */
+#define CS_OPS      0     /* erster Auftrag im Zustandsbereich */
+
+static int comp_start(void)
+{
+    if (core_setup() != 0)
+        return 0;
+    if (!igd_forcewake_get()) {
+        kprintf("igdcomp: Forcewake nicht bestaetigt\n");
+        return 0;
+    }
+    int ok = ring_start();
+    for (int i = 0; i < 62; i++) /* Cache-Steuerung der Render-Engine: uncached (wie bei den Tests) */
+        igd_wr(GFX_MOCS(i), 0x09);
+    if (!ok)
+        dump("Ring startet NICHT");
+    igd_forcewake_put();
+    if (!ok)
+        return 0;
+    uint8_t *k = core_ptr(C_CKERN);
+    int nc = asm_copy32x8((uint32_t (*)[4])k);
+    int nb = asm_blend32x8((uint32_t (*)[4])(k + CK_BLEND));
+    if (nc * 16 > CK_BLEND || CK_BLEND + nb * 16 > 2 * 4096) {
+        kprintf("igdcomp: Kernel zu gross (%d / %d Befehle)\n", nc, nb);
+        return 0;
+    }
+    igd_clflush((uint64_t)k, 2 * 4096);
+    comp_ready = 1;
+    kprintf("igdcomp: Render-Engine eingerichtet (Kopieren %d, Mischen %d Befehle)\n", nc, nb);
+    return 1;
+}
+
+int igd_rcs_comp(const IgdCompOp *ops, int n, uint64_t *us)
+{
+    if (n <= 0)
+        return 0;
+    if (n > IGD_COMP_MAX_OPS)
+        return -2;
+    if (!rcs_acquire(0))
+        return -1;
+    int rc = 0;
+    if (!comp_ready && !comp_start()) {
+        rc = -2;
+        goto out;
+    }
+    uint8_t *st = core_ptr(C_CSTATE);
+    uint32_t *b = core_ptr(C_BATCH), k = 0;
+    memset(st, 0, CS_OPS + (uint32_t)n * 256);
+    b[k++] = PIPELINE_SELECT_GPGPU;
+    b[k++] = STATE_BASE_ADDRESS; /* Surface/Dynamic = Zustandsbereich, Instruction = Kernel */
+    b[k++] = 0 | 1;
+    b[k++] = 0;
+    b[k++] = 0 | 1;
+    b[k++] = core_gtt(C_CSTATE) | 1;
+    b[k++] = 0;
+    b[k++] = core_gtt(C_CSTATE) | 1;
+    b[k++] = 0;
+    b[k++] = 0;
+    b[k++] = 0;
+    b[k++] = core_gtt(C_CKERN) | 1;
+    b[k++] = 0;
+    b[k++] = 0xFFFFF000u | 1;
+    b[k++] = (8u << 12) | 1;     /* Dynamic State: 8 Seiten */
+    b[k++] = 0xFFFFF000u | 1;
+    b[k++] = (2u << 12) | 1;     /* Kernel: 2 Seiten */
+    b[k++] = 0 | 1;
+    b[k++] = 0;
+    b[k++] = 0xFFFFF000u;
+    b[k++] = MEDIA_VFE_STATE;
+    b[k++] = 0;
+    b[k++] = 0;
+    b[k++] = (EU_THREADS - 1) << 16 | (1u << 8);
+    b[k++] = 0;
+    b[k++] = (0u << 16) | 1;
+    b[k++] = 0;
+    b[k++] = 0;
+    b[k++] = 0;
+    for (int i = 0; i < n; i++) {
+        const IgdCompOp *o = &ops[i];
+        uint32_t off = CS_OPS + (uint32_t)i * 256;
+        uint32_t *idd = (uint32_t *)(st + off), *cb = (uint32_t *)(st + off + 64), *bt = (uint32_t *)(st + off + 96);
+        idd[0] = o->blend ? CK_BLEND : 0;
+        idd[2] = 1u << 18;       /* Single Program Flow */
+        idd[4] = off + 96;       /* Binding Table */
+        idd[5] = 1u << 16;       /* Konstanten: 1 Register */
+        idd[6] = 1;
+        cb[0] = o->dst_off;      /* Ziel x (Bytes), y */
+        cb[2] = o->src_off;      /* Quelle x, y */
+        bt[0] = off + 128;
+        bt[1] = off + 192;
+        surf_state((uint32_t *)(st + off + 128), &o->dst);
+        surf_state((uint32_t *)(st + off + 192), &o->src);
+        b[k++] = MEDIA_CURBE_LOAD;
+        b[k++] = 0;
+        b[k++] = 32;
+        b[k++] = off + 64;
+        b[k++] = MEDIA_IDD_LOAD;
+        b[k++] = 0;
+        b[k++] = 32;
+        b[k++] = off;
+        b[k++] = GPGPU_WALKER;
+        b[k++] = 0;
+        b[k++] = 0;
+        b[k++] = 0;
+        b[k++] = 1u << 30;       /* SIMD16 */
+        b[k++] = 0;
+        b[k++] = 0;
+        b[k++] = (o->dst.w + 31) / 32;
+        b[k++] = 0;
+        b[k++] = 0;
+        b[k++] = (o->dst.h + 7) / 8;
+        b[k++] = 0;
+        b[k++] = 1;
+        b[k++] = 0xFFFF;
+        b[k++] = 0xFFFFFFFFu;
+        b[k++] = MEDIA_STATE_FLUSH;
+        b[k++] = 0;
+        b[k++] = PIPE_CONTROL;   /* alle Threads fertig, Daten-Cache geleert: der naechste Auftrag sieht das Ergebnis */
+        b[k++] = i + 1 < n ? PC_CS_STALL | PC_DC_FLUSH
+                           : PC_CS_STALL | PC_DC_FLUSH | PC_RT_FLUSH | PC_WRITE_QWORD | PC_GLOBAL_GTT;
+        b[k++] = i + 1 < n ? 0 : core_gtt(C_RES);
+        b[k++] = 0;
+        b[k++] = 0;
+        b[k++] = 0;
+    }
+    b[k++] = MI_BATCH_BUFFER_END;
+    b[k++] = MI_NOOP;
+    igd_clflush((uint64_t)st, CS_OPS + (uint64_t)n * 256);
+    igd_clflush((uint64_t)b, k * 4);
+    if (!igd_forcewake_get()) {
+        rc = -2;
+        goto out;
+    }
+    uint64_t t0 = time_us();
+    begin(4 + 8);
+    emit(MI_BATCH_BUFFER_START);
+    emit(core_gtt(C_BATCH));
+    emit(0);
+    emit(MI_NOOP);
+    uint32_t sn = submit();
+    int ok = wait_seqno(sn, 500);
+    if (us)
+        *us = time_us() - t0;
+    if (!ok) {
+        kprintf("igdcomp: Render-Engine wird mit %d Auftraegen nicht fertig\n", n);
+        dump("Zustand");
+        ring_stop();
+        engine_reset();
+        comp_ready = 0;
+        rc = -2;
+    }
+    igd_forcewake_put();
+out:
+    rcs_release();
     return rc;
 }

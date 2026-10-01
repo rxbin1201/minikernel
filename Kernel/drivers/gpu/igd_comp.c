@@ -1,0 +1,516 @@
+/* Intel-Grafik Gen9, Stufe 6: Zusammensetzen auf der GPU (SYS_GPUCOMP). Der Desktop legt Hintergrund, Bildschirmbild,
+ * Fensterbilder und Schatten in geteiltem Speicher (SYS_SHM) an und meldet sie hier an; der Kernel blendet sie fest in
+ * die GGTT ein (eigener Bereich in der oberen Haelfte) und haelt eine Referenz, solange sie angemeldet sind. Danach
+ * schickt der Desktop je Bild eine Liste von Auftraegen (kopieren, mischen), die die Render-Engine mit den Kernels aus
+ * igd_rcs.c der Reihe nach ausfuehrt.
+ *
+ * Beim ersten Aufruf prueft ein Selbsttest die GPU gegen dieselbe Rechnung auf der CPU (ungerade Rechtecke, die sich
+ * ueberlappen). Klappt er nur, wenn die CPU-Caches vorher zurueckgeschrieben werden, laeuft das Zusammensetzen so
+ * weiter; klappt er gar nicht, meldet der Kernel "keins" und der Desktop setzt wie bisher mit der CPU zusammen.
+ * Kommandozeile: gpucomp=off (aus), gpucomp=soft (dieselben Auftraege rechnet die CPU im Kernel - zum Testen in QEMU). */
+
+#include "drivers/gpu/igd_internal.h"
+#include "arch/x86_64/spinlock.h"
+#include "core/cmdline.h"
+#include "core/process.h"
+#include "core/syscall.h"
+#include "lib/kprintf.h"
+#include "lib/string.h"
+#include "mm/pmm.h"
+
+#define COMP_SURFS   96
+#define COMP_CHUNK   64          /* Auftraege, die auf einmal aus dem Programm geholt werden */
+#define COMP_MAX_W   4000        /* Pixel: Breite (+ Versatz) in Bytes passt in den Surface State (16384) */
+#define COMP_MAX_H   16384
+#define SELF_PID     0xFFFFFFFFu /* Flaechen des Selbsttests */
+
+typedef struct {
+    uint32_t        pid;   /* 0 = frei */
+    void           *shm;   /* Referenz auf das shm-Objekt (0 beim Selbsttest) */
+    const uint64_t *frames;
+    uint32_t        w, h;  /* Pixel */
+    uint32_t        pages; /* belegte Seiten */
+    uint32_t        ggtt;  /* erster GGTT-Eintrag, 0 = nicht eingeblendet (CPU-Ersatz) */
+} CompSurf;
+
+/* Auftrag aus dem Programm (gleiches Layout in Userland/include/user.h) */
+typedef struct {
+    uint16_t kind; /* 1 kopieren, 2 mischen */
+    uint16_t dst, src;
+    uint16_t pad;
+    int32_t  dx, dy, sx, sy, w, h;
+} GpuOp;
+
+static CompSurf  surfs[COMP_SURFS];
+static Spinlock  lock = SPINLOCK_INIT("igdcomp");
+static int       mode = -1;     /* -1 = noch nicht geprueft, 0 keins, 1 GPU, 2 CPU-Ersatz */
+static int       enabled = 1;   /* igdtest comp off/on */
+static int       flush_mode;    /* CPU-Caches vor und nach den Auftraegen zurueckschreiben */
+static int       align_mode;    /* Flaechen an 64 Byte ausgerichtet beginnen lassen, Rest als Versatz an den Kernel */
+static int       fails;
+static uint32_t  region_base, region_end;
+static uint64_t  scratch_pte;
+
+static struct {
+    uint64_t jobs, ops, us, max_us, busy, errors;
+    uint64_t n[2], px[2], t[2]; /* Meldungen des Desktops: 0 CPU, 1 GPU */
+} st;
+
+/* ---------- Flaechen ---------- */
+
+static uint32_t region_alloc(uint32_t n)
+{
+    uint32_t cand = region_base;
+    for (int again = 1; again;) {
+        again = 0;
+        for (int i = 0; i < COMP_SURFS; i++) {
+            const CompSurf *s = &surfs[i];
+            if (s->pid && s->ggtt && cand < s->ggtt + s->pages && s->ggtt < cand + n) {
+                cand = s->ggtt + s->pages;
+                again = 1;
+            }
+        }
+    }
+    return cand + n <= region_end ? cand : 0;
+}
+
+/* Flaeche eintragen und (GPU) einblenden; Nummer + 1 oder 0 */
+static int surf_add(uint32_t pid, void *shm, const uint64_t *frames, uint32_t w, uint32_t h)
+{
+    uint32_t pages = (uint32_t)(((uint64_t)w * h * 4 + 4095) / 4096);
+    uint64_t fl = spin_lock(&lock);
+    int idx = -1;
+    for (int i = 0; i < COMP_SURFS && idx < 0; i++)
+        if (!surfs[i].pid)
+            idx = i;
+    uint32_t base = 0;
+    if (idx >= 0 && mode == 1 && !(base = region_alloc(pages)))
+        idx = -1;
+    if (idx >= 0) {
+        CompSurf *s = &surfs[idx];
+        s->pid = pid;
+        s->shm = shm;
+        s->frames = frames;
+        s->w = w;
+        s->h = h;
+        s->pages = pages;
+        s->ggtt = base;
+        for (uint32_t i = 0; base && i < pages; i++)
+            igd_ggtt[base + i] = (frames[i] & ~0xFFFULL) | IGD_PTE_VALID;
+    }
+    spin_unlock(&lock, fl);
+    if (idx >= 0 && base)
+        igd_ggtt_flush(); /* der Adress-Cache der Engine wird vor jedem Auftrag verworfen (igd_rcs.c) */
+    return idx + 1;
+}
+
+static void surf_drop(CompSurf *s)
+{
+    uint64_t fl = spin_lock(&lock);
+    void *shm = s->shm;
+    for (uint32_t i = 0; s->ggtt && i < s->pages; i++)
+        igd_ggtt[s->ggtt + i] = scratch_pte;
+    int had = s->ggtt != 0;
+    s->ggtt = 0;
+    s->shm = 0;
+    s->pid = 0;
+    spin_unlock(&lock, fl);
+    if (had)
+        igd_ggtt_flush();
+    shm_put(shm);
+}
+
+static CompSurf *surf_get(uint32_t pid, uint32_t handle)
+{
+    if (handle < 1 || handle > COMP_SURFS)
+        return 0;
+    CompSurf *s = &surfs[handle - 1];
+    return s->pid == pid ? s : 0;
+}
+
+void igd_comp_release(uint32_t pid)
+{
+    for (int i = 0; i < COMP_SURFS; i++)
+        if (pid && surfs[i].pid == pid)
+            surf_drop(&surfs[i]);
+}
+
+/* ---------- Ausfuehren ---------- */
+
+typedef struct {
+    int       blend;
+    CompSurf *d, *s;
+    int       dx, dy, sx, sy, w, h;
+} KOp;
+
+/* Rechteck an beide Flaechen anpassen; 0 = leer */
+static int clip_op(KOp *o)
+{
+    if (o->dx < 0) { o->sx -= o->dx; o->w += o->dx; o->dx = 0; }
+    if (o->dy < 0) { o->sy -= o->dy; o->h += o->dy; o->dy = 0; }
+    if (o->sx < 0) { o->dx -= o->sx; o->w += o->sx; o->sx = 0; }
+    if (o->sy < 0) { o->dy -= o->sy; o->h += o->sy; o->sy = 0; }
+    if (o->dx + o->w > (int)o->d->w) o->w = (int)o->d->w - o->dx;
+    if (o->dy + o->h > (int)o->d->h) o->h = (int)o->d->h - o->dy;
+    if (o->sx + o->w > (int)o->s->w) o->w = (int)o->s->w - o->sx;
+    if (o->sy + o->h > (int)o->s->h) o->h = (int)o->s->h - o->sy;
+    return o->w > 0 && o->h > 0;
+}
+
+static inline uint32_t *spx(const CompSurf *s, uint64_t off)
+{
+    return (uint32_t *)(s->frames[off >> 12] + (off & 0xFFF));
+}
+
+/* dieselbe Rechnung wie der Mischen-Kernel: je Byte (s * a + d * (255 - a)) / 255 gerundet, a = Byte 3 der Quelle */
+static uint32_t blend_px(uint32_t s, uint32_t d)
+{
+    uint32_t a = s >> 24, r = 0;
+    for (int c = 0; c < 32; c += 8) {
+        uint32_t x = ((s >> c) & 0xFF) * a + ((d >> c) & 0xFF) * (255 - a) + 128;
+        r |= ((x + (x >> 8)) >> 8) << c;
+    }
+    return r;
+}
+
+/* CPU-Ersatz (gpucomp=soft, Selbsttest): direkt in den Frames */
+static void exec_soft(const KOp *o)
+{
+    for (int r = 0; r < o->h; r++) {
+        uint64_t doff = ((uint64_t)(o->dy + r) * o->d->w + (uint64_t)o->dx) * 4;
+        uint64_t soff = ((uint64_t)(o->sy + r) * o->s->w + (uint64_t)o->sx) * 4;
+        uint32_t left = (uint32_t)o->w;
+        while (left) {
+            uint32_t n = left, dn = (uint32_t)(4096 - (doff & 0xFFF)) / 4, sn = (uint32_t)(4096 - (soff & 0xFFF)) / 4;
+            if (n > dn) n = dn;
+            if (n > sn) n = sn;
+            uint32_t *dp = spx(o->d, doff);
+            const uint32_t *sp = spx(o->s, soff);
+            if (!o->blend)
+                memcpy(dp, sp, n * 4);
+            else
+                for (uint32_t i = 0; i < n; i++)
+                    dp[i] = blend_px(sp[i], dp[i]);
+            left -= n;
+            doff += n * 4;
+            soff += n * 4;
+        }
+    }
+}
+
+/* Zeilen eines Rechtecks aus dem CPU-Cache zurueckschreiben (nur wenn der Selbsttest es verlangt hat) */
+static void flush_rect(const CompSurf *s, int x, int y, int w, int h)
+{
+    for (int r = 0; r < h; r++) {
+        uint64_t off = ((uint64_t)(y + r) * s->w + (uint64_t)x) * 4, end = off + (uint64_t)w * 4;
+        while (off < end) {
+            uint64_t n = 4096 - (off & 0xFFF);
+            if (n > end - off)
+                n = end - off;
+            igd_clflush((uint64_t)spx(s, off), n);
+            off += n;
+        }
+    }
+}
+
+/* Flaeche fuer ein Rechteck: beginnt an seiner Ecke (bzw. an 64 Byte davor ausgerichtet, *off = Abstand) */
+static IgdSurf gsurf(const CompSurf *s, int x, int y, int w, int h, uint32_t *off)
+{
+    uint32_t a = (s->ggtt << 12) + ((uint32_t)y * s->w + (uint32_t)x) * 4;
+    *off = align_mode ? (a & 63) : 0;
+    IgdSurf g = {a - *off, (uint32_t)w * 4 + *off, (uint32_t)h, s->w * 4};
+    return g;
+}
+
+/* Auftraege ausfuehren; 0 = fertig */
+static int exec_ops(const KOp *ops, int n)
+{
+    if (mode == 2) {
+        for (int i = 0; i < n; i++)
+            exec_soft(&ops[i]);
+        st.jobs++;
+        st.ops += (uint64_t)n;
+        return 0;
+    }
+    static IgdCompOp g[IGD_COMP_MAX_OPS];
+    for (int i0 = 0; i0 < n; i0 += IGD_COMP_MAX_OPS) {
+        int m = n - i0 < IGD_COMP_MAX_OPS ? n - i0 : IGD_COMP_MAX_OPS;
+        for (int i = 0; i < m; i++) {
+            const KOp *o = &ops[i0 + i];
+            g[i].blend = o->blend;
+            g[i].dst = gsurf(o->d, o->dx, o->dy, o->w, o->h, &g[i].dst_off);
+            g[i].src = gsurf(o->s, o->sx, o->sy, o->w, o->h, &g[i].src_off);
+            if (flush_mode) {
+                flush_rect(o->s, o->sx, o->sy, o->w, o->h);
+                flush_rect(o->d, o->dx, o->dy, o->w, o->h);
+            }
+        }
+        uint64_t us = 0;
+        int rc = igd_rcs_comp(g, m, &us);
+        if (rc == -1) {
+            st.busy++;
+            return -1;
+        }
+        if (rc != 0) {
+            st.errors++;
+            if (++fails >= 3) {
+                kprintf("igdcomp: dreimal Fehler der Render-Engine - Zusammensetzen auf der GPU aus\n");
+                enabled = 0;
+            }
+            return -1;
+        }
+        if (flush_mode)
+            for (int i = 0; i < m; i++)
+                flush_rect(ops[i0 + i].d, ops[i0 + i].dx, ops[i0 + i].dy, ops[i0 + i].w, ops[i0 + i].h);
+        st.jobs++;
+        st.ops += (uint64_t)m;
+        st.us += us;
+        if (us > st.max_us)
+            st.max_us = us;
+    }
+    return 0;
+}
+
+/* ---------- Selbsttest: GPU gegen CPU, ungerade und ueberlappende Rechtecke ---------- */
+
+/* ungerade Breite: Zeilen beginnen nicht an 64 Byte (wie bei Fenstern beliebiger Breite) */
+enum { TW = 253, TH = 64, TPAGES = (TW * TH * 4 + 4095) / 4096 };
+
+static uint32_t test_pattern(uint32_t i, uint32_t seed)
+{
+    uint32_t v = (i + seed) * 2654435761u;
+    v ^= v >> 13;
+    uint32_t a = (i % 7 == 0) ? 0 : (i % 5 == 0) ? 255 : (v >> 24); /* auch ganz durchsichtig und ganz deckend */
+    return (v & 0xFFFFFF) | a << 24;
+}
+
+static int selftest_round(CompSurf *a, CompSurf *b, CompSurf *ra, CompSurf *rb, uint32_t seed, int *bad_out)
+{
+    static const int t[][7] = { /* mischen, dx, dy, sx, sy, w, h */
+        {0, 13, 5, 7, 3, 77, 29},   {1, 3, 17, 21, 2, 101, 37}, {0, 200, 40, 0, 0, 53, 24},
+        {1, 0, 0, 128, 1, 9, 7},    {1, 61, 30, 30, 11, 133, 21}, {0, 247, 0, 3, 50, 6, 14},
+    };
+    int n = (int)(sizeof(t) / sizeof(t[0]));
+    for (uint32_t i = 0; i < TW * TH; i++) {
+        *spx(a, i * 4) = *spx(ra, i * 4) = test_pattern(i, seed);
+        *spx(b, i * 4) = *spx(rb, i * 4) = test_pattern(i, seed * 7 + 3);
+    }
+    KOp ops[8], ref[8];
+    for (int i = 0; i < n; i++) {
+        ops[i] = (KOp){t[i][0], b, a, t[i][1], t[i][2], t[i][3], t[i][4], t[i][5], t[i][6]};
+        ref[i] = ops[i];
+        ref[i].d = rb;
+        ref[i].s = ra;
+        exec_soft(&ref[i]);
+    }
+    if (exec_ops(ops, n) != 0)
+        return -1;
+    int bad = 0, first = -1;
+    for (uint32_t i = 0; i < TW * TH; i++) /* ohne Zurueckschreiben lesen: sieht die CPU, was die GPU schrieb? */
+        if (*spx(b, i * 4) != *spx(rb, i * 4)) {
+            if (first < 0)
+                first = (int)i;
+            bad++;
+        }
+    if (bad)
+        kprintf("igdcomp: Selbsttest: %d von %d Pixeln falsch, erstes bei (%d, %d): GPU %#x, CPU %#x\n", bad, TW * TH,
+                first % TW, first / TW, *spx(b, (uint64_t)first * 4), *spx(rb, (uint64_t)first * 4));
+    *bad_out = bad;
+    return 0;
+}
+
+static int selftest(void)
+{
+    uint64_t mem = pmm_alloc_frames(4 * TPAGES);
+    if (!mem) {
+        kprintf("igdcomp: kein Speicher fuer den Selbsttest\n");
+        return -1;
+    }
+    static uint64_t fr[4][TPAGES];
+    for (int k = 0; k < 4; k++)
+        for (int i = 0; i < TPAGES; i++)
+            fr[k][i] = mem + ((uint64_t)k * TPAGES + (uint64_t)i) * 4096;
+    int ia = surf_add(SELF_PID, 0, fr[0], TW, TH), ib = surf_add(SELF_PID, 0, fr[1], TW, TH);
+    CompSurf ra = {SELF_PID, 0, fr[2], TW, TH, TPAGES, 0}, rb = {SELF_PID, 0, fr[3], TW, TH, TPAGES, 0};
+    int rc = -1;
+    /* Varianten der Reihe nach: Flaechen genau an der Ecke / an 64 Byte ausgerichtet, je ohne und mit Zurueckschreiben
+     * der CPU-Caches; die erste, die stimmt, bleibt */
+    for (int v = 0; ia && ib && rc != 0 && v < 4; v++) {
+        align_mode = v >> 1;
+        flush_mode = v & 1;
+        int bad1 = 0, bad2 = 0;
+        /* zwei Runden: in der zweiten hat die CPU die Quelle geaendert (alte Daten in GPU-Caches?) */
+        if (selftest_round(&surfs[ia - 1], &surfs[ib - 1], &ra, &rb, 11 + (uint32_t)v, &bad1) != 0 ||
+            selftest_round(&surfs[ia - 1], &surfs[ib - 1], &ra, &rb, 97 + (uint32_t)v, &bad2) != 0) {
+            kprintf("igdcomp: Selbsttest Variante %d: Render-Engine antwortet nicht\n", v);
+            continue;
+        }
+        kprintf("igdcomp: Selbsttest Variante %d (%s, %s): %s\n", v, align_mode ? "ausgerichtet" : "genau",
+                flush_mode ? "mit Zurueckschreiben" : "ohne Zurueckschreiben", bad1 || bad2 ? "falsch" : "ok");
+        if (!bad1 && !bad2)
+            rc = 0;
+    }
+    if (!ia || !ib)
+        kprintf("igdcomp: Selbsttest: Flaechen nicht eingeblendet\n");
+    fails = 0; /* Haenger einzelner Varianten zaehlen nicht fuer den Betrieb */
+    enabled = 1;
+    if (rc != 0)
+        flush_mode = align_mode = 0;
+    if (ia)
+        surf_drop(&surfs[ia - 1]);
+    if (ib)
+        surf_drop(&surfs[ib - 1]);
+    pmm_free_frames(mem, 4 * TPAGES);
+    return rc;
+}
+
+static void comp_init(void)
+{
+    const char *c = cmdline_get("gpucomp");
+    if (c && strcmp(c, "off") == 0) {
+        mode = 0;
+        kprintf("igdcomp: aus (gpucomp=off)\n");
+        return;
+    }
+    if (c && strcmp(c, "soft") == 0) {
+        mode = 2;
+        kprintf("igdcomp: CPU-Ersatz im Kernel (gpucomp=soft), Selbsttest %s\n", selftest() == 0 ? "ok" : "FEHLER");
+        return;
+    }
+    mode = 0;
+    if (!igd_state.gen9 || !igd_regs || !igd_ggtt || igd_ggtt_entries < 0x80000)
+        return;
+    region_base = igd_ggtt_entries / 2 + 0x58000;
+    region_end = igd_ggtt_entries;
+    if (region_base + 0x10000 > region_end) {
+        kprintf("igdcomp: GGTT zu klein\n");
+        return;
+    }
+    uint64_t probe;
+    for (uint32_t e = region_base; e < region_end; e += 0x4000) /* Stichproben: nichts davon zeigt ins Stolen Memory */
+        if (igd_ggtt_claim(e, 1, &probe) != 0)
+            return;
+    scratch_pte = igd_ggtt[region_base];
+    mode = 1;
+    if (selftest() != 0) {
+        kprintf("igdcomp: Selbsttest fehlgeschlagen - der Desktop setzt weiter mit der CPU zusammen\n");
+        mode = 0;
+        return;
+    }
+    kprintf("igdcomp: Selbsttest ok%s%s, GGTT-Bereich %#x-%#x (%u MiB)\n", align_mode ? " (Flaechen ausgerichtet)" : "",
+            flush_mode ? " (mit Zurueckschreiben der CPU-Caches)" : "", region_base, region_end,
+            (region_end - region_base) / 256);
+}
+
+/* ---------- Systemaufruf ---------- */
+
+int64_t igd_comp_sys(uint32_t pid, uint64_t op, uint64_t a, uint64_t b)
+{
+    if (mode < 0)
+        comp_init();
+    if (op == 0)
+        return enabled ? mode : 0;
+    if (op == 4) { /* Messwert des Desktops */
+        int k = a ? 1 : 0;
+        st.n[k]++;
+        st.t[k] += b & 0xFFFFFFFFu;
+        st.px[k] += b >> 32;
+        return 0;
+    }
+    if (mode <= 0)
+        return ERR_NOSYS;
+    if (op == 1) { /* anmelden: shm-Nummer, breite | hoehe << 16 */
+        uint32_t w = (uint32_t)(b & 0xFFFF), h = (uint32_t)((b >> 16) & 0xFFFF);
+        if (!w || !h || w * 4 > COMP_MAX_W * 4 || h > COMP_MAX_H)
+            return ERR_INVAL;
+        uint64_t npages;
+        const uint64_t *frames;
+        void *shm = shm_get((uint32_t)a, &npages, &frames);
+        if (!shm)
+            return ERR_NOENT;
+        if ((uint64_t)w * h * 4 > npages * 4096) {
+            shm_put(shm);
+            return ERR_INVAL;
+        }
+        int hnd = surf_add(pid, shm, frames, w, h);
+        if (!hnd) {
+            shm_put(shm);
+            return ERR_NOMEM;
+        }
+        return hnd;
+    }
+    if (op == 2) { /* abmelden */
+        CompSurf *s = surf_get(pid, (uint32_t)a);
+        if (!s)
+            return ERR_INVAL;
+        surf_drop(s);
+        return 0;
+    }
+    if (op == 3) { /* ausfuehren: GpuOp[b] */
+        if (!enabled)
+            return ERR_AGAIN;
+        if (b > 4096 || !process_user_range_ok(process_current(), a, b * sizeof(GpuOp), 0))
+            return ERR_FAULT;
+        static KOp kops[IGD_COMP_MAX_OPS * 4];
+        int n = 0;
+        for (uint64_t i = 0; i < b; i++) {
+            GpuOp u;
+            memcpy(&u, (const void *)(a + i * sizeof(GpuOp)), sizeof(u));
+            CompSurf *d = surf_get(pid, u.dst), *s = surf_get(pid, u.src);
+            if (!d || !s || d == s || (u.kind != 1 && u.kind != 2))
+                return ERR_INVAL;
+            KOp o = {u.kind == 2, d, s, u.dx, u.dy, u.sx, u.sy, u.w, u.h};
+            if (!clip_op(&o))
+                continue;
+            kops[n++] = o;
+            if (n == (int)(sizeof(kops) / sizeof(kops[0])) || i + 1 == b) {
+                if (exec_ops(kops, n) != 0)
+                    return ERR_AGAIN;
+                n = 0;
+            }
+        }
+        if (n && exec_ops(kops, n) != 0)
+            return ERR_AGAIN;
+        return 0;
+    }
+    return ERR_INVAL;
+}
+
+int igd_comp_set(int on)
+{
+    enabled = on != 0;
+    if (on)
+        fails = 0;
+    kprintf("igdcomp: Zusammensetzen auf der GPU %s\n", on ? "an" : "aus (der Desktop setzt mit der CPU zusammen)");
+    return 0;
+}
+
+static uint64_t per_mpx(uint64_t us, uint64_t px)
+{
+    return px ? us * 1000000 / px : 0;
+}
+
+void igd_comp_report(void)
+{
+    static const char *names[] = {"keins", "GPU", "CPU-Ersatz (gpucomp=soft)"};
+    if (mode < 0) {
+        kprintf("igdcomp: noch nicht benutzt (startet mit dem Desktop)\n");
+        return;
+    }
+    int n = 0;
+    uint64_t pages = 0;
+    for (int i = 0; i < COMP_SURFS; i++)
+        if (surfs[i].pid) {
+            n++;
+            pages += surfs[i].pages;
+        }
+    kprintf("igdcomp: %s, %s%s; %d Flaechen (%lu MiB)\n", names[mode], enabled ? "an" : "aus",
+            flush_mode ? ", mit Zurueckschreiben der CPU-Caches" : "", n, (unsigned long)(pages / 256));
+    kprintf("igdcomp: %lu Auftragslisten mit %lu Auftraegen, je %lu us auf der GPU (max %lu us); %lu belegt, %lu Fehler\n",
+            (unsigned long)st.jobs, (unsigned long)st.ops, (unsigned long)(st.jobs ? st.us / st.jobs : 0),
+            (unsigned long)st.max_us, (unsigned long)st.busy, (unsigned long)st.errors);
+    for (int k = 1; k >= 0; k--)
+        kprintf("igdcomp: Desktop mit %s: %lu Bereiche, %lu Mpx, %lu us je Bereich, %lu us je Mpx\n", k ? "GPU" : "CPU",
+                (unsigned long)st.n[k], (unsigned long)(st.px[k] / 1000000), (unsigned long)(st.n[k] ? st.t[k] / st.n[k] : 0),
+                (unsigned long)per_mpx(st.t[k], st.px[k]));
+}

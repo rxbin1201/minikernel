@@ -315,6 +315,7 @@ void _start(int argc, char **argv)
     (void)argv;
     if (gfx_open() != 0)
         sys_exit(1);
+    gpu_init(); /* Zusammensetzen auf der GPU, wenn es eine passende gibt */
     sys_tty_fg(0); /* Strg+C geht an die Fenster, nicht an den Desktop */
     W = gfx_screen.w;
     H = gfx_screen.h;
@@ -391,6 +392,7 @@ void _start(int argc, char **argv)
         if (wins[i].used)
             close_win_now(&wins[i]);
     apps_quit();
+    gpu_quit();
     gfx_close();
     sys_exit(0);
 }

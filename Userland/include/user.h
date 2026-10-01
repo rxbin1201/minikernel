@@ -72,6 +72,7 @@ typedef long long          s64;
 #define SYS_AUDIO     64
 #define SYS_SHM       65
 #define SYS_SERVICE   66
+#define SYS_GPUCOMP   67
 #define ERR_NOENT     (-2)
 #define ERR_IO        (-5)
 #define ERR_EXIST     (-17)
@@ -281,6 +282,17 @@ static inline s64 sys_shm_create(u64 bytes, unsigned *id)  { return syscall3(SYS
 static inline s64 sys_shm_map(unsigned id)                 { return syscall3(SYS_SHM, 1, id, 0); }
 static inline s64 sys_shm_unmap(void *addr)                { return syscall3(SYS_SHM, 2, (u64)addr, 0); }
 static inline s64 sys_shm_size(unsigned id)                { return syscall3(SYS_SHM, 3, id, 0); }
+
+/* Zusammensetzen auf der GPU (Desktop): 0 Art -> 0 keins, 1 GPU, 2 CPU-Ersatz im Kernel; 1 shm-Flaeche anmelden
+ * (nummer, breite | hoehe << 16) -> Nummer; 2 abmelden; 3 Auftraege ausfuehren (GpuOp *, anzahl) -> 0 wenn fertig;
+ * 4 Messwert (0 CPU / 1 GPU, mikrosekunden | pixel << 32) */
+typedef struct {
+    unsigned short kind; /* 1 kopieren, 2 mischen (Quelle mit ihrem Alpha in Byte 3 ueber das Ziel) */
+    unsigned short dst, src;
+    unsigned short pad;
+    int dx, dy, sx, sy, w, h;
+} GpuOp;
+static inline s64 sys_gpucomp(u64 op, u64 a, u64 b)          { return syscall3(SYS_GPUCOMP, op, a, b); }
 /* Benannte Dienste: anmelden, abmelden, verbinden (fds: lesen, schreiben), annehmen (fds: lesen, schreiben, PID;
  * ERR_AGAIN = niemand wartet). Damit finden Programme aus dem Terminal den Desktop. */
 static inline s64 sys_service_register(const char *name)     { return syscall3(SYS_SERVICE, 0, (u64)name, 0); }

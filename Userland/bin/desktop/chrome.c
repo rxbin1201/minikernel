@@ -49,7 +49,7 @@ static u32 palette(float t)
 
 void make_background(void)
 {
-    surface_new(&bg, W, H);
+    gsurf_new(&bg, W, H); /* die GPU kopiert daraus */
     unsigned rnd = 12345;
     for (int y = 0; y < H; y++) {
         float v = (float)y / (float)H;

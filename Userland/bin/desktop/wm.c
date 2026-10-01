@@ -370,7 +370,8 @@ void close_win_now(Win *w)
     damage_dock();
     damage_menubar();
     if (w->buf.px)
-        surface_free(&w->buf);
+        gsurf_free(&w->buf);
+    shadow_free(w);
     int i = 0;
     while (i < nord && order[i] != w)
         i++;
@@ -469,13 +470,31 @@ static void draw_window(Win *w)
     gfx_no_clip();
 }
 
+/* Deckung der runden Ecken in Byte 3 der oberen und unteren RADIUS Zeilen (im neu gezeichneten Teil) */
+static void corner_alpha(Win *w)
+{
+    int x0 = w->rx0 < 0 ? 0 : w->rx0, x1 = w->rx1 > w->w ? w->w : w->rx1;
+    for (int band = 0; band < 2; band++) {
+        int y0 = band ? w->h - RADIUS : 0, y1 = band ? w->h : RADIUS;
+        if (y0 < w->ry0) y0 = w->ry0;
+        if (y1 > w->ry1) y1 = w->ry1;
+        for (int y = y0; y < y1; y++) {
+            u32 *p = w->buf.px + (u64)y * (u64)w->w;
+            for (int x = x0; x < x1; x++) {
+                int c = gfx_round_cov(x, y, 0, 0, w->w, w->h, RADIUS);
+                p[x] = (p[x] & 0xFFFFFF) | (u32)(c > 255 ? 255 : c) << 24;
+            }
+        }
+    }
+}
+
 /* Geaenderten Teil eines Fensters in sein eigenes Bild zeichnen und auf dem Bildschirm als geaendert melden */
 static void render_window(Win *w)
 {
     if (!w->buf.px || w->buf.w != w->w || w->buf.h != w->h) {
         if (w->buf.px)
-            surface_free(&w->buf);
-        if (surface_new(&w->buf, w->w, w->h) != 0) {
+            gsurf_free(&w->buf);
+        if (gsurf_new(&w->buf, w->w, w->h) != 0) {
             w->buf.px = 0;
             return;
         }
@@ -488,6 +507,8 @@ static void render_window(Win *w)
     tgt = &w->buf;
     gfx_set_base_clip(w->rx0, w->ry0, w->rx1 - w->rx0, w->ry1 - w->ry0);
     draw_window(w);
+    gfx_round_frame(&w->buf, 0, 0, w->w, w->h, RADIUS, 0x000000, 40); /* feiner Rand, fest im Bild */
+    corner_alpha(w);
     gfx_reset_base_clip();
     tgt = &gfx_screen;
     w->x = sx;
@@ -497,9 +518,46 @@ static void render_window(Win *w)
     w->rx0 = w->rx1 = 0;
 }
 
-/* Rechteck des Bildschirms zusammensetzen: Hintergrund, je Fenster Schatten und Bild (runde Ecken, feiner Rand),
- * dann Taskleiste und offenes Menue; anzeigen */
-static void compose(const Clip *r)
+/* Kann die GPU dieses Bild zusammensetzen? (nicht waehrend Animationen: die skalieren das Fensterbild) */
+static int gpu_usable(void)
+{
+    if (!gpu_mode || !gsurf_handle(&gfx_screen) || !gsurf_handle(&bg))
+        return 0;
+    for (int i = 0; i < nord; i++)
+        if (order[i]->buf.px && order[i]->anim)
+            return 0;
+    return 1;
+}
+
+/* Auftraege fuer ein Rechteck: Hintergrund kopieren, je Fenster den Schatten (vier Streifen) und das Bild mischen
+ * (obere und untere Zeilen mit den runden Ecken) bzw. kopieren (dazwischen). 0 = geht nicht */
+static int queue_gpu(const Clip *r)
+{
+    Win *f = focused();
+    int S = SHADOW, R = RADIUS, band = S + R, dy = shadow_dy();
+    gq_copy(&gfx_screen, r->x0, r->y0, &bg, r->x0, r->y0, r->x1 - r->x0, r->y1 - r->y0, r);
+    for (int i = 0; i < nord; i++) {
+        Win *w = order[i];
+        if (!w->buf.px || w->minimized)
+            continue;
+        if (w->x - S >= r->x1 || w->x + w->w + S <= r->x0 || w->y + dy - S >= r->y1 || w->y + w->h + dy + S <= r->y0)
+            continue;
+        if (!shadow_ready(w, w == f ? 95 : 55))
+            return 0;
+        int X = w->x, Y = w->y, lrh = w->h - 2 * R;
+        gq_blend(&gfx_screen, X - S, Y + dy - S, &w->shd_tb, 0, 0, w->w + 2 * S, band, r);
+        gq_blend(&gfx_screen, X - S, Y + dy + w->h - R, &w->shd_tb, 0, band, w->w + 2 * S, band, r);
+        gq_blend(&gfx_screen, X - S, Y + dy + R, &w->shd_lr, 0, 0, band, lrh, r);
+        gq_blend(&gfx_screen, X + w->w - R, Y + dy + R, &w->shd_lr, band, 0, band, lrh, r);
+        gq_blend(&gfx_screen, X, Y, &w->buf, 0, 0, w->w, R, r);
+        gq_copy(&gfx_screen, X, Y + R, &w->buf, 0, R, w->w, w->h - 2 * R, r);
+        gq_blend(&gfx_screen, X, Y + w->h - R, &w->buf, 0, w->h - R, w->w, R, r);
+    }
+    return 1;
+}
+
+/* Hintergrund und Fenster mit der CPU (auch waehrend der Animationen) */
+static void compose_cpu(const Clip *r)
 {
     int x0 = r->x0, y0 = r->y0, x1 = r->x1, y1 = r->y1;
     for (int y = y0; y < y1; y++)
@@ -527,8 +585,16 @@ static void compose(const Clip *r)
             continue;
         gfx_shadow(&gfx_screen, w->x, w->y + shadow_dy(), w->w, w->h, RADIUS, SHADOW, w == f ? 95 : 55);
         gfx_blit_round(&gfx_screen, &w->buf, 0, 0, w->x, w->y, w->w, w->h, RADIUS);
-        gfx_round_frame(&gfx_screen, w->x, w->y, w->w, w->h, RADIUS, 0x000000, 40);
     }
+    gfx_reset_base_clip();
+}
+
+/* Was ueber den Fenstern liegt (immer mit der CPU): Vorschau beim Andocken, Taskleiste, Menue, Dialog */
+static void overlays(const Clip *r)
+{
+    int x0 = r->x0, y0 = r->y0, x1 = r->x1, y1 = r->y1;
+    gfx_set_base_clip(x0, y0, x1 - x0, y1 - y0);
+    gfx_no_clip();
     if (snap_preview) { /* Vorschau beim Ziehen an den Rand: helles Milchglas */
         int sr[4];
         snap_rect(snap_preview, sr);
@@ -540,14 +606,33 @@ static void compose(const Clip *r)
     draw_menu();
     draw_dialog();
     gfx_reset_base_clip();
-    gfx_present(x0, y0, x1 - x0, y1 - y0);
 }
 
+/* Geaenderte Fenster neu zeichnen, dann die geaenderten Rechtecke zusammensetzen: Hintergrund, je Fenster Schatten und
+ * Bild (runde Ecken, feiner Rand) - alle Rechtecke in einem Auftrag an die GPU, sonst mit der CPU -, darueber
+ * Taskleiste und Menues; anzeigen */
 void draw_all(void)
 {
     for (int i = 0; i < nord; i++)
         render_window(order[i]);
+    if (!ndmg)
+        return;
+    s64 t0 = sys_time_us(), px = 0;
+    int gpu = gpu_usable();
+    for (int i = 0; gpu && i < ndmg; i++)
+        gpu = queue_gpu(&dmg[i]);
+    if (gpu)
+        gpu = gq_submit() == 0;
+    else
+        gq_cancel();
+    for (int i = 0; i < ndmg; i++) {
+        if (!gpu)
+            compose_cpu(&dmg[i]);
+        overlays(&dmg[i]);
+        px += (s64)(dmg[i].x1 - dmg[i].x0) * (dmg[i].y1 - dmg[i].y0);
+    }
+    gpu_stat(gpu, sys_time_us() - t0, px);
     for (int i = 0; i < ndmg; i++)
-        compose(&dmg[i]);
+        gfx_present(dmg[i].x0, dmg[i].y0, dmg[i].x1 - dmg[i].x0, dmg[i].y1 - dmg[i].y0);
     ndmg = 0;
 }

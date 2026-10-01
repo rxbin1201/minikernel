@@ -17,6 +17,7 @@
 #include "drivers/sound/hda.h"
 #include "arch/x86_64/spinlock.h"
 #include "core/service.h"
+#include "drivers/gpu/igd.h"
 
 #define MAX_PROC          64
 #define MAX_FD            32
@@ -24,7 +25,7 @@
 #define MAX_ARGS          16
 #define ARGS_BYTES        512
 #define PAGE              4096ULL
-#define MAX_SHM_MAPS      16
+#define MAX_SHM_MAPS      80   /* Desktop: Fenster der Programme, eigene Fensterbilder und Schatten */
 
 extern void enter_user(uint64_t rip, uint64_t rsp, uint64_t arg1, uint64_t arg2) __attribute__((noreturn));
 extern void enter_user_regs(const SyscallFrame *r) __attribute__((noreturn));
@@ -543,6 +544,7 @@ static void finish_process(Process *p, int code, int faulted)
     shm_release_all(p); /* die Seiten bleiben bis as_destroy eingeblendet, werden aber nicht mehr benutzt */
     service_owner_exit(p->pid); /* angemeldete Dienste verschwinden */
     mouse_owner_exit(p->pid);
+    igd_comp_release(p->pid);    /* Flaechen fuer das GPU-Zusammensetzen */
     console_gfx_release(p->pid); /* hatte das Programm den Bildschirm, bekommt ihn die Konsole zurueck */
     hda_close(p->pid);           /* spielte es Ton: sofort aus */
     uint64_t f = irq_save();
@@ -780,7 +782,7 @@ int process_munmap(Process *p, uint64_t addr, uint64_t len)
  * mit der letzten verschwindet das Objekt. Wer die Nummer kennt, kann es einblenden (der Desktop bekommt sie von
  * seinen Fenster-Programmen). */
 
-#define MAX_SHM       64
+#define MAX_SHM       192
 #define SHM_MAX_BYTES (64ULL << 20)
 
 typedef struct Shm {
@@ -864,6 +866,23 @@ static void shm_release_all(Process *p)
             p->shm[i].obj = 0;
             shm_unref(s);
         }
+}
+
+/* Fuer Treiber (GPU-Zusammensetzen, igd_comp.c): Objekt mit eigener Referenz; die Frames bleiben bis shm_put gueltig */
+void *shm_get(uint32_t id, uint64_t *npages, const uint64_t **frames)
+{
+    Shm *s = shm_find_ref(id);
+    if (s) {
+        *npages = s->npages;
+        *frames = s->frames;
+    }
+    return s;
+}
+
+void shm_put(void *obj)
+{
+    if (obj)
+        shm_unref((Shm *)obj);
 }
 
 int64_t process_shm(Process *p, uint64_t op, uint64_t a, uint64_t b)

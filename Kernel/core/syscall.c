@@ -407,6 +407,7 @@ static void syscall_do(SyscallFrame *f)
     case SYS_EXEC:     ret = sys_exec(f->rdi, f->rsi); break;
     case SYS_PIPE:     ret = sys_pipe(f->rdi); break;
     case SYS_SHM:      ret = process_shm(process_current(), f->rdi, f->rsi, f->rdx); break;
+    case SYS_GPUCOMP:  ret = igd_comp_sys(process_pid(process_current()), f->rdi, f->rsi, f->rdx); break;
     case SYS_SERVICE:  ret = sys_service(f->rdi, f->rsi, f->rdx); break;
     case SYS_DUP:      ret = process_fd_dup(process_current(), (int)f->rdi); break;
     case SYS_DUP2:     ret = process_fd_dup2(process_current(), (int)f->rdi, (int)f->rsi); break;
@@ -460,7 +461,9 @@ static void syscall_do(SyscallFrame *f)
             : f->rdi == 12 ? igd_vblank_test()
             : (f->rdi & 0xFF) == 13 ? igd_blt_set_mode((int)(f->rdi >> 8))
             : f->rdi == 14 ? igd_render_test()
-            : f->rdi == 15 ? igd_gpgpu_test() : ERR_INVAL;
+            : f->rdi == 15 ? igd_gpgpu_test()
+            : (f->rdi & 0xFF) == 16 ? igd_comp_set((int)(f->rdi >> 8))
+            : f->rdi == 17 ? (igd_comp_report(), 0) : ERR_INVAL;
         break;
     case SYS_PCIINFO: {
         PciInfo pi;

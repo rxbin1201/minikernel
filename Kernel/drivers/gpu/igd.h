@@ -89,6 +89,11 @@ void igd_gfx_sync(void);
 int  igd_blt_set_mode(int mode);
 /* Stufe 5, Schritt 1 (igdtest render): Render-Engine starten, Ring, PIPE_CONTROL, Batch-Buffer, Zeitstempel (igd_rcs.c) */
 int  igd_render_test(void);
+/* Zusammensetzen auf der GPU (igd_comp.c, SYS_GPUCOMP) */
+int64_t igd_comp_sys(uint32_t pid, uint64_t op, uint64_t a, uint64_t b);
+void    igd_comp_release(uint32_t pid); /* Prozess endet: seine Flaechen abmelden */
+int     igd_comp_set(int on);           /* igdtest comp on/off */
+void    igd_comp_report(void);          /* igdtest info / comp */
 /* Stufe 5, Schritte 2+3 (igdtest gpgpu): GPGPU-Kernel auf den Recheneinheiten fuellt eine Flaeche (igd_rcs.c) */
 int  igd_gpgpu_test(void); /* igdtest bltmode N: Bild-Updates per Blitter, 0 = aus (igd_blt.c) */ /* bevor die Konsole selbst in den Framebuffer schreibt: Blitter-Auftraege abwarten */
 

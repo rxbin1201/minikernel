@@ -96,6 +96,17 @@ In der Shell: `burn 5000 & burn 5000 & cpus` zeigt zwei ausgelastete CPUs.
   CPU geprueft, an der Konsole zusaetzlich ein halbtransparentes Farbfeld). Ring, Status- und Befehlsseiten bleiben
   nach dem ersten Test fest in der GGTT; vor jedem Test wird die Engine zurueckgesetzt und vor jedem Auftrag verwirft
   ein `PIPE_CONTROL` TLB und Caches - so laufen die Tests beliebig oft hintereinander
+- **Zusammensetzen auf der GPU** (`igd_comp.c`, `SYS_GPUCOMP`; Desktop: `gpu.c`): Bildschirmbild, Hintergrund,
+  Fensterbilder und Schatten liegen in geteiltem Speicher, den der Kernel fest in die GGTT einblendet (eigener Bereich,
+  Referenz auf das shm-Objekt, solange angemeldet). Je Bild schickt der Desktop alle geaenderten Rechtecke als eine
+  Liste von Auftraegen: Hintergrund kopieren, je Fenster Schatten (vier vorberechnete Streifen) und die Zeilen mit den
+  runden Ecken mischen (Deckung in Byte 3 des Fensterbildes), den Rest kopieren. Jeder Auftrag bekommt Flaechen genau
+  in der Groesse seines Rechtecks, was darueber hinaus geschrieben wird, verwirft die Hardware. Taskleiste, Menues und
+  Animationen zeichnet weiter die CPU. Beim Start prueft ein Selbsttest die GPU gegen die CPU (ungerade, ueberlappende
+  Rechtecke, Varianten: Flaechen genau oder an 64 Byte ausgerichtet, mit/ohne Zurueckschreiben der CPU-Caches); geht
+  keine, setzt die CPU zusammen wie bisher. `igdtest comp` zeigt Zustand und Messwerte (GPU gegen CPU je Mpx),
+  `igdtest comp off/on` schaltet im Betrieb um; Kommandozeile `gpucomp=off` bzw. `gpucomp=soft` (dieselben Auftraege
+  rechnet die CPU im Kernel - zum Testen in QEMU)
 - **Bildwechsel-Interrupt** (`igd_irq.c`): die Pipe meldet jeden Bildwechsel per MSI. Grafikprogramme warten mit
   `gfx_vsync()` darauf und laufen so genau im Takt des Monitors (Tetris, Snake, Desktop; `anim` zeigt es), die
   Doppelpufferung wartet darauf statt nachzusehen. Ohne Interrupt (QEMU) ersetzt eine 10-ms-Pause den Takt

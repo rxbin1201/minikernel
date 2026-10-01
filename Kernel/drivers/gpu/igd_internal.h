@@ -40,6 +40,21 @@ int  igd_blt_sync(void);          /* warten, bis alles kopiert ist (vor Schreibe
 int  igd_blt_copy_user(uint32_t dst, const uint32_t *src, uint32_t pitch, int x, int y, int w, int h, int wait);
 void igd_blt_report(void);        /* igdtest info */
 
+/* Render-Engine fuer das Zusammensetzen (igd_rcs.c, benutzt von igd_comp.c). Flaechen als Bytes: w = Breite in Bytes,
+ * gtt = GGTT-Adresse des ersten Bytes (Ecke des Rechtecks), pitch = Zeilenlaenge der ganzen Flaeche */
+typedef struct {
+    uint32_t gtt, w, h, pitch;
+} IgdSurf;
+typedef struct {
+    int      blend;            /* 0 kopieren, 1 Quelle mit ihrem Alpha (Byte 3) ueber das Ziel mischen */
+    IgdSurf  dst, src;         /* bis zum rechten und unteren Rand des Rechtecks */
+    uint32_t dst_off, src_off; /* linker Rand des Rechtecks in der Flaeche (Bytes; 0 = Flaeche beginnt am Rechteck) */
+} IgdCompOp;
+#define IGD_COMP_MAX_OPS 120
+/* Auftraege der Reihe nach ausfuehren (jeder sieht die Ergebnisse der vorigen) und abwarten.
+ * 0 = fertig (GPU-Zeit in *us), -1 = Engine gerade belegt (igdtest), -2 = Engine-Fehler */
+int igd_rcs_comp(const IgdCompOp *ops, int n, uint64_t *us);
+
 /* Doppelpufferung (igd.c): A = Framebuffer der Firmware, B = zweiter Puffer im RAM */
 extern int       igd_flip_ready;
 extern uint32_t  igd_scr_w, igd_scr_h, igd_scr_stride;
