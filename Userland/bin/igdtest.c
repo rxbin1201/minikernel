@@ -48,12 +48,12 @@ void _start(int argc, char **argv)
         what = "Moduswechsel, der Monitor wird dabei jeweils kurz schwarz";
     } else if (argc > 1 && strcmp(argv[1], "bltmode") == 0) {
         static const char *const modes[7] = {
-            "aus: die CPU kopiert die Bild-Updates (Standard)",
+            "aus: die CPU kopiert die Bild-Updates",
             "Blitter, Cache-Steuerung (MOCS) wie vorgefunden",
             "wie 1, Programmbild vorher aus dem CPU-Cache zurueckschreiben",
             "Blitter, MOCS Write-Through",
             "wie 3, Programmbild vorher zurueckschreiben",
-            "Blitter, MOCS uncached",
+            "Blitter, MOCS uncached (Standard)",
             "wie 5, Programmbild vorher zurueckschreiben",
         };
         if (argc < 3 || argv[2][0] < '0' || argv[2][0] > '6' || argv[2][1]) {

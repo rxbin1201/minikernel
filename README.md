@@ -80,12 +80,14 @@ In der Shell: `burn 5000 & burn 5000 & cpus` zeigt zwei ausgelastete CPUs.
   3440x1440 mit 100 Hz. `resolution` listet sie mit
   Bildrate und schaltet sofort um (`resolution 2560x1440@60`), die Konsole passt sich an. Fuer den naechsten Start
   speichert es `igdmode=2560x1440@60` und `mode=max` (der Framebuffer der Firmware muss gross genug sein)
-- **Blitter fuer die Bild-Updates** (`igd_blt.c`, noch in Erprobung, standardmaessig aus): die Blitter-Engine kann
-  die Teil-Updates der Grafikprogramme im Hintergrund in den Bildspeicher kopieren (das Programmbild wird dafuer in
-  die GGTT eingeblendet). Auf dem Test-PC zeigt das bisher Striche mit altem Bildinhalt (Cache-Steuerung). Beim Start
-  laufen Ring und Selbsttest; `igdtest bltmode N` schaltet im Betrieb zwischen Testmodi um (Cache-Steuerung MOCS wie
-  vorgefunden / Write-Through / uncached, jeweils mit oder ohne vorheriges Zurueckschreiben des Programmbilds aus dem
-  CPU-Cache), `bltmode=N` in der Kommandozeile gleich beim Start, `noblt` laesst die Engine ganz aus
+- **Blitter fuer die Bild-Updates** (`igd_blt.c`): die Blitter-Engine kopiert die Teil-Updates der Grafikprogramme
+  (z.B. des Desktops) im Hintergrund in den Bildspeicher, statt der CPU; das Programmbild wird dafuer in die GGTT
+  eingeblendet (nur wenn es sich aendert). Ganze Bilder kopiert die CPU (sie ist dabei schneller). Entscheidend ist die
+  Cache-Steuerung der Engine (MOCS): mit den Werten der Firmware blieben Schreibzugriffe im Cache haengen (Striche mit
+  altem Inhalt), mit "uncached" kommen sie gleich im RAM an, aus dem die Anzeige liest. `igdtest bltmode N` schaltet
+  im Betrieb um (0 aus, 1-4 Varianten mit Strichen, 5 Standard, 6 wie 5 mit Zurueckschreiben aus dem CPU-Cache);
+  `bltmode=N` bzw. `noblt` in der Kommandozeile. Bei jedem Umschalten prueft ein Selbsttest, ob die GPU die frisch
+  geschriebenen Daten der CPU sieht
 - **Bildwechsel-Interrupt** (`igd_irq.c`): die Pipe meldet jeden Bildwechsel per MSI. Grafikprogramme warten mit
   `gfx_vsync()` darauf und laufen so genau im Takt des Monitors (Tetris, Snake, Desktop; `anim` zeigt es), die
   Doppelpufferung wartet darauf statt nachzusehen. Ohne Interrupt (QEMU) ersetzt eine 10-ms-Pause den Takt

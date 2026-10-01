@@ -267,13 +267,13 @@ static int bench(const char *label)
  * in Auftrag gegeben (der Aufruf kehrt sofort zurueck, die GPU kopiert im Hintergrund); ganze Bilder kopiert der
  * Blitter in den verdeckten Puffer, der Kernel wartet darauf (und laesst dabei andere Threads laufen) und schaltet um.
  *
- * Caching: Zugriffe der Engines ueber die GGTT richten sich (Gen9) nach Eintrag 0 der PPAT, die PAT-Bits im
- * GGTT-Eintrag zaehlen nicht. Die Firmware laesst die PPAT oft unberuehrt (alle 0x03: Write-Back nur im eLLC, das es
- * hier nicht gibt). Der Treiber setzt Eintrag 0 auf Write-Through im LLC: Lesen geht ueber den Last-Level-Cache, den
- * sich GPU und CPU teilen (die GPU sieht, was die CPU gerade gezeichnet hat, ohne clflush), Schreiben geht zugleich
- * in den RAM, aus dem die Display-Engine liest (mit Write-Back blieben Teile im Cache haengen: Striche im Bild).
- * Beim Start prueft ein Selbsttest, ob der Blitter die frisch von der CPU geschriebenen Daten richtig kopiert;
- * sonst kommt die alte PPAT zurueck und es kopiert die CPU.
+ * Caching: entscheidend ist die Cache-Steuerung der Blitter-Engine (MOCS, 0xCC00..). Mit den Werten der Firmware
+ * (und auch mit Write-Through) blieben Schreibzugriffe teils im Last-Level-Cache, die Display-Engine las dort noch
+ * alten Inhalt aus dem RAM: Striche im Bild (auf dem Test-PC ausprobiert, igdtest bltmode). Mit "uncached" gehen sie
+ * gleich in den RAM; das Programmbild liest die GPU trotzdem richtig (auch ohne clflush der CPU). Standard ist daher
+ * Modus 5. Bei jedem Umschalten prueft ein Selbsttest, ob die GPU frisch von der CPU geschriebene Daten sieht; wenn
+ * nicht, schreibt die CPU das Programmbild vor dem Kopieren aus ihrem Cache zurueck (wie Modus 6).
+ * Die PPAT (Eintrag 0: Write-Through/LLC) setzt der Treiber ebenfalls, da die Firmware sie nicht einrichtet.
  * "noblt" in der Kommandozeile schaltet das ab. */
 
 #define PPAT_LO     0x40E0
@@ -289,6 +289,37 @@ static int       blt_mode;                      /* igdtest bltmode N (Standard 0
 static int       src_flush;                     /* Programmbild vor dem Kopieren aus dem CPU-Cache schreiben */
 static uint32_t  mocs_orig[62];
 static int       mocs_saved;
+static int       reserve(uint32_t dwords);
+static uint32_t  kick(void);
+static uint64_t  st_phys;                       /* Selbsttest: Quelle (Seite 0) und Ziel (Seite 1) */
+static uint32_t  st_src, st_dst;                /* ihre GGTT-Adressen */
+
+/* Die CPU schreibt ein Muster (ohne clflush, es liegt noch in ihrem Cache), der Blitter kopiert es, die CPU vergleicht.
+ * Ergebnis: falsche Pixel (0 = ok), -1 = keine Rueckmeldung */
+static int selftest(uint64_t *us)
+{
+    uint32_t *s = (uint32_t *)st_phys, *d = (uint32_t *)(st_phys + 4096);
+    int bad = 0;
+    for (int round = 0; round < 2 && !bad; round++) {
+        memset(d, 0, 4096);
+        igd_clflush((uint64_t)d, 4096);
+        for (int i = 0; i < 1024; i++)
+            s[i] = (round ? 0x005A3C1Eu : 0x00A5C3E1u) ^ ((uint32_t)i * 2654435761u);
+        uint64_t t0 = time_us();
+        if (!reserve(10 + 6))
+            return -1;
+        emit_copy(st_dst, 128, 0, 0, st_src, 128, 0, 0, 32, 32);
+        uint32_t n = kick();
+        if (!wait_seqno(n, 100))
+            return -1;
+        if (us)
+            *us = time_us() - t0;
+        igd_clflush((uint64_t)d, 4096);
+        for (int i = 0; i < 1024; i++)
+            bad += d[i] != s[i];
+    }
+    return bad;
+}
 #define BLT_MOCS(i) (0xCC00 + 4u * (uint32_t)(i)) /* Cache-Steuerung der Blitter-Engine (62 Eintraege) */
 static int       part_wait;                     /* "bltwait": auch Teil-Updates abwarten (zur Fehlersuche) */
 static int       tlb_stale;                     /* GGTT-Fenster geaendert: vor dem naechsten Auftrag TLB verwerfen */
@@ -576,28 +607,16 @@ int igd_blt_init(void)
         return -1;
     }
 
-    /* Selbsttest: die CPU schreibt ein Muster (ohne clflush), der Blitter kopiert es, die CPU vergleicht */
-    uint32_t *s = (uint32_t *)t_phys, *d = (uint32_t *)(t_phys + 4096);
-    memset(d, 0, 4096);
-    igd_clflush((uint64_t)d, 4096);
+    /* Selbsttest mit den Cache-Werten der Firmware: laeuft die Engine ueberhaupt? */
+    st_phys = t_phys;
+    st_src = (base + 5) << 12;
+    st_dst = (base + 6) << 12;
     blt_ready = 1;
-    int bad = 0;
     uint64_t us = 0;
-    for (int round = 0; round < 2 && !bad; round++) {
-        for (int i = 0; i < 1024; i++) /* frisch geschrieben, liegt noch im CPU-Cache */
-            s[i] = (round ? 0x005A3C1Eu : 0x00A5C3E1u) ^ ((uint32_t)i * 2654435761u);
-        uint64_t t0 = time_us();
-        reserve(10 + 6);
-        emit_copy((base + 6) << 12, 128, 0, 0, (base + 5) << 12, 128, 0, 0, 32, 32);
-        uint32_t n = kick();
-        if (!wait_seqno(n, 100)) {
-            blt_fail("Selbsttest: keine Rueckmeldung");
-            return -1;
-        }
-        us = time_us() - t0;
-        igd_clflush((uint64_t)d, 4096);
-        for (int i = 0; i < 1024; i++)
-            bad += d[i] != s[i];
+    int bad = selftest(&us);
+    if (bad < 0) {
+        blt_fail("Selbsttest: keine Rueckmeldung");
+        return -1;
     }
     if (bad) {
         kprintf("igdblt: Selbsttest: %d von 1024 Pixeln falsch (GPU sieht die CPU-Daten nicht) - Bild-Updates per CPU\n", bad);
@@ -611,11 +630,11 @@ int igd_blt_init(void)
             (unsigned long)us, rp0 * 50, igd_rd(BLT_MOCS(0)), igd_rd(BLT_MOCS(1)), igd_rd(BLT_MOCS(2)), igd_rd(BLT_MOCS(3)));
     forcewake_put();
     const char *m = cmdline_get("bltmode");
-    igd_blt_set_mode(m && m[0] >= '0' && m[0] <= '6' ? m[0] - '0' : 0);
+    igd_blt_set_mode(m && m[0] >= '0' && m[0] <= '6' ? m[0] - '0' : 5);
     return 0;
 }
 
-/* Testmodi (igdtest bltmode N), solange Bild-Updates per Blitter noch Striche zeigen:
+/* Modi (igdtest bltmode N, beim Start bltmode=N); 1-4 zeigen auf dem Test-PC Striche, 5 ist der Standard:
  *   0 aus (CPU kopiert)
  *   1 Blitter, Cache-Steuerung (MOCS) wie vorgefunden      2 wie 1, Programmbild vorher aus dem CPU-Cache schreiben
  *   3 MOCS Write-Through/LLC                                4 wie 3, Programmbild vorher zurueckschreiben
@@ -642,6 +661,17 @@ int igd_blt_set_mode(int mode)
     forcewake_put();
     tlb_stale = 1;
     src_flush = mode == 2 || mode == 4 || mode == 6;
+    if (mode) { /* sieht die GPU mit diesen Einstellungen, was die CPU gerade geschrieben hat? */
+        int bad = selftest(0);
+        if (bad < 0) {
+            blt_fail("Selbsttest: keine Rueckmeldung");
+            return -3;
+        }
+        if (bad && !src_flush) {
+            kprintf("igdblt: Selbsttest: %d Pixel falsch - das Programmbild wird vor dem Kopieren zurueckgeschrieben\n", bad);
+            src_flush = 1;
+        }
+    }
     blt_mode = mode;
     blt_on = mode != 0;
     static const char *const names[3] = {"wie vorgefunden", "Write-Through/LLC", "uncached"};
