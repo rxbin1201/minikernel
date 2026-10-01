@@ -571,7 +571,7 @@ free_frames:
  * dann wird beim naechsten Bildwechsel umgeschaltet: kein Tearing. Teil-Updates gehen in den angezeigten Puffer; der
  * andere wird vor seiner naechsten Anzeige ohnehin ganz ueberschrieben. Gewartet wird erst, bevor der naechste Puffer
  * beschrieben wird: das Programm laeuft so von selbst im Takt der Bildrate. Kopiert wird nach Moeglichkeit vom Blitter
- * der GPU (igd_blt.c): Teil-Updates im Hintergrund, ganze Bilder waehrend andere Threads laufen.
+ * der GPU (igd_blt.c): Teil-Updates im Hintergrund; ganze Bilder kopiert die CPU (sie ist dabei schneller).
  * "noigd" in der Kommandozeile schaltet beides ab (dann wie vorher alles in Software). */
 
 static int       hw_cursor;           /* Zeiger-Ebene eingerichtet */
@@ -832,10 +832,10 @@ int igd_gfx_blit(const uint32_t *src, uint32_t pitch, int x, int y, int w, int h
         wait_flip();
         uint64_t t1 = time_us();
         int to_b = !front_b;
-        if (!igd_blt_copy_user(to_b ? igd_surf_b : igd_surf_a, src, pitch, 0, 0, w, h, 1)) {
-            igd_blt_sync();
-            copy_rect(to_b ? igd_buf_b : igd_buf_a, src, pitch, 0, 0, w, h, to_b);
-        }
+        /* die CPU ist hier schneller als der Blitter (3,1 statt 5,3 ms bei 3440x1440); vorher die Auftraege des
+         * Blitters abwarten, die vielleicht noch in diesen (eben noch angezeigten) Puffer schreiben */
+        igd_blt_sync();
+        copy_rect(to_b ? igd_buf_b : igd_buf_a, src, pitch, 0, 0, w, h, to_b);
         pending = to_b ? igd_surf_b : igd_surf_a;
         igd_wr(PLANE_SURF(igd_state.scanout_pipe), pending);
         front_b = to_b;

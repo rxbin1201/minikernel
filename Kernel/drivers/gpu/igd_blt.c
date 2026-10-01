@@ -267,20 +267,19 @@ static int bench(const char *label)
  * in Auftrag gegeben (der Aufruf kehrt sofort zurueck, die GPU kopiert im Hintergrund); ganze Bilder kopiert der
  * Blitter in den verdeckten Puffer, der Kernel wartet darauf (und laesst dabei andere Threads laufen) und schaltet um.
  *
- * Caching: der Blitter liest das Programmbild ueber einen PPAT-Eintrag "Write-Back im LLC" - die GPU teilt sich den
- * Last-Level-Cache mit der CPU, sie sieht also, was die CPU gerade geschrieben hat, ohne dass jemand clflush braucht.
- * Er schreibt in die Bildpuffer ueber einen Eintrag "uncached": die Display-Engine liest am Cache vorbei. Welche
- * Eintraege das sind, steht in den PPAT-Registern. Hat die Firmware sie nicht eingerichtet (alle gleich, z.B. 0x03),
- * setzt der Treiber sie wie Linux (i915): 0 = Write-Back/LLC, 3 = uncached; vorher stellt er die Bildpuffer auf
- * Eintrag 3 um (bis zum Umschreiben hat der denselben Wert wie alle, es aendert sich also nichts). Schlaegt der
- * Selbsttest fehl, kommt die alte Tabelle zurueck.
- * Beim Start prueft ein Selbsttest, ob der Blitter die frisch von der CPU geschriebenen Daten richtig kopiert.
+ * Caching: Zugriffe der Engines ueber die GGTT richten sich (Gen9) nach Eintrag 0 der PPAT, die PAT-Bits im
+ * GGTT-Eintrag zaehlen nicht. Die Firmware laesst die PPAT oft unberuehrt (alle 0x03: Write-Back nur im eLLC, das es
+ * hier nicht gibt). Der Treiber setzt Eintrag 0 auf Write-Through im LLC: Lesen geht ueber den Last-Level-Cache, den
+ * sich GPU und CPU teilen (die GPU sieht, was die CPU gerade gezeichnet hat, ohne clflush), Schreiben geht zugleich
+ * in den RAM, aus dem die Display-Engine liest (mit Write-Back blieben Teile im Cache haengen: Striche im Bild).
+ * Beim Start prueft ein Selbsttest, ob der Blitter die frisch von der CPU geschriebenen Daten richtig kopiert;
+ * sonst kommt die alte PPAT zurueck und es kopiert die CPU.
  * "noblt" in der Kommandozeile schaltet das ab. */
 
 #define PPAT_LO     0x40E0
 #define PPAT_HI     0x40E4
-#define PPAT_I915_LO 0x000A0907u /* 0: WB/LLC, 1: WC/LLC+eLLC, 2: WT/LLC+eLLC, 3: UC */
-#define PPAT_I915_HI 0x3B2B1B0Bu /* 4-7: WB/LLC+eLLC mit Alter 0-3 */
+#define PPAT_SET_LO 0x000A0906u /* 0: Write-Through/LLC (alles ueber die GGTT), 1: WC, 2: WT/LLC+eLLC, 3: UC */
+#define PPAT_SET_HI 0x3B2B1B0Bu /* 4-7: WB/LLC+eLLC mit Alter 0-3 (wie i915) */
 #define WIN_PAGES   10240   /* Fenster fuer Programmbilder: 40 MiB (3840x2160x4 passt) */
 #define SMALL_PX    16384   /* kleinere Ausschnitte kopiert die CPU (der Auftrag kostet mehr als das Kopieren) */
 
@@ -300,11 +299,6 @@ static struct {
     uint64_t full_n, full_us, full_max_us;      /* ganze Bilder: Zeit bis der Blitter fertig ist */
     uint64_t remaps, cpu_fallback;
 } bs;
-
-static uint32_t pat_bits(int idx) /* PPAT-Index -> Bits im GGTT-Eintrag (PWT 3, PCD 4, PAT 7) */
-{
-    return (uint32_t)(((idx & 1) << 3) | ((idx & 2) << 3) | ((idx & 4) << 5));
-}
 
 static uint64_t old_pat;
 static int      pat_set; /* 1: der Treiber hat die PPAT umgeschrieben */
@@ -478,13 +472,16 @@ int igd_blt_copy_user(uint32_t dst, const uint32_t *src, uint32_t pitch, int x, 
 
 void igd_blt_report(void)
 {
+    forcewake_get();
+    uint32_t mhz = cur_mhz();
+    forcewake_put();
     if (!blt_on) {
         kprintf("igdinfo: Blitter: aus (Bild-Updates per CPU)\n");
         return;
     }
     kprintf("igdinfo: Blitter an, GPU-Takt jetzt %u MHz: %lu Teil-Updates (je %lu Pixel, Abschicken %lu us), "
             "%lu ganze Bilder (je %lu us, max %lu us)\n",
-            cur_mhz(), (unsigned long)bs.part_n, (unsigned long)(bs.part_n ? bs.part_px / bs.part_n : 0),
+            mhz, (unsigned long)bs.part_n, (unsigned long)(bs.part_n ? bs.part_px / bs.part_n : 0),
             (unsigned long)(bs.part_n ? bs.part_us / bs.part_n : 0), (unsigned long)bs.full_n,
             (unsigned long)(bs.full_n ? bs.full_us / bs.full_n : 0), (unsigned long)bs.full_max_us);
     kprintf("igdinfo: Blitter: %lu Mal Programmbild neu eingeblendet, %lu Mal doch per CPU\n", (unsigned long)bs.remaps,
@@ -506,25 +503,9 @@ int igd_blt_init(void)
     }
     uint64_t pat = igd_rd(PPAT_LO) | ((uint64_t)igd_rd(PPAT_HI) << 32);
     forcewake_put();
-    int wb = -1, uc = -1;
-    for (int i = 0; i < 8; i++) {
-        uint32_t b = (uint32_t)(pat >> (8 * i)) & 0xFF, type = b & 3, tgt = (b >> 2) & 3;
-        if (wb < 0 && type == 3 && tgt != 0) /* Write-Back, im LLC */
-            wb = i;
-        if (uc < 0 && type == 0)
-            uc = i;
-    }
-    kprintf("igdblt: PPAT %#lx: Programmbilder ueber Eintrag %d (Write-Back/LLC), Bildpuffer ueber %d (uncached)\n",
-            (unsigned long)pat, wb, uc);
+    kprintf("igdblt: PPAT der Firmware %#lx\n", (unsigned long)pat);
     old_pat = pat;
-    int want_set = wb < 0 || uc < 0;
-    if (want_set) { /* von der Firmware nicht eingerichtet: wie Linux setzen (erst weiter unten, nach den Bildpuffern) */
-        kprintf("igdblt: PPAT nicht eingerichtet: setze sie wie Linux (0 = Write-Back/LLC, 3 = uncached)\n");
-        wb = 0;
-        uc = 3;
-    }
-    pte_wb = pat_bits(wb);
-    pte_uc = pat_bits(uc);
+    pte_wb = pte_uc = 0; /* alles ueber Eintrag 0 */
 
     /* GGTT: Ring (4) + Statusseite (1) + Selbsttest (2) + Fenster, oberhalb von Puffer B */
     uint32_t base = igd_ggtt_entries / 4 + 0x8000, pages = 4 + 1 + 2 + WIN_PAGES;
@@ -546,7 +527,7 @@ int igd_blt_init(void)
     igd_ggtt[base + 4] = hws_phys | IGD_PTE_VALID;
     igd_ggtt[base + 5] = t_phys | IGD_PTE_VALID | pte_wb;            /* Selbsttest: Quelle wie ein Programmbild */
     igd_ggtt[base + 6] = (t_phys + 4096) | IGD_PTE_VALID | pte_uc;   /* Ziel wie ein Bildpuffer */
-    /* Bildpuffer A (Firmware) und B: der Blitter schreibt uncached hinein */
+    /* Bildpuffer A (Firmware) und B: ebenfalls Eintrag 0 (PAT-Bits loeschen) */
     uint32_t fb_pages = (uint32_t)(((uint64_t)igd_scr_stride * igd_scr_h + 4095) / 4096);
     for (uint32_t s = 0; s < 2; s++) {
         uint32_t first = (s ? igd_surf_b : igd_surf_a) >> 12;
@@ -556,15 +537,15 @@ int igd_blt_init(void)
         }
     }
     igd_ggtt_flush();
-    if (want_set) { /* jetzt erst: die Bildpuffer zeigen schon auf Eintrag 3 */
+    {
         forcewake_get();
-        igd_wr(PPAT_LO, PPAT_I915_LO);
-        igd_wr(PPAT_HI, PPAT_I915_HI);
+        igd_wr(PPAT_LO, PPAT_SET_LO);
+        igd_wr(PPAT_HI, PPAT_SET_HI);
         uint64_t now = igd_rd(PPAT_LO) | ((uint64_t)igd_rd(PPAT_HI) << 32);
         forcewake_put();
         pat_set = 1;
-        kprintf("igdblt: PPAT jetzt %#lx%s\n", (unsigned long)now,
-                now == (((uint64_t)PPAT_I915_HI << 32) | PPAT_I915_LO) ? "" : " (NICHT uebernommen)");
+        kprintf("igdblt: PPAT jetzt %#lx (Eintrag 0: Write-Through im LLC)%s\n", (unsigned long)now,
+                now == (((uint64_t)PPAT_SET_HI << 32) | PPAT_SET_LO) ? "" : " - NICHT uebernommen");
     }
     ring = (uint32_t *)ring_phys;
     hws = (volatile uint32_t *)hws_phys;
@@ -590,22 +571,25 @@ int igd_blt_init(void)
     uint32_t *s = (uint32_t *)t_phys, *d = (uint32_t *)(t_phys + 4096);
     memset(d, 0, 4096);
     igd_clflush((uint64_t)d, 4096);
-    for (int i = 0; i < 1024; i++)
-        s[i] = 0x00A5C3E1u ^ ((uint32_t)i * 2654435761u);
     blt_on = 1;
-    uint64_t t0 = time_us();
-    reserve(10 + 6);
-    emit_copy((base + 6) << 12, 128, 0, 0, (base + 5) << 12, 128, 0, 0, 32, 32);
-    uint32_t n = kick();
-    if (!wait_seqno(n, 100)) {
-        blt_fail("Selbsttest: keine Rueckmeldung");
-        return -1;
-    }
-    uint64_t us = time_us() - t0;
-    igd_clflush((uint64_t)d, 4096);
     int bad = 0;
-    for (int i = 0; i < 1024; i++)
-        bad += d[i] != s[i];
+    uint64_t us = 0;
+    for (int round = 0; round < 2 && !bad; round++) {
+        for (int i = 0; i < 1024; i++) /* frisch geschrieben, liegt noch im CPU-Cache */
+            s[i] = (round ? 0x005A3C1Eu : 0x00A5C3E1u) ^ ((uint32_t)i * 2654435761u);
+        uint64_t t0 = time_us();
+        reserve(10 + 6);
+        emit_copy((base + 6) << 12, 128, 0, 0, (base + 5) << 12, 128, 0, 0, 32, 32);
+        uint32_t n = kick();
+        if (!wait_seqno(n, 100)) {
+            blt_fail("Selbsttest: keine Rueckmeldung");
+            return -1;
+        }
+        us = time_us() - t0;
+        igd_clflush((uint64_t)d, 4096);
+        for (int i = 0; i < 1024; i++)
+            bad += d[i] != s[i];
+    }
     if (bad) {
         kprintf("igdblt: Selbsttest: %d von 1024 Pixeln falsch (GPU sieht die CPU-Daten nicht) - Bild-Updates per CPU\n", bad);
         blt_on = 0;
