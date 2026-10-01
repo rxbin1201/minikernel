@@ -193,7 +193,7 @@ static void set_volume(s64 v)
     v = v < 0 ? 0 : v > 100 ? 100 : v;
     s64 r = sys_audio(4, (u64)v, 0);
     vol_level = r >= 0 ? r : v;
-    damage_dock();
+    damage_dock_seg(3);
 }
 
 /* ---------- Masse der Leiste ---------- */
@@ -570,6 +570,32 @@ static void damage_hover(int h)
     }
 }
 
+/* Segment i der Taskleiste (0 Programme, 1 Suche/Start/Fenster, 2 Uhr, 3 Netz/Ton/System) samt Schatten neu */
+void damage_dock_seg(int i)
+{
+    Bar b;
+    bar_layout(&b);
+    int m = U(20);
+    damage(b.sx[i] - m, b.y - m, b.sw[i] + 2 * m, b.h + 2 * m);
+    overlay_dirty(b.sx[i] - m, b.y - m, b.sw[i] + 2 * m, b.h + 2 * m);
+}
+
+/* Knopf des offenen Menues (Hervorhebung) und der Name unter der Maus (bei offenem Menue ausgeblendet) */
+void damage_menu_button(void)
+{
+    int ob = open_button();
+    if (ob >= 0) {
+        Bar b;
+        bar_layout(&b);
+        int m = U(4);
+        if (b.bw[ob]) {
+            damage(b.bx[ob] - m, b.y - m, b.bw[ob] + 2 * m, b.h + 2 * m);
+            overlay_dirty(b.bx[ob] - m, b.y - m, b.bw[ob] + 2 * m, b.h + 2 * m);
+        }
+    }
+    damage_hover(dock_hover);
+}
+
 void dock_hover_at(int px, int py)
 {
     int h = bar_hit(px, py);
@@ -657,12 +683,13 @@ int menu_current(void)
 
 void open_menu(int m)
 {
+    damage_menu_button(); /* ein vorher offenes Menue */
     start_via_search = m == 5;
     menu_open = m == 5 ? 1 : m;
     start_query[0] = 0;
     menu_hover = -1;
     damage_menu();
-    damage_dock();
+    damage_menu_button();
 }
 
 /* Startmenue: Suchfeld, dann die passenden Programme */

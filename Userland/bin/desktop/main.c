@@ -30,7 +30,7 @@ static void close_menu(void)
     if (!menu_open)
         return;
     damage_menu();
-    damage_menubar();
+    damage_menu_button();
     menu_open = 0;
     menu_hover = -1;
 }
@@ -373,13 +373,13 @@ void _start(int argc, char **argv)
                 damage_win(f);
                 app_focus(f, 1);
             }
-            damage_menubar();
+            damage_dock_seg(0); /* nur die Striche unter den Programmen */
             last_focus = f;
         }
         s64 now = sys_time();
         if (now / 60 != last_min) { /* Uhrzeit in der Taskleiste */
             last_min = now / 60;
-            damage_menubar();
+            damage_dock_seg(2); /* nur die Uhr */
         }
         power_tick();
         net_tick();

@@ -56,6 +56,11 @@ void gsurf_free(Surface *s)
     surface_free(s);
 }
 
+int gsurf_height(int h)
+{
+    return gpu_mode ? (h + 7) & ~7 : h;
+}
+
 int gsurf_width(int w)
 {
     return gpu_mode ? (w + 15) & ~15 : w;

@@ -104,7 +104,9 @@ void draw_dock(void);
 void draw_menu(void);
 void damage_menubar(void);      /* = damage_dock (Uhrzeit, Fokus, Netzwerk stehen in der Taskleiste) */
 void damage_dock(void);
-void dock_zone(int *r);          /* x, y, w, h: Streifen unten mit Taskleiste und den Namen darueber */
+void dock_zone(int *r);
+void damage_dock_seg(int i);     /* nur ein Segment der Taskleiste neu (0 Programme, 2 Uhr, 3 Netz/Ton/System) */
+void damage_menu_button(void);   /* Hervorhebung des Menue-Knopfs und Name unter der Maus */          /* x, y, w, h: Streifen unten mit Taskleiste und den Namen darueber */
 int  menu_zone(int *r);          /* offenes Menue samt Schatten; 0 = keins */
 void damage_menu(void);
 int  menubar_hit(int x, int y);  /* Knopf mit Menue: 1 Start, 2 Fenster, 3 Netzwerk, 4 System, 5 Suche; 0 = keiner */
@@ -159,6 +161,7 @@ int  gsurf_new(Surface *s, int w, int h); /* Flaeche, die die GPU benutzen kann 
 void gsurf_free(Surface *s);
 int  gsurf_handle(const Surface *s);      /* Nummer beim Kernel, 0 = nur CPU */
 int  gsurf_width(int w);                  /* Breite fuer gsurf_new: die GPU braucht Vielfache von 16 Pixeln */
+int  gsurf_height(int h);                 /* Hoehe fuer Fensterbilder: Vielfache von 8 (Skalieren in Bloecken) */
 void gq_copy(const Surface *d, int dx, int dy, const Surface *s, int sx, int sy, int w, int h, const Clip *c);
 void gq_blend(const Surface *d, int dx, int dy, const Surface *s, int sx, int sy, int w, int h, const Clip *c);
 void gq_blend_a(const Surface *d, int dx, int dy, const Surface *s, int sx, int sy, int w, int h, int alpha,

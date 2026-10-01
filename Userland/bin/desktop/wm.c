@@ -505,11 +505,12 @@ static void corner_alpha(Win *w)
 /* Geaenderten Teil eines Fensters in sein eigenes Bild zeichnen und auf dem Bildschirm als geaendert melden */
 static void render_window(Win *w)
 {
-    int bw = gsurf_width(w->w); /* fuer die GPU auf 16 Pixel aufgerundet, rechts bleibt ein unbenutzter Rand */
-    if (!w->buf.px || w->buf.w != bw || w->buf.h != w->h) {
+    /* fuer die GPU auf 16 Pixel Breite und 8 Zeilen aufgerundet, rechts und unten bleibt ein unbenutzter Rand */
+    int bw = gsurf_width(w->w), bh = gsurf_height(w->h);
+    if (!w->buf.px || w->buf.w != bw || w->buf.h != bh) {
         if (w->buf.px)
             gsurf_free(&w->buf);
-        if (gsurf_new(&w->buf, bw, w->h) != 0) {
+        if (gsurf_new(&w->buf, bw, bh) != 0) {
             w->buf.px = 0;
             return;
         }
@@ -542,6 +543,10 @@ static int gpu_usable(void)
 /* Fenster in der Animation: Bild (und Schatten) auf der GPU skalieren und mit der Deckung der Animation mischen.
  * Wie compose_cpu: Rechteck und Deckung aus anim_state, Schatten um shadow_dy * Massstab versetzt; die Schattenstreifen
  * werden nur entlang der Kante gestreckt (die Weichheit bleibt). 0 = geht nicht (dann die CPU) */
+static unsigned frame_no;         /* zaehlt die Bilder (draw_all) */
+static Win     *scaled_win;       /* dessen Bild und Schatten liegen fuer dieses Bild schon skaliert in anim_temps */
+static unsigned scaled_frame;
+
 static int queue_anim(Win *w, Win *f, const Clip *c)
 {
     int r[4], a;
@@ -561,15 +566,27 @@ static int queue_anim(Win *w, Win *f, const Clip *c)
     if (sty < 1 || sty > 0xFFFF || stx < 1 || stx > 0xFFFF)
         return 0;
     int g = a + (a >> 7); /* 0-255 -> 0-256 */
-    gq_scale(1, &t[0], 0, 0, &w->buf, 0, 0, w8, dh8, sty);
-    gq_scale(0, &t[1], 0, 0, &t[0], 0, 0, dw8, dh8, stx);
+    /* je Bild nur einmal skalieren, auch wenn das Fenster in mehreren geaenderten Rechtecken liegt */
+    int scale = scaled_win != w || scaled_frame != frame_no;
+    if (scale && dh8 > w->h) { /* vergroessern: erst waagerecht (auf den wenigeren Zeilen des Originals) */
+        int h8 = (w->h + 7) & ~7;
+        if (h8 > w->buf.h || dw8 > t[0].w || h8 > t[0].h)
+            return 0;
+        gq_scale(0, &t[0], 0, 0, &w->buf, 0, 0, dw8, h8, stx);
+        gq_scale(1, &t[1], 0, 0, &t[0], 0, 0, dw8, dh8, sty);
+    } else if (scale) {
+        gq_scale(1, &t[0], 0, 0, &w->buf, 0, 0, w8, dh8, sty);
+        gq_scale(0, &t[1], 0, 0, &t[0], 0, 0, dw8, dh8, stx);
+    }
+    scaled_win = w;
+    scaled_frame = frame_no;
     if (shadow_ready(w, w == f ? 95 : 55)) {
         /* oben/unten: die Ecken (je S + R breit) unveraendert, nur das gerade Mittelstueck strecken */
         int tw = dw + 2 * S, mw = dw - 2 * R, mw8 = (mw + 7) & ~7, srcm = w->w - 2 * R;
         int sxs = mw >= 8 && srcm > 1 ? (srcm - 1) * 256 / (mw8 - 1) : 0;
         if (sxs >= 1 && sxs <= 0xFFFF && band + mw8 + band <= t[2].w) {
             Clip all = {0, 0, t[2].w, t[2].h};
-            for (int half = 0; half <= b8; half += b8) {
+            for (int half = 0; scale && half <= b8; half += b8) {
                 gq_scale(0, &t[2], band, half, &w->shd_tb, band, half, mw8, b8, sxs);
                 gq_copy(&t[2], 0, half, &w->shd_tb, 0, half, band, band, &all);
                 gq_copy(&t[2], band + mw, half, &w->shd_tb, w->w + 2 * S - band, half, band, band, &all);
@@ -580,8 +597,10 @@ static int queue_anim(Win *w, Win *f, const Clip *c)
         int lh = dh - 2 * R, lh8 = (lh + 7) & ~7, lrh = w->h - 2 * R;
         int sys = lh >= 8 && lrh > 1 ? (lrh - 1) * 256 / (lh8 - 1) : 0;
         if (sys >= 1 && sys <= 0xFFFF && lh8 <= t[3].h) {
-            gq_scale(1, &t[3], 0, 0, &w->shd_lr, 0, 0, b8, lh8, sys);
-            gq_scale(1, &t[3], b8, 0, &w->shd_lr, b8, 0, b8, lh8, sys);
+            if (scale) {
+                gq_scale(1, &t[3], 0, 0, &w->shd_lr, 0, 0, b8, lh8, sys);
+                gq_scale(1, &t[3], b8, 0, &w->shd_lr, b8, 0, b8, lh8, sys);
+            }
             gq_blend_a(&gfx_screen, X - S, Y + dys + R, &t[3], 0, 0, band, lh, g, c);
             gq_blend_a(&gfx_screen, X + dw - R, Y + dys + R, &t[3], b8, 0, band, lh, g, c);
         }
@@ -917,6 +936,7 @@ void draw_all(void)
 {
     s64 start = sys_time_us(), ta;
     prof = (FrameProf){0};
+    frame_no++;
     gpu_wait(); /* das letzte Bild liest vielleicht noch aus Flaechen, die sich gleich aendern */
     ta = sys_time_us();
     prof.wait = (unsigned)(ta - start);
