@@ -16,6 +16,7 @@
 #include "console/console.h"
 #include "drivers/sound/hda.h"
 #include "arch/x86_64/spinlock.h"
+#include "core/service.h"
 
 #define MAX_PROC          64
 #define MAX_FD            32
@@ -540,6 +541,7 @@ static void finish_process(Process *p, int code, int faulted)
 {
     close_all_fds(p);
     shm_release_all(p); /* die Seiten bleiben bis as_destroy eingeblendet, werden aber nicht mehr benutzt */
+    service_owner_exit(p->pid); /* angemeldete Dienste verschwinden */
     mouse_owner_exit(p->pid);
     console_gfx_release(p->pid); /* hatte das Programm den Bildschirm, bekommt ihn die Konsole zurueck */
     hda_close(p->pid);           /* spielte es Ton: sofort aus */

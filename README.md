@@ -97,7 +97,9 @@ vergroessert die Symbole unter der Maus (bis 60 %, Nachbarn abgestuft).
 Jedes Fenster gehoert einem eigenen Prozess; der Desktop zeichnet nur Rahmen, Menueleiste und Dock. Programme:
 `term` (Terminal mit Shell), `files` (Dateien; Doppelklick oeffnet Ordner hier, Bilder in `view`, alles andere in
 `textview`), `textview`, `view`, `calc`, `clock`, `about`, `paint`, `snake`, `tetris`. Ohne Desktop gestartet, laufen
-sie im Vollbild. Stuerzt ein Programm ab, verschwindet nur sein Fenster.
+sie im Vollbild. Stuerzt ein Programm ab, verschwindet nur sein Fenster. Grafikprogramme lassen sich auch im Terminal
+starten (`snake`, `view bild.bmp`, mit `&` dahinter laeuft das Terminal weiter): sie melden sich beim Desktop und
+bekommen ein Fenster.
 
 - Fensterprotokoll (`Userland/include/winproto.h`): der Desktop startet das Programm mit zwei Pipes (Deskriptor 3
   und 4, Nachrichten zu 64 Byte: Tasten, Maus, Fokus, Schliessen, Bildtakt bzw. Fenster anlegen, geaenderter
@@ -109,6 +111,9 @@ sie im Vollbild. Stuerzt ein Programm ab, verschwindet nur sein Fenster.
   `EV_CLOSE`, `EV_FOCUS` und `EV_RESIZE`. Gemeinsames Aussehen (Masse, Farben, Programmsymbole): `ui.h`
 - Geteilter Speicher: `SYS_SHM` (anlegen, per Nummer einblenden, ausblenden); die Seiten tragen ein eigenes
   PTE-Bit, damit `fork` sie nicht kopiert und `munmap`/Programmende sie nicht doppelt freigeben (Test: `shmtest`)
+- Benannte Dienste: `SYS_SERVICE` (anmelden, verbinden, annehmen) - wie ein sehr einfacher Unix-Socket, jede
+  Verbindung bekommt zwei Pipes. Der Desktop meldet sich als "desktop" an; findet ein Grafikprogramm keine
+  Begruessung auf Deskriptor 3, verbindet es sich dort. Endet der Anbieter, verschwindet der Dienst.
 - Schriften: Inter und JetBrains Mono (SIL Open Font License, verkleinert in `/share/fonts`), gerastert mit
   stb_truetype (gemeinfrei, `Userland/include/stb_truetype.h`); `ttf.h` fuer Programme
 - Zeichnen mit Kantenglaettung und Transparenz (`Userland/lib/draw.c`): abgerundete Rechtecke, Kreise, Linien,

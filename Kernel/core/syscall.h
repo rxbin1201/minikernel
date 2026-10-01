@@ -74,6 +74,8 @@
 #define SYS_SETMODE   63 /* (breite, hoehe, hz100; 0 = egal) -> 0; breite 0 = Modus der Firmware. ERR_NOSYS ohne Treiber, ERR_NOENT unbekannt, ERR_AGAIN Grafikprogramm laeuft, ERR_IO */
 #define SYS_SHM       65 /* (op, a, b): geteilter Speicher fuer Fenster-Programme, 0 anlegen (bytes, u32 *nummer) -> Adresse,
                             1 einblenden (nummer) -> Adresse, 2 ausblenden (adresse), 3 Groesse (nummer) -> Bytes */
+#define SYS_SERVICE   66 /* (op, name, int *fds): benannte Dienste (service.h): 0 anmelden, 1 abmelden, 2 verbinden (fds[2]:
+                            lesen, schreiben), 3 annehmen (fds[3]: lesen, schreiben, PID; ERR_AGAIN = keine wartet) */
 #define SYS_KLOG      61 /* (u64 *pos, buf, max) -> Bytes aus dem Kernel-Log ab *pos (wird weitergezaehlt), 0 = Ende */
 
 /* Argument fuer SYS_SENDTO/SYS_RECVFROM (gleiches Layout in Userland/user.h) */

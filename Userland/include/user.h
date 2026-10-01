@@ -71,6 +71,7 @@ typedef long long          s64;
 #define SYS_SETMODE   63
 #define SYS_AUDIO     64
 #define SYS_SHM       65
+#define SYS_SERVICE   66
 #define ERR_NOENT     (-2)
 #define ERR_IO        (-5)
 #define ERR_EXIST     (-17)
@@ -260,6 +261,12 @@ static inline s64 sys_shm_create(u64 bytes, unsigned *id)  { return syscall3(SYS
 static inline s64 sys_shm_map(unsigned id)                 { return syscall3(SYS_SHM, 1, id, 0); }
 static inline s64 sys_shm_unmap(void *addr)                { return syscall3(SYS_SHM, 2, (u64)addr, 0); }
 static inline s64 sys_shm_size(unsigned id)                { return syscall3(SYS_SHM, 3, id, 0); }
+/* Benannte Dienste: anmelden, abmelden, verbinden (fds: lesen, schreiben), annehmen (fds: lesen, schreiben, PID;
+ * ERR_AGAIN = niemand wartet). Damit finden Programme aus dem Terminal den Desktop. */
+static inline s64 sys_service_register(const char *name)     { return syscall3(SYS_SERVICE, 0, (u64)name, 0); }
+static inline s64 sys_service_unregister(const char *name)   { return syscall3(SYS_SERVICE, 1, (u64)name, 0); }
+static inline s64 sys_service_connect(const char *name, int fds[2]) { return syscall3(SYS_SERVICE, 2, (u64)name, (u64)fds); }
+static inline s64 sys_service_accept(const char *name, int out[3])  { return syscall3(SYS_SERVICE, 3, (u64)name, (u64)out); }
 static inline s64 sys_keymap(const char *set, char out[16]) { return syscall3(SYS_KEYMAP, (u64)set, (u64)out, 0); } /* set = 0: nur abfragen */
 static inline s64 sys_gfx(int op, const void *arg)          { return syscall3(SYS_GFX, op, (u64)arg, 0); } /* 0 = uebernehmen, 1 = GfxBlit, 2 = freigeben */
 static inline s64 sys_font(unsigned cp, unsigned char out[16]) { return syscall3(SYS_FONT, cp, (u64)out, 0); }

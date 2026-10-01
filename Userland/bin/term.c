@@ -4,7 +4,8 @@
 
 /* term: Terminal fuer den Desktop - eine echte Shell (/bin/sh) ueber Pipes, ANSI-Farben (ESC [ ... m), Cursor setzen
  * (H), Zeile/Bild loeschen (K, J), UTF-8. Fenstergroesse aenderbar: die Zeichenflaeche passt sich an.
- * Programme mit eigenem Vollbild (edit, snake, ...) laufen hier nicht: die startet man ueber das Dock. */
+ * Grafikprogramme, die man hier startet, bekommen ein eigenes Fenster (sie melden sich beim Desktop). Programme fuer
+ * die Textkonsole mit eigenem Vollbild (edit, less) laufen hier nicht. */
 
 typedef struct {
     unsigned short ch;
@@ -286,7 +287,8 @@ void _start(int argc, char **argv)
         gfx_close();
         sys_exit(1);
     }
-    const char *hello = "\x1b[36mTerminal\x1b[0m \xE2\x80\x93 Programme mit Grafik (snake, paint, \xE2\x80\xA6) startest du \xC3\xBC" "ber das Dock\r\n";
+    const char *hello = "\x1b[36mTerminal\x1b[0m \xE2\x80\x93 Grafikprogramme (snake, view, \xE2\x80\xA6) \xC3\xB6" "ffnen ein eigenes "
+                        "Fenster; mit & dahinter l\xC3\xA4" "uft das Terminal weiter\r\n";
     for (const char *p = hello; *p; p++)
         byte((unsigned char)*p);
     for (;;) {

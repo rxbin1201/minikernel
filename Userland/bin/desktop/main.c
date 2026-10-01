@@ -220,6 +220,7 @@ void _start(int argc, char **argv)
     now_us = sys_time_us();
     desk_init();
     make_background();
+    sys_service_register("desktop"); /* Grafikprogramme aus dem Terminal finden ihn so */
     do_action(A_TERM);
     damage_all();
     draw_all();

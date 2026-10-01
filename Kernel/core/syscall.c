@@ -25,6 +25,7 @@
 #include "console/font.h"
 #include "drivers/video.h"
 #include "fs/vfs.h"
+#include "core/service.h"
 
 #define MSR_EFER   0xC0000080
 #define MSR_STAR   0xC0000081
@@ -154,6 +155,28 @@ static int64_t sys_getcwd(uint64_t ubuf, uint64_t size)
         return ERR_FAULT;
     memcpy((void *)ubuf, cwd, n + 1);
     return (int64_t)n;
+}
+
+static int64_t sys_service(uint64_t op, uint64_t uname, uint64_t ufds)
+{
+    Process *p = process_current();
+    char name[SERVICE_NAME_MAX];
+    if (process_copy_string(p, uname, name, sizeof(name)) < 0)
+        return ERR_FAULT;
+    int n = op == 2 ? 2 : op == 3 ? 3 : 0, fds[3];
+    if (n && !process_user_range_ok(p, ufds, (uint64_t)n * sizeof(int), 1))
+        return ERR_FAULT;
+    int64_t r;
+    switch (op) {
+    case 0: return service_register(name);
+    case 1: return service_unregister(name);
+    case 2: r = service_connect(name, fds); break;
+    case 3: r = service_accept(name, fds); break;
+    default: return ERR_INVAL;
+    }
+    if (r == 0)
+        memcpy((void *)ufds, fds, (uint64_t)n * sizeof(int));
+    return r;
 }
 
 static int64_t sys_pipe(uint64_t ufds)
@@ -378,6 +401,7 @@ static void syscall_do(SyscallFrame *f)
     case SYS_EXEC:     ret = sys_exec(f->rdi, f->rsi); break;
     case SYS_PIPE:     ret = sys_pipe(f->rdi); break;
     case SYS_SHM:      ret = process_shm(process_current(), f->rdi, f->rsi, f->rdx); break;
+    case SYS_SERVICE:  ret = sys_service(f->rdi, f->rsi, f->rdx); break;
     case SYS_DUP:      ret = process_fd_dup(process_current(), (int)f->rdi); break;
     case SYS_DUP2:     ret = process_fd_dup2(process_current(), (int)f->rdi, (int)f->rsi); break;
     case SYS_LSEEK:    ret = process_fd_seek(process_current(), (int)f->rdi, (int64_t)f->rsi, (int)f->rdx); break;

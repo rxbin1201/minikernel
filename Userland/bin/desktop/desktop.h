@@ -15,7 +15,8 @@
  *   Titelleiste, Groesse aendern an der Ecke unten rechts (wenn das Programm es erlaubt).
  *   Jedes Fenster gehoert einem eigenen Prozess (client.c, Protokoll in winproto.h): Terminal (term), Dateien (files),
  *   Textansicht (textview), Bildansicht (view), Rechner (calc), Uhr (clock), Info (about), Malen (paint), Snake und
- *   Tetris. Der Desktop zeichnet nur Rahmen, Menueleiste und Dock. "Zur Konsole" im Logo-Menue beendet ihn.
+ *   Tetris. Der Desktop zeichnet nur Rahmen, Menueleiste und Dock. Grafikprogramme, die man im Terminal startet,
+ *   melden sich ueber den Dienst "desktop" und bekommen ebenfalls ein Fenster. "Zur Konsole" beendet den Desktop.
  * Alle Masse sind fuer 1920x1080 angegeben und werden mit U() (ui.h) an groessere Bildschirme angepasst. */
 
 #define MAXW 16
@@ -124,6 +125,7 @@ void draw_all(void);
 /* ---------- client.c: die Programme hinter den Fenstern ---------- */
 
 void launch_app(const char *path, const char *cmdline, int action, const char *name);
+void apps_accept(void); /* Programme, die sich ueber den Dienst "desktop" melden (aus dem Terminal gestartet) */
 void open_path(const char *path); /* Datei/Ordner mit dem passenden Programm */
 void apps_poll(void);  /* Nachrichten der Programme lesen (jedes Bild) */
 void apps_frame(void); /* nach dem Bildwechsel: WP_FRAME, Mausbewegungen, neue Groessen */

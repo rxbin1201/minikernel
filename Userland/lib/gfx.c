@@ -19,6 +19,7 @@ static int      gfx_scr_w, gfx_scr_h, gfx_ui = 100;
 static unsigned gfx_shm_id;
 static int      gfx_conn = -1;              /* gfx_desktop(): -1 = noch nicht nachgesehen */
 static int      gfx_buf_new;                /* nach WP_RESIZE: neuer Puffer, mit dem naechsten Bild melden */
+static int      gfx_fd_in = WP_FD_IN, gfx_fd_out = WP_FD_OUT; /* Pipes zum Desktop */
 
 /* ---------- Speicher ---------- */
 
@@ -527,14 +528,14 @@ static void gfx_collect(void)
 
 static void wp_send(WpMsg *m)
 {
-    if (!gfx_win_dead && write_all(WP_FD_OUT, m, sizeof(*m)) != 0)
+    if (!gfx_win_dead && write_all(gfx_fd_out, m, sizeof(*m)) != 0)
         gfx_win_dead = 1;
 }
 
 /* Eine ganze Nachricht lesen, wenn eine da ist */
 static int wp_recv(WpMsg *m)
 {
-    s64 n = sys_fdavail(WP_FD_IN);
+    s64 n = sys_fdavail(gfx_fd_in);
     if (n < 0) {
         gfx_win_dead = 1;
         return 0;
@@ -543,7 +544,7 @@ static int wp_recv(WpMsg *m)
         return 0;
     u64 got = 0;
     while (got < sizeof(*m)) {
-        s64 r = sys_read(WP_FD_IN, (char *)m + got, sizeof(*m) - got);
+        s64 r = sys_read(gfx_fd_in, (char *)m + got, sizeof(*m) - got);
         if (r <= 0) {
             gfx_win_dead = 1;
             return 0;
@@ -644,21 +645,51 @@ static void gfx_win_collect(void)
     }
 }
 
-/* Laeuft das Programm unter dem Desktop? Dann liegt dessen Begruessung schon in Deskriptor 3. Andere Deskriptoren
- * (Datei: 1 Byte "verfuegbar", Konsole: 0, nicht offen: Fehler) kommen nicht auf 64 Byte. */
+static int gfx_hello(const WpMsg *m)
+{
+    if (m->type != WP_HELLO || m->d != WP_MAGIC)
+        return 0;
+    gfx_scr_w = m->a;
+    gfx_scr_h = m->b;
+    gfx_ui = m->c > 0 ? m->c : 100;
+    return 1;
+}
+
+/* Laeuft ein Desktop? Hat er das Programm selbst gestartet, liegt seine Begruessung schon in Deskriptor 3 (andere
+ * Deskriptoren - Datei: 1 Byte "verfuegbar", Konsole: 0, nicht offen: Fehler - kommen nicht auf 64 Byte). Sonst (z.B.
+ * im Terminal gestartet) beim Dienst "desktop" anklopfen: der nimmt mit seinem naechsten Bild an und gruesst. */
 static int gfx_win_connect(void)
 {
-    if (sys_fdavail(WP_FD_IN) < (s64)sizeof(WpMsg))
-        return 0;
     WpMsg m;
-    if (!wp_recv(&m) || m.type != WP_HELLO || m.d != WP_MAGIC) {
+    if (sys_fdavail(WP_FD_IN) >= (s64)sizeof(WpMsg)) {
+        if (wp_recv(&m) && gfx_hello(&m))
+            return 1;
         gfx_win_dead = 0;
         return 0;
     }
-    gfx_scr_w = m.a;
-    gfx_scr_h = m.b;
-    gfx_ui = m.c > 0 ? m.c : 100;
-    return 1;
+    int fds[2];
+    if (sys_service_connect("desktop", fds) != 0)
+        return 0;
+    gfx_fd_in = fds[0];
+    gfx_fd_out = fds[1];
+    s64 t0 = sys_time_us();
+    while (sys_time_us() - t0 < 2000000) {
+        s64 n = sys_fdavail(gfx_fd_in);
+        if (n < 0)
+            break;
+        if (n >= (s64)sizeof(m)) {
+            if (wp_recv(&m) && gfx_hello(&m))
+                return 1;
+            break;
+        }
+        sys_sleep_ms(5);
+    }
+    sys_close(fds[0]); /* Desktop antwortet nicht: dann eben ohne ihn */
+    sys_close(fds[1]);
+    gfx_fd_in = WP_FD_IN;
+    gfx_fd_out = WP_FD_OUT;
+    gfx_win_dead = 0;
+    return 0;
 }
 
 static int gfx_win_open(int w, int h, const char *title, int flags)
@@ -819,8 +850,8 @@ void gfx_close(void)
 {
     if (gfx_win) { /* Pipes zu: der Desktop schliesst das Fenster */
         gfx_win_flush();
-        sys_close(WP_FD_IN);
-        sys_close(WP_FD_OUT);
+        sys_close(gfx_fd_in);
+        sys_close(gfx_fd_out);
         sys_shm_unmap(gfx_screen.px);
         gfx_screen.px = 0;
         gfx_win = 0;

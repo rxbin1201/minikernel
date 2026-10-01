@@ -134,7 +134,7 @@ void test_user(BootInfo *info)
     /* fork/exec/Pipes/dup2/kill sowie lseek/rename/stat/chdir werden von eigenen Programmen geprueft */
     check("forktest (fork, exec, Pipe, dup2, kill)", run_user("/bin/forktest", "forktest", &code, &faulted) == 0 && code == 0 && !faulted);
     check("fstest (lseek, rename, stat, chdir, getcwd)", run_user("/bin/fstest", "fstest", &code, &faulted) == 0 && code == 0 && !faulted);
-    check("shmtest (geteilter Speicher, Freigabe)", run_user("/bin/shmtest", "shmtest", &code, &faulted) == 0 && code == 0 && !faulted);
+    check("shmtest (geteilter Speicher, Freigabe, Dienste)", run_user("/bin/shmtest", "shmtest", &code, &faulted) == 0 && code == 0 && !faulted);
 
     /* Die Shell: Befehle tippen (Tastatur-Injektion), die Ergebnisse stehen danach als Dateien auf /disk.
      * Prueft Pipes, Umleitungen, Anfuehrungszeichen, relative Pfade, Verlauf (Pfeil hoch) und Ctrl-C. */

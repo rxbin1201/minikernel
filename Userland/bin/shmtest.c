@@ -1,7 +1,7 @@
 #include "libc.h"
 
-/* Prueft geteilten Speicher (SYS_SHM). Exit-Code 0 = alles in Ordnung, sonst die Nummer der ersten fehlgeschlagenen
- * Pruefung. Die Schleifen am Ende legen zusammen mehr an, als der Rechner (512 MiB in QEMU) hat: gaebe ein Weg die
+/* Prueft geteilten Speicher (SYS_SHM) und benannte Dienste (SYS_SERVICE). Exit-Code 0 = alles in Ordnung, sonst die
+ * Nummer der ersten fehlgeschlagenen Pruefung. Die Schleifen am Ende legen zusammen mehr an, als der Rechner (512 MiB in QEMU) hat: gaebe ein Weg die
  * Seiten nicht frei, ginge der Speicher aus. */
 static int failed;
 
@@ -70,7 +70,40 @@ void _start(int argc, char **argv)
     check(21, sys_fdavail(fds[1]) == -1); /* kein Leser mehr */
     sys_close(fds[1]);
 
-    /* 6. Freigabe:100 x 8 MiB anlegen und ausblenden, 60 x 8 MiB in Kindern, die einfach enden */
+    /* 6. Benannte Dienste: so findet ein Programm aus dem Terminal den Desktop */
+    int out[3], cf[2];
+    check(22, sys_service_register("svctest") == 0);
+    check(23, sys_service_register("svctest") < 0);             /* Name schon vergeben */
+    check(24, sys_service_accept("svctest", out) == ERR_AGAIN); /* niemand wartet */
+    check(25, sys_service_connect("gibtsnicht", cf) < 0);
+    s64 client = sys_fork();
+    if (client == 0) {
+        char b[2];
+        int ok = sys_service_connect("svctest", cf) == 0 && write_all(cf[1], "hi", 2) == 0 &&
+                 sys_read(cf[0], b, 2) == 2 && b[0] == 'o' && b[1] == 'k';
+        sys_exit(ok ? 0 : 1);
+    }
+    s64 got = -1;
+    for (int i = 0; i < 300 && got != 0; i++) {
+        got = sys_service_accept("svctest", out);
+        if (got != 0)
+            sys_sleep_ms(10);
+    }
+    char hb[2] = {0, 0};
+    check(26, got == 0 && out[2] == (int)client);
+    check(27, got == 0 && sys_read(out[0], hb, 2) == 2 && hb[0] == 'h' && hb[1] == 'i' && write_all(out[1], "ok", 2) == 0);
+    check(28, client > 0 && sys_wait((int)client, &code) == 0 && code == 0);
+    if (got == 0) {
+        sys_close(out[0]);
+        sys_close(out[1]);
+    }
+    check(29, sys_service_unregister("svctest") == 0 && sys_service_connect("svctest", cf) < 0);
+    client = sys_fork(); /* ein Kind meldet an und endet: der Dienst verschwindet mit ihm */
+    if (client == 0)
+        sys_exit(sys_service_register("svckind") == 0 ? 0 : 1);
+    check(30, client > 0 && sys_wait((int)client, &code) == 0 && code == 0 && sys_service_connect("svckind", cf) < 0);
+
+    /* 7. Freigabe: 100 x 8 MiB anlegen und ausblenden, 60 x 8 MiB in Kindern, die einfach enden */
     for (int i = 0; i < 100 && !failed; i++) {
         unsigned k;
         s64 m = sys_shm_create(8u << 20, &k);

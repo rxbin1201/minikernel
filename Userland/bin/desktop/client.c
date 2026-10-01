@@ -1,6 +1,8 @@
 /* Desktop: die Programme hinter den Fenstern (eigene Prozesse, Protokoll in winproto.h)
  *
- * launch_app() startet ein Programm mit zwei Pipes (Deskriptor 3 und 4). Es meldet sich mit WP_CREATE und zeichnet in
+ * launch_app() startet ein Programm mit zwei Pipes (Deskriptor 3 und 4); Programme, die anders gestartet wurden (z.B.
+ * im Terminal), verbinden sich ueber den Dienst "desktop" (SYS_SERVICE) und bekommen ebenso zwei Pipes. Ein Programm
+ * meldet sich mit WP_CREATE und zeichnet in
  * geteilten Speicher; das Fenster erscheint mit dem ersten fertigen Bild (sonst sieht man beim Oeffnen kurz Schwarz).
  * Danach kopiert der Desktop bei jedem WP_DAMAGE den geaenderten Teil in das Fensterbild. Aendert sich die Groesse,
  * bekommt das Programm WP_RESIZE und antwortet mit einem neuen Puffer (WP_BUFFER); bis dahin bleibt der alte sichtbar.
@@ -59,12 +61,64 @@ static int read_msg(int fd, WpMsg *m)
     return 1;
 }
 
+static Pending *free_pending(void)
+{
+    for (int i = 0; i < MAXPEND; i++)
+        if (!pend[i].used)
+            return &pend[i];
+    return 0;
+}
+
+static void add_pending(Pending *p, int pid, int in, int out, int action, const char *name)
+{
+    memset(p, 0, sizeof(*p));
+    p->used = 1;
+    p->pid = pid;
+    p->in = in;
+    p->out = out;
+    p->action = action;
+    p->t0 = now_us;
+    snprintf(p->name, sizeof(p->name), "%s", name);
+}
+
+/* Bekannte Programme: Symbol und Name fuer Dock und Menueleiste */
+static const struct {
+    const char *prog, *name;
+    int         action;
+} known[] = {
+    {"term", "Terminal", A_TERM},   {"files", "Dateien", A_FILES},       {"calc", "Rechner", A_CALC},
+    {"clock", "Uhr", A_CLOCK},      {"about", "Info", A_ABOUT},          {"paint", "Malen", A_PAINT},
+    {"snake", "Snake", A_SNAKE},    {"tetris", "Tetris", A_TETRIS},      {"textview", "Textansicht", ICON_TEXT},
+    {"view", "Bildansicht", ICON_IMAGE},
+};
+
+/* Programme, die sich selbst melden (aus dem Terminal gestartet): annehmen und begruessen */
+void apps_accept(void)
+{
+    int c[3];
+    Pending *p;
+    while ((p = free_pending()) && sys_service_accept("desktop", c) == 0) {
+        WpMsg hello = {WP_HELLO, W, H, ui_pct, WP_MAGIC, 0, 0, 0, {0}};
+        write_all(c[1], &hello, sizeof(hello));
+        char prog[32] = "Programm";
+        ProcInfo pi;
+        for (u64 i = 0; sys_procinfo(i, &pi) == 0; i++)
+            if ((int)pi.pid == c[2])
+                snprintf(prog, sizeof(prog), "%s", pi.name);
+        int action = ICON_NONE;
+        const char *name = prog;
+        for (u64 k = 0; k < sizeof(known) / sizeof(known[0]); k++)
+            if (strcmp(known[k].prog, prog) == 0) {
+                action = known[k].action;
+                name = known[k].name;
+            }
+        add_pending(p, c[2], c[0], c[1], action, name);
+    }
+}
+
 void launch_app(const char *path, const char *cmdline, int action, const char *name)
 {
-    Pending *p = 0;
-    for (int i = 0; i < MAXPEND && !p; i++)
-        if (!pend[i].used)
-            p = &pend[i];
+    Pending *p = free_pending();
     if (!p)
         return;
     int ev[2], rq[2];
@@ -96,14 +150,7 @@ void launch_app(const char *path, const char *cmdline, int action, const char *n
         sys_close(rq[0]);
         return;
     }
-    memset(p, 0, sizeof(*p));
-    p->used = 1;
-    p->pid = (int)pid;
-    p->in = rq[0];
-    p->out = ev[1];
-    p->action = action;
-    p->t0 = now_us;
-    snprintf(p->name, sizeof(p->name), "%s", name);
+    add_pending(p, (int)pid, rq[0], ev[1], action, name);
 }
 
 static int ends_with(const char *s, const char *suf)
@@ -247,6 +294,7 @@ static void poll_window(Win *w)
 
 void apps_poll(void)
 {
+    apps_accept();
     for (int i = 0; i < MAXPEND; i++)
         if (pend[i].used)
             poll_pending(&pend[i]);
