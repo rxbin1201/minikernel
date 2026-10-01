@@ -39,22 +39,12 @@ static void key_pressed(HidState *s, uint8_t mods, uint8_t usage)
         keymap_key(usage, shift, ctrl, altgr, s->caps); /* Zeichen nach dem eingestellten Layout */
         return;
     }
-    if ((mods & 0x04) && !ctrl && usage >= 0x4A && usage <= 0x52) { /* linke Alt + Pfeil, Pos1, Ende, Bild */
+    if (usage >= 0x4A && usage <= 0x52) { /* Pfeile, Pos1, Ende, Bild, Entf - mit Shift/Alt/Strg */
         static const unsigned char k[9] = {KEY_HOME, KEY_PGUP, KEY_DEL, KEY_END, KEY_PGDN, KEY_RIGHT, KEY_LEFT, KEY_DOWN, KEY_UP};
-        keyboard_deliver(shift ? KEY_ALT_SHIFT : KEY_ALT);
-        keyboard_deliver(k[usage - 0x4A]);
+        keyboard_deliver_mods((shift ? 1 : 0) | ((mods & 0x04) ? 2 : 0) | (ctrl ? 4 : 0), k[usage - 0x4A]);
         return;
     }
     switch (usage) {
-    case 0x4F: keyboard_deliver(KEY_RIGHT); break;
-    case 0x50: keyboard_deliver(KEY_LEFT);  break;
-    case 0x51: keyboard_deliver(KEY_DOWN);  break;
-    case 0x52: keyboard_deliver(KEY_UP);    break;
-    case 0x4A: if (!keyboard_scroll_key(KEY_HOME, shift)) keyboard_deliver(KEY_HOME); break;
-    case 0x4D: if (!keyboard_scroll_key(KEY_END, shift)) keyboard_deliver(KEY_END); break;
-    case 0x4C: keyboard_deliver(KEY_DEL);   break;
-    case 0x4B: if (!keyboard_scroll_key(KEY_PGUP, shift)) keyboard_deliver(KEY_PGUP); break;
-    case 0x4E: if (!keyboard_scroll_key(KEY_PGDN, shift)) keyboard_deliver(KEY_PGDN); break;
     case 0x58: keyboard_deliver('\n');      break; /* Enter des Ziffernblocks */
     default: break;
     }

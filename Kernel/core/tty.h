@@ -21,11 +21,14 @@
 #define KEY_DEL   0xFB
 #define KEY_PGUP  0xFC
 #define KEY_PGDN  0xFD
-/* Linke Alt-Taste + Taste: dieses Byte, dann die Taste (Kleinbuchstabe, Ziffer, Tab, Leertaste oder Sondertaste
- * oben). Mit Shift KEY_ALT_SHIFT. Beide sind in UTF-8 nie gueltig; der Zeilenmodus und das rohe Lesen der Konsole
- * verwerfen sie samt Taste - auswerten tut sie nur, wer SYS_GETCHAR liest (Grafikprogramme, der Desktop). */
-#define KEY_ALT       0xFE
-#define KEY_ALT_SHIFT 0xFF
+/* Tasten mit Umschalttasten fuer Grafikprogramme (in UTF-8 nie gueltige Bytes):
+ *   KEY_ALT, Taste            linke Alt + Taste (Kleinbuchstabe, Ziffer, Tab, Leertaste oder Sondertaste oben)
+ *   KEY_MODS, mods, Taste     mods: 1 Shift, 2 Alt, 4 Strg - z.B. Shift + Pfeil (nur, solange ein Grafikprogramm den
+ *                             Bildschirm hat; in der Konsole bleibt Shift + Bild hoch/runter das Blaettern)
+ * Der Zeilenmodus und das rohe Lesen der Konsole liefern bei KEY_MODS ohne Alt nur die Taste und verwerfen den Rest;
+ * auswerten tut das, wer SYS_GETCHAR liest (Grafikbibliothek, Desktop). */
+#define KEY_ALT  0xFE
+#define KEY_MODS 0xFF
 
 int64_t tty_read(void *buf, uint64_t len);        /* blockiert; ERR_INTR, wenn der Prozess gekillt wird */
 int64_t tty_write(const void *buf, uint64_t len);

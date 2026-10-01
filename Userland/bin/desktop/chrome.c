@@ -162,6 +162,7 @@ int menubar_hit(int x, int y)
 
 static const MenuItem logo_menu[] = {
     {"\xC3\x9C" "ber MiniKernel", A_ABOUT, 0}, {"", A_SEP, 0}, {"Neues Terminal", A_TERM, 0}, {"Dateien", A_FILES, 0},
+    {"Texteditor", A_EDIT, 0},
     {"Rechner", A_CALC, 0}, {"Uhr", A_CLOCK, 0}, {"", A_SEP, 0}, {"Malen", A_PAINT, 0}, {"Snake", A_SNAKE, 0},
     {"Tetris", A_TETRIS, 0}, {"", A_SEP, 0}, {"Neu starten \xE2\x80\xA6", A_RESTART, 0},
     {"Ausschalten \xE2\x80\xA6", A_POWEROFF, 0}, {"", A_SEP, 0}, {"Zur Konsole", A_QUIT, 0},
@@ -277,7 +278,7 @@ static const struct {
     int         action;
     const char *name;
 } dock_apps[] = {
-    {A_FILES, "Dateien"}, {A_TERM, "Terminal"}, {A_CALC, "Rechner"}, {A_CLOCK, "Uhr"},
+    {A_FILES, "Dateien"}, {A_TERM, "Terminal"}, {A_EDIT, "Texteditor"}, {A_CALC, "Rechner"}, {A_CLOCK, "Uhr"},
     {A_PAINT, "Malen"},   {A_SNAKE, "Snake"},   {A_TETRIS, "Tetris"},
 };
 #define NAPPS ((int)(sizeof(dock_apps) / sizeof(dock_apps[0])))

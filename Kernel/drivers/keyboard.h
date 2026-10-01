@@ -8,6 +8,10 @@ int keyboard_init(void);
  * Eingabe. Behandelt Ctrl-C (Vordergrundgruppe beenden). */
 void keyboard_deliver(unsigned char c);
 
+/* Taste mit Umschalttasten (mods: 1 Shift, 2 Alt, 4 Strg, siehe KEY_MODS in tty.h): Hat ein Grafikprogramm den
+ * Bildschirm, kommen sie mit; sonst wie bisher (Shift + Bild hoch/runter blaettert in der Konsole). */
+void keyboard_deliver_mods(int mods, unsigned char k);
+
 /* Zwischenablage (console.h) als Eingabe einspeisen (Ctrl-V, rechte Maustaste). Ctrl-C bei markiertem Text kopiert. */
 void keyboard_paste(void);
 

@@ -137,6 +137,18 @@ void ui_app_icon(Surface *s, int icon, int x, int y, int size)
         gfx_disc(s, x + S / 2, y + S * 0.28f, S * 0.07f, 0xFFFFFF, 255);
         gfx_capsule(s, x + S / 2, y + S * 0.45f, x + S / 2, y + S * 0.76f, S * 0.12f, 0xFFFFFF, 255);
         break;
+    case ICON_EDIT: { /* Notizblock mit gelbem Kopf und Stift */
+        gfx_round_rect_grad(s, x, y, size, size, r, 0xFFFFFF, 0xF2F2F5, 255);
+        gfx_round_frame(s, x, y, size, size, r, 0xC7C7CC, 200);
+        gfx_round_rect_grad(s, x, y, size, size * 26 / 100, r, 0xFFD60A, 0xF5B800, 255);
+        gfx_fill(s, x, y + size * 16 / 100, size, size * 10 / 100, 0xF5B800);
+        for (int i = 0; i < 4; i++)
+            gfx_fill(s, x + size * 16 / 100, y + size * 40 / 100 + i * size * 13 / 100, size * (i == 3 ? 40 : 66) / 100,
+                     size / 40 + 1, 0xB8B8BE);
+        gfx_capsule(s, x + S * 0.52f, y + S * 0.86f, x + S * 0.86f, y + S * 0.42f, S * 0.07f, 0xFF9F0A, 255);
+        gfx_capsule(s, x + S * 0.47f, y + S * 0.92f, x + S * 0.53f, y + S * 0.85f, S * 0.05f, 0x3A3A3C, 255);
+        break;
+    }
     case ICON_TEXT:
         gfx_round_rect_grad(s, x + size / 8, y, size * 3 / 4, size, size / 12, 0xFFFFFF, 0xF2F2F5, 255);
         gfx_round_frame(s, x + size / 8, y, size * 3 / 4, size, size / 12, 0xC7C7CC, 255);

@@ -483,11 +483,16 @@ static void gfx_collect(void)
     s64 c;
     for (int i = 0; i < 32 && (c = sys_getchar()) >= 0; i++) {
         int k = (int)c;
-        if (k == KEY_ALT || k == KEY_ALT_SHIFT) { /* Alt-Kombination: die Taste kommt gleich dahinter */
+        if (k == KEY_ALT) { /* Alt-Kombination: die Taste kommt gleich dahinter */
             s64 n = sys_getchar();
             if (n < 0)
                 continue;
-            k = (int)n | KEY_MOD_ALT | (c == KEY_ALT_SHIFT ? KEY_MOD_SHIFT : 0);
+            k = (int)n | KEY_MOD_ALT;
+        } else if (k == KEY_MODS) { /* Umschalttasten, dann die Taste */
+            s64 m = sys_getchar(), n = sys_getchar();
+            if (m < 0 || n < 0)
+                continue;
+            k = (int)n | (m & 1 ? KEY_MOD_SHIFT : 0) | (m & 2 ? KEY_MOD_ALT : 0) | (m & 4 ? KEY_MOD_CTRL : 0);
         }
         Event e = {EV_KEY, k, gfx_cur_x, gfx_cur_y, 0, 0};
         gfx_push(e);

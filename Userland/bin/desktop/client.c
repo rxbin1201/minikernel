@@ -89,7 +89,7 @@ static const struct {
     {"term", "Terminal", A_TERM},   {"files", "Dateien", A_FILES},       {"calc", "Rechner", A_CALC},
     {"clock", "Uhr", A_CLOCK},      {"about", "Info", A_ABOUT},          {"paint", "Malen", A_PAINT},
     {"snake", "Snake", A_SNAKE},    {"tetris", "Tetris", A_TETRIS},      {"textview", "Textansicht", ICON_TEXT},
-    {"view", "Bildansicht", ICON_IMAGE},
+    {"view", "Bildansicht", ICON_IMAGE},  {"textedit", "Texteditor", A_EDIT},
 };
 
 /* Programme, die sich selbst melden (aus dem Terminal gestartet): annehmen und begruessen */
@@ -159,11 +159,16 @@ static int ends_with(const char *s, const char *suf)
     return a >= b && strcasecmp(s + a - b, suf) == 0;
 }
 
-/* Datei oder Ordner mit dem passenden Programm oeffnen (Wunsch eines Programms, z.B. der Dateien) */
+/* Datei oder Ordner mit dem passenden Programm oeffnen (Wunsch eines Programms, z.B. der Dateien); leerer Pfad: ein
+ * neues, leeres Dokument im Texteditor */
 void open_path(const char *path)
 {
     char cmd[WP_PATH_MAX + 32];
     Stat st;
+    if (!path[0]) {
+        launch_app("/bin/textedit", "textedit", A_EDIT, "Texteditor");
+        return;
+    }
     if (sys_stat(path, &st) != 0 || strchr(path, '"'))
         return;
     if (st.is_dir) {
@@ -172,9 +177,9 @@ void open_path(const char *path)
     } else if (ends_with(path, ".bmp")) {
         snprintf(cmd, sizeof(cmd), "view \"%s\"", path);
         launch_app("/bin/view", cmd, ICON_IMAGE, "Bildansicht");
-    } else {
-        snprintf(cmd, sizeof(cmd), "textview \"%s\"", path);
-        launch_app("/bin/textview", cmd, ICON_TEXT, "Textansicht");
+    } else { /* alles andere im Texteditor (Binaerdateien lehnt er mit einer Meldung ab) */
+        snprintf(cmd, sizeof(cmd), "textedit \"%s\"", path);
+        launch_app("/bin/textedit", cmd, A_EDIT, "Texteditor");
     }
 }
 

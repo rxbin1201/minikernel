@@ -187,8 +187,7 @@ int keymap_key(uint8_t usage, int shift, int ctrl, int altgr, int caps)
             uint32_t base = current->normal[usage];
             if (!ctrl && base && base < 0x7F && (base >= ' ' || base == '\t')) {
                 dead = 0;
-                keyboard_deliver(shift ? KEY_ALT_SHIFT : KEY_ALT);
-                keyboard_deliver((unsigned char)base);
+                keyboard_deliver_mods(shift ? 3 : 2, (unsigned char)base);
                 return 1;
             }
             altgr = 0;

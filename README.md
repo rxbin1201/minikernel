@@ -104,9 +104,17 @@ beim Minimieren an ihren Platz im Dock und von dort zurueck, Zoomen gleitet auf 
 vergroessert die Symbole unter der Maus (bis 60 %, Nachbarn abgestuft).
 
 Jedes Fenster gehoert einem eigenen Prozess; der Desktop zeichnet nur Rahmen, Menueleiste und Dock. Programme:
-`term` (Terminal mit Shell), `files` (Dateien; Doppelklick oeffnet Ordner hier, Bilder in `view`, alles andere in
-`textview`), `textview`, `view`, `calc`, `clock`, `about`, `paint`, `snake`, `tetris`. Ohne Desktop gestartet, laufen
-sie im Vollbild. Stuerzt ein Programm ab, verschwindet nur sein Fenster. Grafikprogramme lassen sich auch im Terminal
+`term` (Terminal mit Shell), `files` (Dateien; Doppelklick oeffnet Ordner hier, Bilder in `view`, alles andere im
+Texteditor), `textedit`, `textview` (nur ansehen), `view`, `calc`, `clock`, `about`, `paint`, `snake`, `tetris`. Ohne
+Desktop gestartet, laufen sie im Vollbild.
+
+Texteditor (`textedit [datei]`): Zeilennummern, Markieren mit Maus (Doppelklick Wort, Dreifachklick Zeile) und
+Shift + Pfeil/Pos1/Ende/Bild, Strg + Pfeil wortweise, Strg+A/C/X/V (Zwischenablage des Systems), Strg+Z/Y
+rueckgaengig/wiederholen, Strg+S sichern; Werkzeugleiste mit Neu, Oeffnen, Sichern, Sichern unter. Beim Schliessen
+mit ungesicherten Aenderungen fragt er nach. Gespeichert wird auf `/disk` (8.3-Namen, z.B. `/disk/NOTIZ.TXT`).
+Shift und Strg kommen mit Sondertasten als `KEY_MODS`, Umschalttasten, Taste an (`KEY_MOD_SHIFT`/`KEY_MOD_CTRL` in
+`Event.key`), solange ein Grafikprogramm den Bildschirm hat; Strg+V fuegt dann nicht mehr in die Konsole ein, sondern
+geht an das Programm. Stuerzt ein Programm ab, verschwindet nur sein Fenster. Grafikprogramme lassen sich auch im Terminal
 starten (`snake`, `view bild.bmp`, mit `&` dahinter laeuft das Terminal weiter): sie melden sich beim Desktop und
 bekommen ein Fenster.
 

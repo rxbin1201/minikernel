@@ -57,9 +57,15 @@ static int next_key(void)
 {
     for (;;) {
         int c = keyboard_getchar();
-        if (c == KEY_ALT || c == KEY_ALT_SHIFT) { /* Alt-Kombination: gehoert den Grafikprogrammen */
+        if (c == KEY_ALT) { /* Alt-Kombination: gehoert den Grafikprogrammen */
             keyboard_getchar();
             continue;
+        }
+        if (c == KEY_MODS) { /* Umschalttasten + Taste: ohne Alt bleibt die Taste */
+            int mods = keyboard_getchar(), k = keyboard_getchar();
+            if (mods < 0 || k < 0 || (mods & 2))
+                continue;
+            return k;
         }
         if (c >= 0)
             return c;

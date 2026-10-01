@@ -31,10 +31,13 @@ extern Clip    gfx_clip;   /* aktuelles Clip-Rechteck (gfx_set_clip) */
  * EV_RESIZE neue Groesse (x, y = Breite, Hoehe; gfx_screen hat sie schon): alles neu zeichnen */
 enum { EV_NONE, EV_KEY, EV_DOWN, EV_UP, EV_MOVE, EV_WHEEL, EV_CLOSE, EV_FOCUS, EV_RESIZE };
 
-/* EV_KEY mit der linken Alt-Taste: key = KEY_MOD_ALT | Taste (Kleinbuchstabe, Ziffer, '\t' oder KEY_*), mit Shift
- * zusaetzlich KEY_MOD_SHIFT. Der Desktop benutzt einige davon selbst (Alt+Tab, Alt+W ...). */
+/* EV_KEY mit Umschalttasten: key = Taste (Kleinbuchstabe, Ziffer, '\t' oder KEY_*) | KEY_MOD_*. Alt kommt mit allen
+ * Tasten, Shift und Strg nur mit Sondertasten (Pfeile, Pos1, Ende, Bild, Entf; Buchstaben kommen schon gross bzw. als
+ * Steuerzeichen). Der Desktop benutzt einige Alt-Kombinationen selbst (Alt+Tab, Alt+W ...). */
 #define KEY_MOD_ALT   0x1000
 #define KEY_MOD_SHIFT 0x2000
+#define KEY_MOD_CTRL  0x4000
+#define KEY_BASE(k)   ((k) & 0xFF)
 
 typedef struct {
     int type;

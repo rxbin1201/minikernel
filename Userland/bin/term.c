@@ -297,8 +297,8 @@ void _start(int argc, char **argv)
         while (gfx_poll(&e)) {
             if (e.type == EV_CLOSE) {
                 quit();
-            } else if (e.type == EV_KEY && e.key < 0x100) { /* Alt-Kombinationen gehen nicht an die Shell */
-                unsigned char b = (unsigned char)e.key;
+            } else if (e.type == EV_KEY && !(e.key & KEY_MOD_ALT)) { /* Alt-Kombinationen gehen nicht an die Shell */
+                unsigned char b = (unsigned char)KEY_BASE(e.key); /* Shift/Strg + Pfeil: einfach der Pfeil */
                 sys_write(to_sh, &b, 1);
             } else if (e.type == EV_RESIZE) {
                 alloc_cells();

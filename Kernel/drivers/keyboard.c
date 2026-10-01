@@ -66,17 +66,37 @@ void keyboard_paste(void)
 void keyboard_deliver(unsigned char c)
 {
     console_live_request(); /* jeder Tastendruck zeigt wieder das Ende */
-    if (c == 3 && console_has_selection()) { /* Ctrl-C mit Markierung: kopieren statt abbrechen */
+    int gfx = console_gfx_active(); /* ein Grafikprogramm kopiert und fuegt selbst ein (Strg+C/V im Editor) */
+    if (!gfx && c == 3 && console_has_selection()) { /* Ctrl-C mit Markierung: kopieren statt abbrechen */
         console_copy_selection();
         return;
     }
-    if (c == 0x16) { /* Ctrl-V: einfuegen */
+    if (!gfx && c == 0x16) { /* Ctrl-V: einfuegen */
         keyboard_paste();
         return;
     }
     if (c == 3 && tty_interrupt())
         return; /* Ctrl-C: Vordergrundgruppe wurde beendet, kein Zeichen weiterreichen */
     put((char)c);
+}
+
+void keyboard_deliver_mods(int mods, unsigned char k)
+{
+    if (mods && console_gfx_active()) {
+        console_live_request();
+        if (mods == 2) { /* nur Alt */
+            put((char)KEY_ALT);
+        } else {
+            put((char)KEY_MODS);
+            put((char)mods);
+        }
+        put((char)k);
+        return;
+    }
+    if (mods & 2) /* Alt-Kombinationen gibt es in der Konsole nicht */
+        return;
+    if (!keyboard_scroll_key(k, mods & 1))
+        keyboard_deliver(k);
 }
 
 int keyboard_scroll_key(unsigned char k, int shift)
@@ -149,12 +169,8 @@ static void keyboard_handler(InterruptFrame *f)
             }
             if (!release) {
                 int k = extended_key(code);
-                if (k && lalt && !ctrl) { /* Alt + Pfeil usw. */
-                    keyboard_deliver(shift ? KEY_ALT_SHIFT : KEY_ALT);
-                    keyboard_deliver((unsigned char)k);
-                } else if (k && !keyboard_scroll_key((unsigned char)k, shift)) {
-                    keyboard_deliver((unsigned char)k);
-                }
+                if (k) /* Pfeile usw., mit Shift/Alt/Strg */
+                    keyboard_deliver_mods((shift ? 1 : 0) | (lalt ? 2 : 0) | (ctrl ? 4 : 0), (unsigned char)k);
             }
             continue;
         }

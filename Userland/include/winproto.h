@@ -35,8 +35,8 @@ enum {
     WP_TITLE,       /* text = neuer Titel */
     WP_WANT_FRAME,  /* nach dem naechsten Bild WP_FRAME schicken (gfx_vsync) */
     WP_BUFFER,      /* a, b = Groesse, c = Nummer des neuen geteilten Speichers (nach WP_RESIZE) */
-    WP_OPEN,        /* Datei/Ordner mit dem passenden Programm oeffnen: der Pfad kommt in Stuecken zu je hoechstens 32 Byte,
-                     * a = Stelle im Pfad, c = Laenge des Stuecks, b = 1 beim letzten */
+    WP_OPEN,        /* Datei/Ordner mit dem passenden Programm oeffnen (leerer Pfad: neues Textdokument): der Pfad kommt in
+                     * Stuecken zu je hoechstens 32 Byte, a = Stelle im Pfad, c = Laenge des Stuecks, b = 1 beim letzten */
 };
 
 #define WPF_RESIZABLE 1 /* Groesse aenderbar (und zoombar) */
