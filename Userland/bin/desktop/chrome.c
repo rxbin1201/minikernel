@@ -527,12 +527,56 @@ void damage_menubar(void) { damage_dock(); }
 
 int dock_hit(int x, int y) { return bar_hit(x, y); }
 
+/* Bereich, den die Hervorhebung von Feld h und sein Name darueber (mit Schatten) belegen */
+static int hover_area(int h, int *r)
+{
+    if (h < 0)
+        return 0;
+    Bar b;
+    bar_layout(&b);
+    int x0, x1;
+    if (h < HIT_BTN) {
+        x0 = b.ax[h];
+        x1 = x0 + SLOT;
+    } else {
+        x0 = b.bx[h - HIT_BTN];
+        x1 = x0 + b.bw[h - HIT_BTN];
+    }
+    int y0 = b.y, y1 = b.y + b.h;
+    char buf[48];
+    const char *name = menu_open ? 0 : hover_name(&b, h, buf, sizeof(buf));
+    if (name && name[0]) { /* wie in draw_dock */
+        int cx = (x0 + x1) / 2, bw = text_width(font_ui, FS, name) + U(22), bh = U(26);
+        int bx = cx - bw / 2, by = b.y - bh - U(8);
+        if (bx < U(4)) bx = U(4);
+        if (bx + bw > W - U(4)) bx = W - U(4) - bw;
+        if (bx - U(14) < x0) x0 = bx - U(14);
+        if (bx + bw + U(14) > x1) x1 = bx + bw + U(14);
+        y0 = by - U(14);
+    }
+    r[0] = x0 - U(2);
+    r[1] = y0;
+    r[2] = x1 - x0 + U(4);
+    r[3] = y1 - y0;
+    return 1;
+}
+
+static void damage_hover(int h)
+{
+    int r[4];
+    if (hover_area(h, r)) {
+        damage(r[0], r[1], r[2], r[3]);
+        overlay_dirty(r[0], r[1], r[2], r[3]);
+    }
+}
+
 void dock_hover_at(int px, int py)
 {
     int h = bar_hit(px, py);
-    if (h != dock_hover) {
+    if (h != dock_hover) { /* nur das alte und das neue Feld (samt Namen) neu */
+        damage_hover(dock_hover);
         dock_hover = h;
-        damage_dock();
+        damage_hover(h);
     }
 }
 

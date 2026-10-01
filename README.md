@@ -112,7 +112,10 @@ In der Shell: `burn 5000 & burn 5000 & cpus` zeigt zwei ausgelastete CPUs.
   wird mitskaliert; die Schattenstreifen werden nur entlang der Kante gestreckt, ihre Ecken bleiben unveraendert.
   Taskleiste, Menues, Dialog und Andock-Vorschau liegen in einer eigenen Ebene: die CPU zeichnet sie nur, wenn sie sich
   aendern, und zwar zweimal (auf Schwarz und auf Weiss) - aus dem Unterschied ergeben sich Deckung und Farbe je Pixel;
-  die GPU mischt die Ebene bei jedem Bild ueber die Fenster. Am Ende jeder Liste steht "anzeigen" (die GPU kopiert die
+  die GPU mischt die Ebene bei jedem Bild ueber die Fenster - nur in den Zonen, wo gerade etwas liegt (Taskleiste,
+  offenes Menue, Dialogkasten, Andock-Vorschau), und nur dort zeichnet die CPU sie auch. Beim Darueberfahren der
+  Taskleiste werden nur das alte und das neue Feld samt Namen neu gezeichnet; das Abdunkeln beim Dialog macht die GPU
+  mit einer festen halbdurchsichtigen Flaeche (Reihenfolge wie bei der CPU). Am Ende jeder Liste steht "anzeigen" (die GPU kopiert die
   Rechtecke uncached in den angezeigten Puffer), der Desktop wartet nicht: abgewartet wird erst vor dem naechsten Bild
   bzw. bevor CPU oder Blitter in den Bildspeicher schreiben oder eine Flaeche abgemeldet wird. Die GPU-Zeit misst der Zeitstempel der Render-Engine. Cache: die Render-Engine hat eigene Eintraege fuer "uncached" und "write-back im
   LLC" (L3 der GPU fuer beide aus, damit sie keine alten Fensterinhalte sieht). Standard ist "alles im Cache" (auf

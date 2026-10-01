@@ -34,10 +34,22 @@ static void button_rect(int i, int *bx, int *by, int *bw, int *bh)
     *by = y + h - pad - *bh;
 }
 
+void dialog_zone(int *r)
+{
+    int x, y, w, h;
+    box(&x, &y, &w, &h);
+    r[0] = x - U(32); /* mit Schatten */
+    r[1] = y - U(32);
+    r[2] = w + U(64);
+    r[3] = h + U(72);
+}
+
 void damage_dialog(void)
 {
     damage_all(); /* der ganze Bildschirm wird abgedunkelt */
-    overlay_dirty(0, 0, W, H);
+    int z[4];
+    dialog_zone(z);
+    overlay_dirty(z[0], z[1], z[2], z[3]); /* in der Ebene steht nur der Kasten (abgedunkelt wird auf der GPU) */
 }
 
 void dialog_open(int action)
@@ -72,7 +84,8 @@ void draw_dialog(void)
     Surface *s = &gfx_screen;
     int x, y, w, h;
     box(&x, &y, &w, &h);
-    gfx_blend_fill(s, 0, 0, W, H, 0x000000, 70);
+    if (!ov_pass) /* fuer die Ebene der GPU nicht: die dunkelt selbst ab */
+        gfx_blend_fill(s, 0, 0, W, H, 0x000000, DIALOG_DIM);
     gfx_shadow(s, x, y + U(6), w, h, U(14), U(30), 90);
     gfx_round_rect(s, x, y, w, h, U(14), 0xF6F6F8, 252);
     gfx_round_frame(s, x, y, w, h, U(14), 0x000000, 30);

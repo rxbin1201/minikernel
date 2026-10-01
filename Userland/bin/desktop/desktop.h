@@ -178,6 +178,9 @@ void shadow_free(Win *w);
 
 extern int dialog_kind;               /* 0 = keiner */
 void dialog_open(int action);         /* A_POWEROFF oder A_RESTART */
+void dialog_zone(int *r);             /* Kasten samt Schatten (x, y, w, h) */
+#define DIALOG_DIM 70                 /* so stark wird beim Dialog abgedunkelt */
+extern int ov_pass;                   /* gerade wird die Ebene fuer die GPU gezeichnet (wm.c) */
 void draw_dialog(void);
 void damage_dialog(void);
 void dialog_mouse(int x, int y, int down);

@@ -672,9 +672,38 @@ static void overlays(const Clip *r)
 
 #define MAXOV 8
 
-static Surface ov_layer, ov_black, ov_white;
+static Surface ov_layer, ov_black, ov_white, ov_dim; /* ov_dim: Schwarz mit Deckung DIALOG_DIM (Dialog) */
 static Clip    ov_dirty[MAXOV];
 static int     nov, ov_failed, ov_stale = 1; /* ov_stale: die ganze Ebene neu zeichnen */
+int            ov_pass;
+
+/* Wo die Ebene gerade etwas zeigt (jeweils x, y, w, h); 0-4 Zonen. Taskleiste immer, dazu offenes Menue, Dialog,
+ * Andock-Vorschau. Menue und Vorschau enden ueber der Taskleiste (jede Stelle wird nur einmal gemischt). */
+static int ov_zones(int z[4][4])
+{
+    int n = 0;
+    dock_zone(z[n]);
+    int top = z[n][1];
+    n++;
+    if (menu_zone(z[n])) {
+        if (z[n][1] + z[n][3] > top)
+            z[n][3] = top - z[n][1];
+        n++;
+    }
+    if (dialog_kind)
+        dialog_zone(z[n++]);
+    if (snap_preview) {
+        snap_rect(snap_preview, z[n]);
+        z[n][0] -= U(4);
+        z[n][1] -= U(4);
+        z[n][2] += U(8);
+        z[n][3] += U(8);
+        if (z[n][1] + z[n][3] > top)
+            z[n][3] = top - z[n][1];
+        n++;
+    }
+    return n;
+}
 
 void overlay_dirty(int x, int y, int w, int h)
 {
@@ -731,11 +760,13 @@ static void ov_render(const Clip *r)
             wt[x] = 0xFFFFFF;
     }
     u32 *screen = gfx_screen.px;
+    ov_pass = 1;
     gfx_screen.px = ov_black.px;
     overlays(r);
     gfx_screen.px = ov_white.px;
     overlays(r);
     gfx_screen.px = screen;
+    ov_pass = 0;
     for (int y = r->y0; y < r->y1; y++) {
         const u32 *b = ov_black.px + (u64)y * (u64)W + (u64)r->x0, *wt = ov_white.px + (u64)y * (u64)W + (u64)r->x0;
         u32 *o = ov_layer.px + (u64)y * (u64)W + (u64)r->x0;
@@ -766,46 +797,58 @@ static void ov_render(const Clip *r)
     }
 }
 
+/* Geaenderte Teile neu zeichnen - nur innerhalb der Zonen (anderswo wird die Ebene nicht gemischt; eine Zone, die neu
+ * erscheint, meldet sich selbst als geaendert) */
 static void ov_update(void)
 {
-    if (ov_stale) {
-        Clip all = {0, 0, W, H};
-        ov_render(&all);
-    } else {
-        for (int i = 0; i < nov; i++)
-            ov_render(&ov_dirty[i]);
-    }
+    int z[4][4], nz = ov_zones(z);
+    Clip all = {0, 0, W, H};
+    const Clip *d = ov_stale ? &all : ov_dirty;
+    int nd = ov_stale ? 1 : nov;
+    for (int i = 0; i < nd; i++)
+        for (int k = 0; k < nz; k++) {
+            Clip c = {d[i].x0 > z[k][0] ? d[i].x0 : z[k][0], d[i].y0 > z[k][1] ? d[i].y0 : z[k][1],
+                      d[i].x1 < z[k][0] + z[k][2] ? d[i].x1 : z[k][0] + z[k][2],
+                      d[i].y1 < z[k][1] + z[k][3] ? d[i].y1 : z[k][1] + z[k][3]};
+            if (c.x0 < 0) c.x0 = 0;
+            if (c.y0 < 0) c.y0 = 0;
+            if (c.x1 > W) c.x1 = W;
+            if (c.y1 > H) c.y1 = H;
+            if (c.x0 < c.x1 && c.y0 < c.y1)
+                ov_render(&c);
+        }
     ov_stale = 0;
     nov = 0;
 }
 
+/* Flaeche zum Abdunkeln (beim ersten Dialog angelegt); 0 = geht nicht */
+static int ov_dim_ready(void)
+{
+    if (ov_dim.px)
+        return 1;
+    if (gsurf_new(&ov_dim, W, H) != 0 || !gsurf_handle(&ov_dim)) {
+        gsurf_free(&ov_dim);
+        return 0;
+    }
+    for (u64 i = 0; i < (u64)W * (u64)H; i++)
+        ov_dim.px[i] = (u32)DIALOG_DIM << 24;
+    return 1;
+}
+
 /* Die Ebene ueber ein Rechteck mischen - nur wo gerade etwas liegt, und jede Stelle hoechstens einmal: die Taskleiste
  * (unten, ganze Breite), darueber Menue bzw. Andock-Vorschau; beim Dialog den ganzen Bildschirm */
-static void queue_overlay(const Clip *c)
+static int queue_overlay(const Clip *c)
 {
-    if (dialog_kind) {
-        gq_blend(&gfx_screen, 0, 0, &ov_layer, 0, 0, W, H, c);
-        return;
+    int z[4][4], nz = ov_zones(z);
+    for (int k = 0; k < nz; k++) {
+        if (dialog_kind && k == nz - 1 - (snap_preview != 0)) { /* wie bei der CPU: erst alles abdunkeln, dann der Kasten */
+            if (!ov_dim_ready())
+                return 0;
+            gq_blend(&gfx_screen, 0, 0, &ov_dim, 0, 0, W, H, c);
+        }
+        gq_blend(&gfx_screen, z[k][0], z[k][1], &ov_layer, z[k][0], z[k][1], z[k][2], z[k][3], c);
     }
-    int z[4];
-    dock_zone(z);
-    int top = z[1];
-    gq_blend(&gfx_screen, z[0], z[1], &ov_layer, z[0], z[1], z[2], z[3], c);
-    if (menu_zone(z)) {
-        if (z[1] + z[3] > top)
-            z[3] = top - z[1];
-        gq_blend(&gfx_screen, z[0], z[1], &ov_layer, z[0], z[1], z[2], z[3], c);
-    }
-    if (snap_preview) {
-        snap_rect(snap_preview, z);
-        z[0] -= U(4);
-        z[1] -= U(4);
-        z[2] += U(8);
-        z[3] += U(8);
-        if (z[1] + z[3] > top)
-            z[3] = top - z[1];
-        gq_blend(&gfx_screen, z[0], z[1], &ov_layer, z[0], z[1], z[2], z[3], c);
-    }
+    return 1;
 }
 
 /* Geaenderte Fenster neu zeichnen, dann die geaenderten Rechtecke zusammensetzen: Hintergrund, je Fenster Schatten und
@@ -828,9 +871,7 @@ void draw_all(void)
         ov_stale = 1;
     }
     for (int i = 0; gpu && i < ndmg; i++) {
-        gpu = queue_gpu(&dmg[i]);
-        if (gpu)
-            queue_overlay(&dmg[i]);
+        gpu = queue_gpu(&dmg[i]) && queue_overlay(&dmg[i]);
     }
     for (int i = 0; i < ndmg; i++)
         px += (s64)(dmg[i].x1 - dmg[i].x0) * (dmg[i].y1 - dmg[i].y0);
