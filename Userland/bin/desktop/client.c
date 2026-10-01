@@ -428,11 +428,15 @@ void draw_app(Win *w, int x, int y, int cw, int ch)
     int aw = w->app_w < cw ? w->app_w : cw, ah = w->app_h < ch ? w->app_h : ch;
     int x0 = x > gfx_clip.x0 ? x : gfx_clip.x0, x1 = x + aw < gfx_clip.x1 ? x + aw : gfx_clip.x1;
     int y0 = y > gfx_clip.y0 ? y : gfx_clip.y0, y1 = y + ah < gfx_clip.y1 ? y + ah : gfx_clip.y1;
-    if (w->app_px && x0 < x1)
-        for (int yy = y0; yy < y1; yy++)
-            memcpy(tgt->px + (u64)yy * (u64)tgt->w + (u64)x0,
-                   w->app_px + (u64)(yy - y) * (u64)w->app_w + (u64)(x0 - x), (u64)(x1 - x0) * 4);
-    u32 fill = w->app_px && w->app_w && w->app_h ? w->app_px[(u64)w->app_h * (u64)w->app_w - 1] & 0xFFFFFF : C_WINDOW;
+    if (w->app_px && x0 < x1) /* kopieren und dabei Byte 3 auf 255 (deckend, fuer das Mischen auf der GPU) */
+        for (int yy = y0; yy < y1; yy++) {
+            u32 *d = tgt->px + (u64)yy * (u64)tgt->w + (u64)x0;
+            const u32 *s = w->app_px + (u64)(yy - y) * (u64)w->app_w + (u64)(x0 - x);
+            for (int i = 0; i < x1 - x0; i++)
+                d[i] = s[i] | 0xFF000000u;
+        }
+    u32 fill = (w->app_px && w->app_w && w->app_h ? w->app_px[(u64)w->app_h * (u64)w->app_w - 1] & 0xFFFFFF : C_WINDOW) |
+               0xFF000000u;
     if (aw < cw)
         gfx_fill(tgt, x + aw, y, cw - aw, ch, fill);
     if (ah < ch)

@@ -473,16 +473,26 @@ static void draw_window(Win *w)
 }
 
 /* Deckung in Byte 3 (im neu gezeichneten Teil): in den oberen und unteren RADIUS Zeilen die der runden Ecken,
- * sonst 255 - so setzt die GPU das Fensterbild auch skaliert (Animationen) richtig auf */
+ * sonst 255 - so setzt die GPU das Fensterbild auch skaliert (Animationen) richtig auf. Den Inhalt der Programme
+ * kopiert draw_app schon deckend; hier bleiben die Titelleiste und die zwei Randspalten (feiner Rahmen) */
 static void corner_alpha(Win *w)
 {
     int x0 = w->rx0 < 0 ? 0 : w->rx0, x1 = w->rx1 > w->w ? w->w : w->rx1;
     int y0 = w->ry0 < 0 ? 0 : w->ry0, y1 = w->ry1 > w->h ? w->h : w->ry1;
+    int th = win_th(w);
     for (int y = y0; y < y1; y++) {
         u32 *p = w->buf.px + (u64)y * (u64)w->buf.w;
         if (y >= RADIUS && y < w->h - RADIUS) {
-            for (int x = x0; x < x1; x++)
-                p[x] |= 0xFF000000u;
+            if (y < th) { /* Titelleiste */
+                for (int x = x0; x < x1; x++)
+                    p[x] |= 0xFF000000u;
+                continue;
+            }
+            for (int k = 0; k < 4; k++) { /* nur die Randspalten 0, 1, w-2, w-1 (der Rahmen hat Byte 3 geloescht) */
+                int x = k < 2 ? k : w->w - 4 + k;
+                if (x >= x0 && x < x1)
+                    p[x] |= 0xFF000000u;
+            }
             continue;
         }
         for (int x = x0; x < x1; x++) {
@@ -752,8 +762,41 @@ static int ov_ready(void)
     return 1;
 }
 
-/* Rechteck der Ebene neu: auf Schwarz und Weiss zeichnen, Deckung und Farbe herausrechnen */
+static void ov_render_rect(const Clip *r);
+
+/* Das Innere der Andock-Vorschau ist gleichmaessig Weiss mit Deckung 70 (gfx_round_rect): direkt eintragen, mit dem
+ * Wert, den die Auswertung ergaebe (69). Nur den Rand mit Rahmen und runden Ecken zeichnen und auswerten. */
 static void ov_render(const Clip *r)
+{
+    if (snap_preview && !menu_open && !dialog_kind) {
+        int sr[4], z[4];
+        snap_rect(snap_preview, sr);
+        dock_zone(z);
+        Clip in = {sr[0] + 3, sr[1] + RADIUS + 2, sr[0] + sr[2] - 3, sr[1] + sr[3] - RADIUS - 2};
+        if (in.y1 > z[1])
+            in.y1 = z[1]; /* dort zeichnet vielleicht auch die Taskleiste (Namen) */
+        Clip c = {r->x0 > in.x0 ? r->x0 : in.x0, r->y0 > in.y0 ? r->y0 : in.y0, r->x1 < in.x1 ? r->x1 : in.x1,
+                  r->y1 < in.y1 ? r->y1 : in.y1};
+        if (c.x0 < c.x1 && c.y0 < c.y1) {
+            for (int y = c.y0; y < c.y1; y++) {
+                u32 *o = ov_layer.px + (u64)y * (u64)W;
+                for (int x = c.x0; x < c.x1; x++)
+                    o[x] = 0x45FFFFFFu;
+            }
+            prof.ov_px += (unsigned)((c.x1 - c.x0) * (c.y1 - c.y0));
+            Clip rest[4] = {{r->x0, r->y0, r->x1, c.y0}, {r->x0, c.y1, r->x1, r->y1}, {r->x0, c.y0, c.x0, c.y1},
+                            {c.x1, c.y0, r->x1, c.y1}}; /* oben, unten, links, rechts */
+            for (int i = 0; i < 4; i++)
+                if (rest[i].x0 < rest[i].x1 && rest[i].y0 < rest[i].y1)
+                    ov_render_rect(&rest[i]);
+            return;
+        }
+    }
+    ov_render_rect(r);
+}
+
+/* Rechteck der Ebene neu: auf Schwarz und Weiss zeichnen, Deckung und Farbe herausrechnen */
+static void ov_render_rect(const Clip *r)
 {
     int n = r->x1 - r->x0;
     prof.ov_px += (unsigned)(n * (r->y1 - r->y0));
