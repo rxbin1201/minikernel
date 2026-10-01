@@ -88,6 +88,9 @@ In der Shell: `burn 5000 & burn 5000 & cpus` zeigt zwei ausgelastete CPUs.
   im Betrieb um (0 aus, 1-4 Varianten mit Strichen, 5 Standard, 6 wie 5 mit Zurueckschreiben aus dem CPU-Cache);
   `bltmode=N` bzw. `noblt` in der Kommandozeile. Bei jedem Umschalten prueft ein Selbsttest, ob die GPU die frisch
   geschriebenen Daten der CPU sieht
+- **Render-Engine** (`igd_rcs.c`, erster Schritt Richtung 3D-Beschleunigung, nur auf Befehl): `igdtest render`
+  startet den Befehlsprozessor der Render-Engine im Ring-Modus und prueft Leerauftrag, `PIPE_CONTROL` (Schreiben nach
+  getaner Arbeit), Batch-Buffer und den Zeitstempel der GPU (1000 Befehle). Haengt sie, wird sie zurueckgesetzt
 - **Bildwechsel-Interrupt** (`igd_irq.c`): die Pipe meldet jeden Bildwechsel per MSI. Grafikprogramme warten mit
   `gfx_vsync()` darauf und laufen so genau im Takt des Monitors (Tetris, Snake, Desktop; `anim` zeigt es), die
   Doppelpufferung wartet darauf statt nachzusehen. Ohne Interrupt (QEMU) ersetzt eine 10-ms-Pause den Takt
