@@ -22,6 +22,7 @@
  *                   die CPU geprueft), Tempo bei Bildschirmgroesse; an der Konsole danach ein halbtransparentes
  *                   Farbfeld ueber dem Text (5 s)
  *   igdtest comp [on|off]  Zusammensetzen des Desktops auf der GPU: Zustand und Messwerte (GPU gegen CPU) bzw. an/aus
+ *   igdtest comp cache N   Cache der GPU dabei: 0 alles uncached, 1 Quellen im Cache (Standard), 2 alles im Cache
  * Die Messwerte stehen im Kernel-Log: danach "dmesg > /disk/igd.txt" und die Datei schicken. */
 void _start(int argc, char **argv)
 {
@@ -74,15 +75,17 @@ void _start(int argc, char **argv)
         sys_exit(r == 0 ? 0 : 1);
     } else if (argc > 1 && strcmp(argv[1], "comp") == 0) {
         int set = argc < 3 ? 2 : strcmp(argv[2], "on") == 0 ? 1 : strcmp(argv[2], "off") == 0 ? 0 : -1;
-        if (set < 0) {
-            printf("Aufruf: igdtest comp [on|off]\n");
+        int cache = argc == 4 && strcmp(argv[2], "cache") == 0 && argv[3][0] >= '0' && argv[3][0] <= '2' && !argv[3][1]
+                        ? argv[3][0] - '0' : -1;
+        if (set < 0 && cache < 0) {
+            printf("Aufruf: igdtest comp [on|off|cache 0-2]\n");
             sys_exit(2);
         }
         static char buf[2048];
         u64 pos = ~0ULL;
         s64 n;
         sys_klog(&pos, buf, 0); /* nur die Zeilen ab jetzt ausgeben */
-        sys_gpu(set == 2 ? 17 : (u64)(16 | set << 8));
+        sys_gpu(cache >= 0 ? (u64)(18 | cache << 8) : set == 2 ? 17 : (u64)(16 | set << 8));
         while ((n = sys_klog(&pos, buf, sizeof(buf))) > 0)
             write_all(1, buf, (size_t)n);
         sys_exit(0);
@@ -102,7 +105,7 @@ void _start(int argc, char **argv)
                info ? "igdinfo" : dp ? "igd" : "igdmode");
         sys_exit(r == 0 ? 0 : 1);
     } else if (argc > 1) {
-        fprintf(2, "Aufruf: igdtest [cursor|blit|info|edid|scale|mode|dp|dpmode|dptrain|output [b|c|d]|vblank|bltmode N|render|gpgpu|comp [on|off]]\n");
+        fprintf(2, "Aufruf: igdtest [cursor|blit|info|edid|scale|mode|dp|dpmode|dptrain|output [b|c|d]|vblank|bltmode N|render|gpgpu|comp [on|off|cache N]]\n");
         sys_exit(2);
     }
     printf("igdtest: startet in 1 s (%s) ...\n", what);

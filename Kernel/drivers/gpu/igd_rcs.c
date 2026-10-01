@@ -682,6 +682,7 @@ typedef IgdSurf GpuSurf; /* Flaeche: GGTT-Adresse, Breite (Bytes), Hoehe, Zeilen
 
 static void surf_state(uint32_t *ss, const GpuSurf *s)
 {
+    ss[1] = s->mocs << 24;
     ss[0] = (1u << 29) | (SURF_R8_UNORM << 18) | (1u << 16) | (1u << 14); /* 2D, R8, VALIGN4, HALIGN4, linear */
     ss[2] = (s->w - 1) | ((s->h - 1) << 16);
     ss[3] = s->pitch - 1;
@@ -903,8 +904,8 @@ static int gpgpu_test(void)
     g_st_gtt = core_gtt(C_STATE);
     g_res_gtt = core_gtt(C_RES);
     g_kern_gtt = core_gtt(C_KERN);
-    GpuSurf SA = {(base + P_SA) << 12, 1024, 64, 1024}, SB = {(base + P_SB) << 12, 1024, 64, 1024};
-    GpuSurf BIG = {(base + P_BIG) << 12, big_w, big_h, big_w}, BIG2 = {(base + P_BIG + big_pages) << 12, big_w, big_h, big_w};
+    GpuSurf SA = {(base + P_SA) << 12, 1024, 64, 1024, 0}, SB = {(base + P_SB) << 12, 1024, 64, 1024, 0};
+    GpuSurf BIG = {(base + P_BIG) << 12, big_w, big_h, big_w, 0}, BIG2 = {(base + P_BIG + big_pages) << 12, big_w, big_h, big_w, 0};
 
     if (!igd_forcewake_get()) {
         kprintf("igdgpu: Forcewake nicht bestaetigt\n");
@@ -1024,7 +1025,7 @@ static int gpgpu_test(void)
             }
         for (uint32_t i = 0; i < big_pages; i++)
             igd_clflush(big[i], 4096);
-        GpuSurf FB = {igd_surf_a, igd_scr_stride, igd_scr_h, igd_scr_stride};
+        GpuSurf FB = {igd_surf_a, igd_scr_stride, igd_scr_h, igd_scr_stride, 0};
         if (gpgpu_rect("5. Farbfeld ueber die Konsole mischen", kblend, nblend, &FB, px * 4, py, &BIG, 0, 0, pw * 4, ph, &us) != 0)
             rc = -27;
         else
@@ -1087,6 +1088,8 @@ int igd_gpgpu_test(void)
 
 #define CS_OPS      0     /* erster Auftrag im Zustandsbereich */
 #define CK_PAGES    4     /* Kernel: je Blockform (IGD_BLK_*) kopieren und mischen */
+#define L3_MOCS(r)  (0xB020 + 4u * (uint32_t)(r)) /* L3-Cache-Steuerung (LNCFCMOCS), Eintraege 2r und 2r + 1 */
+#define L3_UC       0x10u /* L3 uncached */
 
 static uint32_t ck_off[8];  /* Lage der Kernel (Blockform * 2 + mischen) in C_CKERN */
 
@@ -1099,8 +1102,19 @@ static int comp_start(void)
         return 0;
     }
     int ok = ring_start();
-    for (int i = 0; i < 62; i++) /* Cache-Steuerung der Render-Engine: uncached (wie bei den Tests) */
-        igd_wr(GFX_MOCS(i), 0x09);
+    /* Cache-Steuerung der Render-Engine: alles uncached (wie bei den Tests), nur Eintrag 2 (und 4) write-back im LLC
+     * (wie i915: WB, LLC/eLLC, Alter 3) - fuer Flaechen, die der Monitor nicht direkt liest. Der L3-Cache der GPU bleibt
+     * fuer diese Eintraege aus: dort koennten sonst alte Fensterinhalte liegen, nachdem die CPU sie geaendert hat. */
+    for (int i = 0; i < 62; i++)
+        igd_wr(GFX_MOCS(i), i == 2 || i == 4 ? 0x3Bu : 0x09u);
+    static int l3_logged;
+    for (int r = 0; r < 3; r++) { /* LNCFCMOCS: je Register zwei Eintraege, unten der gerade (0, 2, 4) */
+        uint32_t v = igd_rd(L3_MOCS(r));
+        if (!l3_logged)
+            kprintf("igdcomp: L3-Cache-Steuerung[%d] vorher %#x\n", r, v);
+        igd_wr(L3_MOCS(r), (v & 0xFFFF0000u) | L3_UC);
+    }
+    l3_logged = 1;
     if (!ok)
         dump("Ring startet NICHT");
     igd_forcewake_put();

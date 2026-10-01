@@ -463,7 +463,8 @@ static void syscall_do(SyscallFrame *f)
             : f->rdi == 14 ? igd_render_test()
             : f->rdi == 15 ? igd_gpgpu_test()
             : (f->rdi & 0xFF) == 16 ? igd_comp_set((int)(f->rdi >> 8))
-            : f->rdi == 17 ? (igd_comp_report(), 0) : ERR_INVAL;
+            : f->rdi == 17 ? (igd_comp_report(), 0)
+            : (f->rdi & 0xFF) == 18 ? igd_comp_cache((int)(f->rdi >> 8)) : ERR_INVAL;
         break;
     case SYS_PCIINFO: {
         PciInfo pi;

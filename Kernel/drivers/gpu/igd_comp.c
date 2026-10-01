@@ -10,6 +10,7 @@
  * Kommandozeile: gpucomp=off (aus), gpucomp=soft (dieselben Auftraege rechnet die CPU im Kernel - zum Testen in QEMU). */
 
 #include "drivers/gpu/igd_internal.h"
+#include "arch/x86_64/apic.h"
 #include "arch/x86_64/spinlock.h"
 #include "core/cmdline.h"
 #include "core/process.h"
@@ -47,6 +48,9 @@ static int       mode = -1;     /* -1 = noch nicht geprueft, 0 keins, 1 GPU, 2 C
 static int       enabled = 1;   /* igdtest comp off/on */
 static int       flush_mode;    /* CPU-Caches vor und nach den Auftraegen zurueckschreiben */
 static int       serial_mode;   /* jeden Auftrag einzeln abschicken (falls Auftraege einer Liste sich ueberholen) */
+/* Cache: 0 alles uncached, 1 Quellen im LLC (Ziel uncached: aus dem Bildschirmbild liest der Blitter), 2 alles im LLC */
+static int       cache_mode = 1, pending_cache = -1;
+static const char *const cache_names[3] = {"alles uncached", "Quellen im Cache", "alles im Cache"};
 static int       fails;
 static uint32_t  region_base, region_end;
 static uint64_t  scratch_pte;
@@ -215,9 +219,9 @@ static void flush_rect(const CompSurf *s, int x, int y, int w, int h)
 
 /* Ganze Flaeche ab ihrem Anfang (wie bei igdtest gpgpu). Gemessen: die GPU rundet die Basisadresse auf 32 Byte ab
  * und die Zeilenlaenge auf 64 Byte - deshalb nur Flaechen mit Breite in Vielfachen von 16 Pixeln (siehe anmelden) */
-static IgdSurf gsurf(const CompSurf *s)
+static IgdSurf gsurf(const CompSurf *s, uint32_t mocs)
 {
-    IgdSurf g = {s->ggtt << 12, s->w * 4, s->h, s->w * 4};
+    IgdSurf g = {s->ggtt << 12, s->w * 4, s->h, s->w * 4, mocs};
     return g;
 }
 
@@ -239,8 +243,8 @@ static int split_op(const KOp *o, IgdCompOp *g)
         p->shape = sh;
         p->gx = (uint32_t)(sh == IGD_BLK_8X8 || sh == IGD_BLK_8X1 ? w / 8 : w);
         p->gy = (uint32_t)(sh == IGD_BLK_8X8 || sh == IGD_BLK_1X8 ? h / 8 : h);
-        p->dst = gsurf(o->d);
-        p->src = gsurf(o->s);
+        p->dst = gsurf(o->d, cache_mode == 2 ? IGD_MOCS_WB : 0);
+        p->src = gsurf(o->s, cache_mode >= 1 ? IGD_MOCS_WB : 0);
         p->dx = (uint32_t)(o->dx + x) * 4;
         p->dy = (uint32_t)(o->dy + y);
         p->sx = (uint32_t)(o->sx + x) * 4;
@@ -426,6 +430,70 @@ static int selftest(void)
 
 static const char *why_off = "-"; /* warum keins (igdtest comp) */
 
+/* Tempo der Cache-Modi messen (Flaeche 2048 x 1024, kopieren und mischen); waehlt 1, wenn es schneller ist als 0 */
+static void benchmark(void)
+{
+    enum { BW = 2048, BH = 1024, BP = BW * BH * 4 / 4096 };
+    static uint64_t bf[2][BP];
+    uint64_t m0 = pmm_alloc_frames(BP), m1 = m0 ? pmm_alloc_frames(BP) : 0;
+    int i0 = 0, i1 = 0;
+    if (m1) {
+        for (int i = 0; i < BP; i++) {
+            bf[0][i] = m0 + (uint64_t)i * 4096;
+            bf[1][i] = m1 + (uint64_t)i * 4096;
+        }
+        for (uint32_t i = 0; i < BW * BH; i++)
+            ((uint32_t *)m0)[i] = test_pattern(i, 5);
+        i0 = surf_add(SELF_PID, 0, bf[0], BW, BH);
+        i1 = surf_add(SELF_PID, 0, bf[1], BW, BH);
+    }
+    uint64_t mbs[3][2] = {{0}};
+    for (int m = 0; i0 && i1 && m < 3; m++) {
+        cache_mode = m;
+        for (int bl = 0; bl < 2; bl++) {
+            KOp o = {bl, &surfs[i1 - 1], &surfs[i0 - 1], 0, 0, 0, 0, BW, BH};
+            uint64_t us = 0;
+            for (int rep = 0; rep < 2; rep++) { /* der zweite Lauf zaehlt */
+                uint64_t t0 = time_us();
+                if (exec_ops(&o, 1) != 0)
+                    break;
+                us = time_us() - t0;
+            }
+            mbs[m][bl] = us ? (uint64_t)BW * BH * 4 / us : 0;
+        }
+    }
+    kprintf("igdcomp: Tempo %dx%d in MB/s (kopieren/mischen): uncached %lu/%lu, Quellen im Cache %lu/%lu, alles im "
+            "Cache %lu/%lu\n", BW, BH, (unsigned long)mbs[0][0], (unsigned long)mbs[0][1], (unsigned long)mbs[1][0],
+            (unsigned long)mbs[1][1], (unsigned long)mbs[2][0], (unsigned long)mbs[2][1]);
+    /* Zeit fuer kopieren + mischen vergleichen (1 / MB/s) */
+    uint64_t t0 = mbs[0][0] && mbs[0][1] ? 1000000 / mbs[0][0] + 1000000 / mbs[0][1] : ~0ULL;
+    uint64_t t1 = mbs[1][0] && mbs[1][1] ? 1000000 / mbs[1][0] + 1000000 / mbs[1][1] : ~0ULL;
+    cache_mode = t1 <= t0 ? 1 : 0;
+    if (i0)
+        surf_drop(&surfs[i0 - 1]);
+    if (i1)
+        surf_drop(&surfs[i1 - 1]);
+    if (m0)
+        pmm_free_frames(m0, BP);
+    if (m1)
+        pmm_free_frames(m1, BP);
+    memset(&st, 0, sizeof(st));
+}
+
+/* Cache-Modus wechseln (igdtest comp cache N; ausgefuehrt beim naechsten Bild des Desktops): erst Selbsttest */
+static void apply_cache(int m)
+{
+    int old = cache_mode;
+    cache_mode = m;
+    if (selftest() != 0) {
+        kprintf("igdcomp: Selbsttest mit \"%s\" falsch - es bleibt bei \"%s\"\n", cache_names[m], cache_names[old]);
+        cache_mode = old;
+        return;
+    }
+    memset(&st, 0, sizeof(st));
+    kprintf("igdcomp: jetzt %s (Selbsttest ok), Messwerte zurueckgesetzt\n", cache_names[m]);
+}
+
 static void comp_init(void)
 {
     const char *c = cmdline_get("gpucomp");
@@ -459,15 +527,22 @@ static void comp_init(void)
         }
     scratch_pte = igd_ggtt[region_base];
     mode = 1;
-    if (selftest() != 0) {
+    cache_mode = 1;
+    if (selftest() != 0) { /* mit Cache falsch: noch einmal ganz ohne */
+        kprintf("igdcomp: Selbsttest mit Quellen im Cache falsch, noch einmal uncached\n");
+        cache_mode = 0;
+    } else {
+        benchmark();
+    }
+    if (cache_mode == 0 && selftest() != 0) {
         kprintf("igdcomp: Selbsttest fehlgeschlagen - der Desktop setzt weiter mit der CPU zusammen\n");
         why_off = "Selbsttest fehlgeschlagen (Einzelheiten: dmesg | grep igdcomp)";
         mode = 0;
         return;
     }
-    kprintf("igdcomp: Selbsttest ok%s%s, GGTT-Bereich %#x-%#x (%u MiB)\n", serial_mode ? " (Auftraege einzeln)" : "",
-            flush_mode ? " (mit Zurueckschreiben der CPU-Caches)" : "", region_base, region_end,
-            (region_end - region_base) / 256);
+    kprintf("igdcomp: Selbsttest ok, %s%s%s, GGTT-Bereich %#x-%#x (%u MiB)\n", cache_names[cache_mode],
+            serial_mode ? ", Auftraege einzeln" : "", flush_mode ? ", mit Zurueckschreiben der CPU-Caches" : "",
+            region_base, region_end, (region_end - region_base) / 256);
 }
 
 /* ---------- Systemaufruf ---------- */
@@ -517,6 +592,11 @@ int64_t igd_comp_sys(uint32_t pid, uint64_t op, uint64_t a, uint64_t b)
     if (op == 3) { /* ausfuehren: GpuOp[b] */
         if (!enabled)
             return ERR_AGAIN;
+        if (pending_cache >= 0) {
+            int m = pending_cache;
+            pending_cache = -1;
+            apply_cache(m);
+        }
         if (b > 4096 || !process_user_range_ok(process_current(), a, b * sizeof(GpuOp), 0))
             return ERR_FAULT;
         static KOp kops[IGD_COMP_MAX_OPS * 4];
@@ -542,6 +622,19 @@ int64_t igd_comp_sys(uint32_t pid, uint64_t op, uint64_t a, uint64_t b)
         return 0;
     }
     return ERR_INVAL;
+}
+
+int igd_comp_cache(int m)
+{
+    if (m < 0 || m > 2)
+        return ERR_INVAL;
+    if (mode != 1) {
+        kprintf("igdcomp: es wird nicht auf der GPU zusammengesetzt\n");
+        return ERR_NOSYS;
+    }
+    pending_cache = m;
+    kprintf("igdcomp: wechselt mit dem naechsten Bild des Desktops zu \"%s\" (vorher Selbsttest)\n", cache_names[m]);
+    return 0;
 }
 
 int igd_comp_set(int on)
@@ -572,7 +665,8 @@ void igd_comp_report(void)
             n++;
             pages += surfs[i].pages;
         }
-    kprintf("igdcomp: %s, %s%s%s; %d Flaechen (%lu MiB)\n", names[mode], enabled ? "an" : "aus",
+    kprintf("igdcomp: %s, %s%s%s%s%s; %d Flaechen (%lu MiB)\n", names[mode], enabled ? "an" : "aus",
+            mode == 1 ? ", " : "", mode == 1 ? cache_names[cache_mode] : "",
             flush_mode ? ", mit Zurueckschreiben der CPU-Caches" : "", serial_mode ? ", Auftraege einzeln" : "", n,
             (unsigned long)(pages / 256));
     if (mode == 0)
@@ -581,7 +675,7 @@ void igd_comp_report(void)
             (unsigned long)st.jobs, (unsigned long)st.ops, (unsigned long)(st.jobs ? st.us / st.jobs : 0),
             (unsigned long)st.max_us, (unsigned long)st.busy, (unsigned long)st.errors);
     for (int k = 1; k >= 0; k--)
-        kprintf("igdcomp: Desktop mit %s: %lu Bereiche, %lu Mpx, %lu us je Bereich, %lu us je Mpx\n", k ? "GPU" : "CPU",
+        kprintf("igdcomp: Desktop mit %s: %lu Bilder, %lu Mpx, %lu us je Bild, %lu us je Mpx\n", k ? "GPU" : "CPU",
                 (unsigned long)st.n[k], (unsigned long)(st.px[k] / 1000000), (unsigned long)(st.n[k] ? st.t[k] / st.n[k] : 0),
                 (unsigned long)per_mpx(st.t[k], st.px[k]));
 }

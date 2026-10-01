@@ -44,7 +44,9 @@ void igd_blt_report(void);        /* igdtest info */
  * gtt = GGTT-Adresse des ersten Bytes (Ecke des Rechtecks), pitch = Zeilenlaenge der ganzen Flaeche */
 typedef struct {
     uint32_t gtt, w, h, pitch;
+    uint32_t mocs; /* Cache-Steuerung im Surface State: 0 = uncached, IGD_MOCS_WB = im LLC (write-back) */
 } IgdSurf;
+#define IGD_MOCS_WB 4 /* Gen9: Tabellenindex 2 << 1 (fuer den Fall "Index direkt" ist Eintrag 4 genauso gesetzt) */
 enum { IGD_BLK_8X8, IGD_BLK_1X8, IGD_BLK_8X1, IGD_BLK_1X1 }; /* Pixel je Thread: die Bloecke muessen genau aufgehen */
 typedef struct {
     int      blend;            /* 0 kopieren, 1 Quelle mit ihrem Alpha (Byte 3) ueber das Ziel mischen */
