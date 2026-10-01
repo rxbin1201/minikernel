@@ -50,6 +50,8 @@ uint8_t pci_find_cap(const PciDevice *d, uint8_t id);
  * Bevorzugt MSI-X (Eintrag 0), sonst MSI; die Interrupt-Leitung (INTx) wird abgeschaltet.
  * 2 = MSI-X, 1 = MSI, 0 = keins von beiden (dann weiter pollen). */
 int pci_enable_msi(const PciDevice *d, uint8_t vector, uint32_t apic_id);
+/* Nur MSI (fuer Geraete, deren MSI-X erst eigens programmiert werden muesste); 1 = an, 0 = nicht moeglich */
+int pci_enable_msi_only(const PciDevice *d, uint8_t vector, uint32_t apic_id);
 
 /* index-tes Geraet fuer SYS_PCIINFO; 0 = ok, -1 = Ende */
 int pci_info(unsigned index, PciInfo *out);

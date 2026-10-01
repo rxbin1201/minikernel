@@ -296,13 +296,37 @@ static void periodic_locked(uint64_t now)
     }
 }
 
-/* Die Karten melden Pakete nicht per Interrupt, der Thread fragt sie ab: alle 10 ms, solange in der letzten Sekunde
- * Pakete kamen, sonst alle 100 ms (so oft laeuft ohnehin das Zeitgesteuerte). Wer auf eine Antwort wartet (ping,
- * DNS, UDP-Empfang), fragt waehrenddessen selbst ab (net_wait_step), dem schadet der langsamere Takt nicht. */
+/* Melden alle Karten Pakete per Interrupt (MSI), schlaeft der Thread bis zum naechsten (net_wake) bzw. hoechstens
+ * 100 ms (so oft laeuft das Zeitgesteuerte). Sonst fragt er ab: alle 10 ms, solange in der letzten Sekunde Pakete
+ * kamen, sonst alle 100 ms. Wer auf eine Antwort wartet (ping, DNS, UDP-Empfang), fragt waehrenddessen selbst ab
+ * (net_wait_step). */
+static Event             net_ev;
+static volatile uint64_t net_irqs;
+
+void net_wake(void)
+{
+    net_irqs++;
+    event_signal(&net_ev);
+}
+
+uint64_t net_irq_count(void)
+{
+    return net_irqs;
+}
+
+static int all_irq(void) /* melden alle Karten per Interrupt? Dann muss niemand abfragen */
+{
+    for (int i = 0; i < net_nif; i++)
+        if (!net_ifs[i].dev.irq)
+            return 0;
+    return net_nif > 0;
+}
+
 static void net_thread(void *arg)
 {
     (void)arg;
     uint64_t last = 0, last_rx = 0;
+    int irq = all_irq();
     for (;;) {
         mutex_lock(&net_lock);
         int n = net_poll_locked();
@@ -315,6 +339,8 @@ static void net_thread(void *arg)
         if (n) {
             last_rx = now;
             thread_yield();
+        } else if (irq) { /* bis zum naechsten Interrupt schlafen (spaetestens fuer das Zeitgesteuerte) */
+            event_wait(&net_ev, 100);
         } else {
             thread_sleep_ms(now - last_rx < 1000 ? 10 : 100);
         }
@@ -426,6 +452,8 @@ int net_info(unsigned index, NetInfo *out)
     out->rx_bytes = f->rx_bytes;
     out->tx_bytes = f->tx_bytes;
     out->rx_dropped = f->rx_dropped;
+    out->irq = (uint32_t)f->dev.irq;
+    out->irqs = net_irq_count();
     mutex_unlock(&net_lock);
     return 0;
 }

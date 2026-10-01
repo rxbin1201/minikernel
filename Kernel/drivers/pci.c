@@ -228,6 +228,15 @@ int pci_enable_msi(const PciDevice *d, uint8_t vector, uint32_t apic_id)
     return kind;
 }
 
+int pci_enable_msi_only(const PciDevice *d, uint8_t vector, uint32_t apic_id)
+{
+    uint8_t cap = pci_find_cap(d, 0x05);
+    if (!cap || enable_msi(d, cap, vector, apic_id) != 0)
+        return 0;
+    pci_write32(d, 0x04, (pci_read32(d, 0x04) & 0xFFFF) | (1u << 10)); /* INTx aus */
+    return 1;
+}
+
 int pci_find(uint16_t vendor, uint16_t device, PciDevice *out)
 {
     for (int i = 0; i < device_count; i++) {

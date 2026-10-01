@@ -8,6 +8,7 @@
 #define VECTOR_KEYBOARD 0x41
 #define VECTOR_XHCI     0x50 /* 0x50-0x53: xHCI-Controller (MSI-X/MSI) */
 #define VECTOR_IGD      0x58 /* Intel-Grafik: Bildwechsel (MSI) */
+#define VECTOR_NET      0x59 /* 0x59-0x5C: Netzwerkkarten (MSI) */
 #define VECTOR_SPURIOUS 0xFF
 
 #define APIC_TIMER_HZ   100

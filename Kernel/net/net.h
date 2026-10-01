@@ -5,7 +5,8 @@
 
 /* Netzwerk: Treiber melden Ethernet-Geraete an (NetDev), darueber liegt ein kleiner IPv4-Stack:
  * ARP, IPv4 (ohne Fragmentierung), ICMP (Echo), UDP (auch als Sockets fuer Programme), DHCP-, DNS- und NTP-Client.
- * Nach dem ersten DHCP-Ergebnis stellt der Kernel die Uhr per NTP (abschaltbar mit "nontp" in cmdline.txt). Empfangen wird per Polling im Thread "net";
+ * Nach dem ersten DHCP-Ergebnis stellt der Kernel die Uhr per NTP (abschaltbar mit "nontp" in cmdline.txt). Empfangen wird im Thread "net":
+ * Karten mit MSI wecken ihn per Interrupt, die anderen fragt er ab;
  * blockierende Aufrufe (ping) pollen waehrend des Wartens selbst, damit die Antwortzeit genau gemessen wird.
  *
  * IPv4-Adressen liegen als 4 Bytes in Netzwerk-Reihenfolge vor (a.b.c.d = {a, b, c, d}). */
@@ -23,6 +24,7 @@ struct NetDev {
     int (*recv)(NetDev *d, void *buf, uint32_t max);                   /* Laenge eines Rahmens, 0 = keiner da */
     int (*link)(NetDev *d, uint32_t *mbps, int *full_duplex);          /* 1 = Verbindung steht */
     void *priv;
+    int   irq;     /* 1: meldet Pakete per Interrupt (ruft net_wake), sonst fragt der Netzwerk-Thread ab */
 };
 
 /* Sucht Netzwerkkarten und startet den Thread "net" (nach pci_scan, mit laufendem Scheduler) */
@@ -30,6 +32,8 @@ void net_init(void);
 
 /* --- fuer Treiber --- */
 int  net_register(const NetDev *d); /* Kopie wird abgelegt; -1, wenn kein Platz */
+void net_wake(void);                /* aus dem Interrupt-Handler: Pakete oder Verbindungswechsel - Netzwerk-Thread wecken */
+uint64_t net_irq_count(void);
 void e1000_probe(void);
 
 /* --- Syscalls --- */
@@ -44,6 +48,9 @@ typedef struct {
     uint8_t  ip[4], mask[4], gateway[4], dns[4], dhcp_server[4];
     uint32_t dhcp, lease_s;
     uint64_t rx_packets, tx_packets, rx_bytes, tx_bytes, rx_dropped;
+    uint32_t irq;      /* 1 = meldet Pakete per Interrupt (MSI) */
+    uint32_t pad;
+    uint64_t irqs;     /* Netzwerk-Interrupts bisher (alle Karten) */
 } NetInfo;
 
 /* ARP-Eintrag fuer SYS_NETCFG op 2 */

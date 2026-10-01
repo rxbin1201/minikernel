@@ -88,6 +88,10 @@ static void show(const NetInfo *n)
     bytes(n->tx_bytes, tb, sizeof(tb));
     printf("      Pakete:     %llu empfangen (%s), %llu gesendet (%s), %llu verworfen\n", n->rx_packets, rb, n->tx_packets,
            tb, n->rx_dropped);
+    if (n->irq)
+        printf("      Empfang:    per Interrupt (MSI), bisher %llu\n", n->irqs);
+    else
+        printf("      Empfang:    wird abgefragt (Karte ohne MSI)\n");
 }
 
 static void show_arp(void)

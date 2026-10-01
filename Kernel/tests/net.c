@@ -40,6 +40,12 @@ void test_net(void)
 
     int64_t r = net_ping(gw, 1, 56, 2000);
     check("ping 10.0.2.2 antwortet", r >= 0);
+    if (ni.irq) { /* Karte mit MSI (z.B. NET=e1000e): die Pakete bis hierher kamen per Interrupt */
+        NetInfo n2;
+        net_info(0, &n2);
+        check("Netzwerk-Interrupts kommen an (MSI)", n2.irqs > 0);
+        kprintf("  (%lu Netzwerk-Interrupts)\n", (unsigned long)n2.irqs);
+    }
     if (r >= 0)
         kprintf("  (Antwortzeit %lu us)\n", (unsigned long)(r & 0xFFFFFFFFFFLL));
     ArpInfo ai;

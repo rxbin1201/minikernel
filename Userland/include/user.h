@@ -186,6 +186,8 @@ typedef struct {
     unsigned char ip[4], mask[4], gateway[4], dns[4], dhcp_server[4];
     unsigned      dhcp, lease_s;
     u64           rx_packets, tx_packets, rx_bytes, tx_bytes, rx_dropped;
+    unsigned      irq, pad; /* irq: 1 = Interrupts per MSI, 0 = wird abgefragt */
+    u64           irqs;
 } NetInfo;
 
 /* Datagramm fuer sys_sendto/sys_recvfrom (Layout wie im Kernel) */

@@ -12,7 +12,8 @@
 /* Intel-Gigabit-Netzwerkkarten mit e1000-Registersatz:
  *   82540EM/82545EM ("e1000", QEMU und VMware), 82574L ("e1000e", QEMU und VMware),
  *   I217/I218/I219 (im Chipsatz eingebaut, "PCH"; z.B. I219-V auf vielen Mainboards).
- * Einfache (Legacy-)Deskriptoren, ein Empfangs- und ein Sende-Ring, keine Interrupts (der Netzwerk-Thread pollt).
+ * Einfache (Legacy-)Deskriptoren, ein Empfangs- und ein Sende-Ring. Kann die Karte MSI (82574, I217-I219), meldet sie
+ * empfangene Pakete und Verbindungswechsel per Interrupt (gedrosselt, ITR); sonst pollt der Netzwerk-Thread.
  *
  * Bei den Chipsatz-Varianten (PCH) wird der Controller absichtlich NICHT komplett zurueckgesetzt: Ein Reset setzt
  * dort auch den PHY-Baustein zurueck, der dann ueber die Management Engine neu eingerichtet werden muesste. Statt dessen
@@ -63,6 +64,8 @@ static const NicId nic_ids[] = {
 #define REG_MDIC      0x0020
 #define REG_FEXTNVM3  0x003C
 #define REG_ICR       0x00C0
+#define REG_ITR       0x00C4
+#define REG_IMS       0x00D0
 #define REG_IMC       0x00D8
 #define REG_RCTL      0x0100
 #define REG_TCTL      0x0400
@@ -112,6 +115,10 @@ static const NicId nic_ids[] = {
 #define FWSM_ULP_CFG_DONE  (1u << 10)
 #define H2ME_ULP           (1u << 11)
 #define H2ME_ENFORCE       (1u << 12)
+#define ICR_LSC        (1u << 2)
+#define ICR_RXDMT0     (1u << 4)
+#define ICR_RXO        (1u << 6)
+#define ICR_RXT0       (1u << 7)
 #define MDIC_READY     (1u << 28)
 #define MDIC_ERROR     (1u << 30)
 
@@ -147,7 +154,12 @@ typedef struct {
     volatile TxDesc *tx;
     uint8_t *rx_buf, *tx_buf;
     uint32_t rx_next, tx_next;
+    int      msi;
 } Nic;
+
+#define MAX_NICS 4
+static Nic *nics[MAX_NICS];
+static int  nic_count;
 
 static inline uint32_t rd(Nic *n, uint32_t off) { return *(volatile uint32_t *)(n->regs + off); }
 static inline void wr(Nic *n, uint32_t off, uint32_t v) { *(volatile uint32_t *)(n->regs + off) = v; }
@@ -367,6 +379,33 @@ static int nic_link(NetDev *d, uint32_t *mbps, int *fd)
     return (s & STATUS_LU) != 0;
 }
 
+/* ---------- Interrupt ---------- */
+
+/* MSI: Ursache lesen (das loescht sie) und den Netzwerk-Thread wecken; die Pakete holt der Thread */
+static void e1000_irq(InterruptFrame *f)
+{
+    int i = (int)f->vector - VECTOR_NET;
+    if (i >= 0 && i < nic_count && nics[i])
+        (void)rd(nics[i], REG_ICR);
+    net_wake();
+}
+
+static int enable_irq(Nic *n, const PciDevice *pci, int index)
+{
+    if (n->kind == K_8254X || index >= MAX_NICS || cmdline_has("e1000poll"))
+        return 0; /* die alten Karten koennen kein MSI */
+    uint8_t vector = (uint8_t)(VECTOR_NET + index);
+    idt_set_handler(vector, e1000_irq);
+    if (!pci_enable_msi_only(pci, vector, apic_id()))
+        return 0;
+    wr(n, REG_ITR, 256);  /* hoechstens ein Interrupt je 256 x 256 ns = 65 us */
+    (void)rd(n, REG_ICR); /* Altes loeschen */
+    wr(n, REG_IMS, ICR_RXT0 | ICR_RXO | ICR_RXDMT0 | ICR_LSC);
+    flush(n);
+    kprintf("e1000: Interrupts per MSI (Vektor %#x)\n", vector);
+    return 1;
+}
+
 /* ---------- Initialisierung ---------- */
 
 static void probe_one(const PciDevice *pci, const NicId *id)
@@ -494,6 +533,11 @@ static void probe_one(const PciDevice *pci, const NicId *id)
     d.recv = nic_recv;
     d.link = nic_link;
     d.priv = n;
+    int index = nic_count;
+    if (index < MAX_NICS)
+        nics[nic_count++] = n;
+    n->msi = enable_irq(n, pci, index);
+    d.irq = n->msi;
     uint32_t mbps;
     int fd;
     int up = nic_link(&d, &mbps, &fd);
