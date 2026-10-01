@@ -21,6 +21,8 @@
  *   igdtest gpgpu   Programme auf den Recheneinheiten: Assembler-Probe, Fuellen, Kopieren und Mischen (jeweils gegen
  *                   die CPU geprueft), Tempo bei Bildschirmgroesse; an der Konsole danach ein halbtransparentes
  *                   Farbfeld ueber dem Text (5 s)
+ *   igdtest 3d      3D-Pipeline (Stufe 7): ein Rechteck mit fester Farbe ueber Vertex-Buffer, Rasterizer und
+ *                   Pixel-Shader (gegen die CPU geprueft, mit Pipeline-Statistik); an der Konsole drei Rechtecke (4 s)
  *   igdtest comp [on|off]  Zusammensetzen des Desktops auf der GPU: Zustand und Messwerte (GPU gegen CPU) bzw. an/aus
  *   igdtest comp cache N   Cache der GPU dabei: 0 alles uncached, 1 Quellen im Cache (Standard), 2 alles im Cache
  * Die Messwerte stehen im Kernel-Log: danach "dmesg > /disk/igd.txt" und die Datei schicken. */
@@ -89,6 +91,9 @@ void _start(int argc, char **argv)
         while ((n = sys_klog(&pos, buf, sizeof(buf))) > 0)
             write_all(1, buf, (size_t)n);
         sys_exit(0);
+    } else if (argc > 1 && strcmp(argv[1], "3d") == 0) {
+        op = 19;
+        what = "3D-Pipeline: Rechteck auf einer Testflaeche, an der Konsole drei farbige Rechtecke";
     } else if (argc > 1 && strcmp(argv[1], "gpgpu") == 0) {
         op = 15;
         what = "Programme auf den Recheneinheiten, an der Konsole ein halbtransparentes Farbfeld";
@@ -105,7 +110,7 @@ void _start(int argc, char **argv)
                info ? "igdinfo" : dp ? "igd" : "igdmode");
         sys_exit(r == 0 ? 0 : 1);
     } else if (argc > 1) {
-        fprintf(2, "Aufruf: igdtest [cursor|blit|info|edid|scale|mode|dp|dpmode|dptrain|output [b|c|d]|vblank|bltmode N|render|gpgpu|comp [on|off|cache N]]\n");
+        fprintf(2, "Aufruf: igdtest [cursor|blit|info|edid|scale|mode|dp|dpmode|dptrain|output [b|c|d]|vblank|bltmode N|render|gpgpu|3d|comp [on|off|cache N]]\n");
         sys_exit(2);
     }
     printf("igdtest: startet in 1 s (%s) ...\n", what);

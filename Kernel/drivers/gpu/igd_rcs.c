@@ -1370,3 +1370,450 @@ out:
     rcs_release();
     return rc;
 }
+
+/* ---------- Stufe 7: 3D-Pipeline (igdtest 3d) ----------
+ * Erstes Rechteck ueber die 3D-Pipeline, aufgebaut wie IGTs rendercopy fuer Gen9: ein Vertex-Buffer mit drei
+ * Eckpunkten (RECTLIST, schon in Bildschirmkoordinaten), Vertex-Shader aus (die Punkte gehen unveraendert weiter),
+ * Clipper durchlassen, Rasterizer ohne Culling und ohne Viewport-Umrechnung, ein Pixel-Shader (SIMD16), der eine
+ * feste Farbe per Render-Target-Write in die Flaeche schreibt. Die CPU prueft das Ergebnis; die Statistikzaehler der
+ * Pipeline zeigen, wie weit sie gekommen ist. Gleitkommawerte stehen als Bitmuster da (der Kernel rechnet ohne FPU). */
+
+#define G3D(sub, op, subop)  ((3u << 29) | ((uint32_t)(sub) << 27) | ((uint32_t)(op) << 24) | ((uint32_t)(subop) << 16))
+#define S3D(subop)           G3D(3, 0, subop)     /* 3DSTATE_* */
+#define PIPELINE_SELECT_3D   (0x69040000u | (3u << 8) | 0)
+#define STATE_SIP            (0x61020000u | 1)
+#define VF_STATISTICS_ON     (0x680B0000u | 1)
+#define DRAWING_RECTANGLE    (G3D(3, 1, 0x00) | 2)
+#define PRIMITIVE_3D         (G3D(3, 3, 0x00) | 5)
+#define PRIM_RECTLIST        0x0F
+#define SURF_B8G8R8A8_UNORM  0x0C0
+#define SURF_RGBA32_FLOAT    0x000
+#define SURF_RG32_FLOAT      0x085
+#define SFID_RC              0x5               /* Data Port Render Cache */
+/* Render-Target-Write SIMD16 ohne Kopf: 8 Register (R, G, B, A je 2), letztes Render-Target, Thread-Ende */
+#define RT_WRITE_SIMD16      (0x80000000u | (8u << 25) | (0xCu << 14) | (1u << 12))
+#define VFC_SRC 1u
+#define VFC_0   2u
+#define VFC_1F  3u
+#define F_1_0   0x3F800000u                    /* 1.0f */
+#define F_0_2   0x3E4CCCCDu
+#define F_0_4   0x3ECCCCCDu
+#define F_0_6   0x3F19999Au
+#define F_0_8   0x3F4CCCCDu
+
+/* Ganzzahl (< 2^24) als float-Bitmuster */
+static uint32_t f32(uint32_t v)
+{
+    if (!v)
+        return 0;
+    int e = 31 - __builtin_clz(v);
+    return (uint32_t)(127 + e) << 23 | ((v << (23 - e)) & 0x7FFFFF);
+}
+
+/* Pipeline-Statistik (je 64 Bit; zaehlt mit VF_STATISTICS, Clipper- und WM-Statistik) */
+static const struct {
+    uint32_t    reg;
+    const char *name;
+} stat3d[] = {
+    {0x2310, "Eckpunkte gelesen"}, {0x2318, "Primitive gelesen"}, {0x2320, "Vertex-Shader"},
+    {0x2338, "Clipper ein"},       {0x2340, "Clipper aus"},       {0x2348, "Pixel-Shader"},
+};
+#define NSTAT3D ((int)(sizeof(stat3d) / sizeof(stat3d[0])))
+
+static uint64_t rd64(uint32_t r)
+{
+    return (uint64_t)igd_rd(r) | (uint64_t)igd_rd(r + 4) << 32;
+}
+
+/* Pixel-Shader: feste Farbe (float-Bitmuster je Kanal) in r112-r119 (SIMD16: R, G, B, A je 2 Register), dann
+ * Render-Target-Write mit Thread-Ende */
+static int asm_ps_color(uint32_t (*k)[4], uint32_t r, uint32_t g, uint32_t b, uint32_t a)
+{
+    const uint32_t c[4] = {r, g, b, a};
+    int n = 0;
+    for (int i = 0; i < 4; i++)
+        eu_inst(k[n++], EU_MOV, 4, 0, eu_d(EU_F, 112 + 2 * i, 0), eu_imm(EU_F, c[i]), eu_none());
+    eu_send(k[n++], 4, SFID_RC, eu_null(), 112, RT_WRITE_SIMD16);
+    return n;
+}
+
+/* Lage im Zustandsbereich (Surface- und Dynamic-State-Basis = C_STATE) */
+#define S3_BLEND   0x000   /* BLEND_STATE: alles 0 = nicht mischen, alle Kanaele schreiben */
+#define S3_CC      0x0C0   /* COLOR_CALC_STATE */
+#define S3_CCVP    0x100   /* CC_VIEWPORT: Tiefe 0-1 */
+#define S3_SFVP    0x140   /* SF_CLIP_VIEWPORT */
+#define S3_SCISSOR 0x180
+#define S3_BT      0x1C0   /* Binding Table des Pixel-Shaders: 0 = Render-Target */
+#define S3_RT      0x200   /* Surface State des Render-Targets */
+#define S3_VB      0x300   /* Vertex-Buffer: 3 Eckpunkte x, y, u, v (float) */
+
+/* Zustaende und Batch fuer ein Rechteck [x0, x1) x [y0, y1) im Render-Target (rt_gtt, w x h Pixel, pitch Bytes) */
+static uint32_t batch_3d(uint32_t rt_gtt, uint32_t w, uint32_t h, uint32_t pitch, uint32_t x0, uint32_t y0, uint32_t x1,
+                         uint32_t y1)
+{
+    uint8_t *st = core_ptr(C_STATE);
+    memset(st, 0, 4096);
+    uint32_t *ccvp = (uint32_t *)(st + S3_CCVP), *sfvp = (uint32_t *)(st + S3_SFVP);
+    ccvp[0] = 0;
+    ccvp[1] = F_1_0;
+    sfvp[8] = 0; /* Guardband (Clipper ist aus) */
+    sfvp[9] = F_1_0;
+    sfvp[10] = 0;
+    sfvp[11] = F_1_0;
+    *(uint32_t *)(st + S3_BT) = S3_RT;
+    uint32_t *rt = (uint32_t *)(st + S3_RT);
+    rt[0] = (1u << 29) | (SURF_B8G8R8A8_UNORM << 18) | (1u << 16) | (1u << 14); /* 2D, linear */
+    rt[2] = (w - 1) | ((h - 1) << 16);
+    rt[3] = pitch - 1;
+    rt[7] = (4u << 25) | (5u << 22) | (6u << 19) | (7u << 16);
+    rt[8] = rt_gtt;
+    /* RECTLIST: unten rechts, unten links, oben links */
+    uint32_t *vb = (uint32_t *)(st + S3_VB);
+    const uint32_t v[3][4] = {{f32(x1), f32(y1), F_1_0, F_1_0}, {f32(x0), f32(y1), 0, F_1_0}, {f32(x0), f32(y0), 0, 0}};
+    memcpy(vb, v, sizeof(v));
+
+    uint32_t *b = core_ptr(C_BATCH), k = 0, base = core_gtt(C_STATE);
+    b[k++] = PIPE_CONTROL; /* vor dem Wechsel der Pipeline: alles fertig, Caches leer */
+    b[k++] = PC_CS_STALL | PC_RT_FLUSH | PC_DC_FLUSH;
+    b[k++] = 0;
+    b[k++] = 0;
+    b[k++] = 0;
+    b[k++] = 0;
+    b[k++] = PIPELINE_SELECT_3D;
+    b[k++] = STATE_SIP;
+    b[k++] = 0;
+    b[k++] = 0;
+    b[k++] = VF_STATISTICS_ON;
+    for (uint32_t s = 0x12; s <= 0x16; s++) { /* PUSH_CONSTANT_ALLOC_VS, _HS, _DS, _GS, _PS (Opcode 1): keine */
+        b[k++] = G3D(3, 1, s);
+        b[k++] = 0;
+    }
+    b[k++] = STATE_BASE_ADDRESS;
+    b[k++] = 0 | 1;
+    b[k++] = 0;
+    b[k++] = 0 | 1;
+    b[k++] = base | 1;               /* Surface State */
+    b[k++] = 0;
+    b[k++] = base | 1;               /* Dynamic State */
+    b[k++] = 0;
+    b[k++] = 0;
+    b[k++] = 0;
+    b[k++] = core_gtt(C_KERN) | 1;   /* Instruction: der Pixel-Shader */
+    b[k++] = 0;
+    b[k++] = 0xFFFFF000u | 1;
+    b[k++] = (1u << 12) | 1;
+    b[k++] = 0xFFFFF000u | 1;
+    b[k++] = (2u << 12) | 1;
+    b[k++] = 0 | 1;
+    b[k++] = 0;
+    b[k++] = 0xFFFFF000u;
+    b[k++] = S3D(0x23);              /* VIEWPORT_STATE_POINTERS_CC */
+    b[k++] = S3_CCVP;
+    b[k++] = S3D(0x21);              /* VIEWPORT_STATE_POINTERS_SF_CLIP */
+    b[k++] = S3_SFVP;
+    b[k++] = S3D(0x30);              /* URB_VS: 64 Eintraege zu 2 x 64 Bytes ab 2 x 8 KiB */
+    b[k++] = 64 | (1u << 16) | (2u << 25);
+    for (uint32_t s = 0x31; s <= 0x33; s++) { /* URB_HS, _DS, _GS: keine */
+        b[k++] = S3D(s);
+        b[k++] = 2u << 25;
+    }
+    b[k++] = S3D(0x24);              /* BLEND_STATE_POINTERS */
+    b[k++] = S3_BLEND | 1;
+    b[k++] = S3D(0x0E);              /* CC_STATE_POINTERS */
+    b[k++] = S3_CC | 1;
+    b[k++] = S3D(0x0D);              /* MULTISAMPLE: 1 Abtastpunkt */
+    b[k++] = 0;
+    b[k++] = S3D(0x18);              /* SAMPLE_MASK */
+    b[k++] = 1;
+    /* nicht benutzte Stufen aus: HiZ-Operation, Konstanten, Binding Tables, Sampler, VS, HS, TE, DS, GS */
+    b[k++] = S3D(0x52) | 3;          /* WM_HZ_OP */
+    for (int i = 0; i < 4; i++)
+        b[k++] = 0;
+    const uint32_t cs[4] = {0x15, 0x19, 0x1A, 0x16}; /* CONSTANT_VS, _HS, _DS, _GS */
+    for (int c = 0; c < 4; c++) {
+        b[k++] = S3D(cs[c]) | 9;
+        for (int i = 0; i < 10; i++)
+            b[k++] = 0;
+    }
+    for (uint32_t s = 0x26; s <= 0x29; s++) { /* BINDING_TABLE_POINTERS_VS, _HS, _DS, _GS */
+        b[k++] = S3D(s);
+        b[k++] = 0;
+    }
+    for (uint32_t s = 0x2B; s <= 0x2E; s++) { /* SAMPLER_STATE_POINTERS_VS, _HS, _DS, _GS */
+        b[k++] = S3D(s);
+        b[k++] = 0;
+    }
+    const uint32_t stage[5][2] = {{0x10, 9}, {0x1B, 9}, {0x1C, 4}, {0x1D, 11}, {0x11, 10}}; /* VS, HS, TE, DS, GS */
+    for (int s = 0; s < 5; s++) {
+        b[k++] = S3D(stage[s][0]) | (stage[s][1] - 2);
+        for (uint32_t i = 1; i < stage[s][1]; i++)
+            b[k++] = 0;
+    }
+    b[k++] = S3D(0x1E) | 3;          /* STREAMOUT: aus */
+    for (int i = 0; i < 4; i++)
+        b[k++] = 0;
+    b[k++] = S3D(0x12) | 2;          /* CLIP: Statistik, sonst durchlassen */
+    b[k++] = 1u << 10;
+    b[k++] = 0;
+    b[k++] = 0;
+    b[k++] = S3D(0x1F) | 4;          /* SBE: 1 Attribut (u, v) aus dem VUE ab 256 Bit */
+    b[k++] = (1u << 22) | (1u << 29) | (1u << 28) | (1u << 11) | (1u << 5);
+    b[k++] = 0;
+    b[k++] = 0;
+    b[k++] = 3;                      /* Attribut 0: xyzw aktiv */
+    b[k++] = 0;
+    b[k++] = S3D(0x51) | 9;          /* SBE_SWIZ */
+    for (int i = 0; i < 10; i++)
+        b[k++] = 0;
+    b[k++] = S3D(0x50) | 3;          /* RASTER: kein Culling, gegen den Uhrzeigersinn vorn */
+    b[k++] = (1u << 16) | (1u << 21);
+    b[k++] = 0;
+    b[k++] = 0;
+    b[k++] = 0;
+    b[k++] = S3D(0x13) | 2;          /* SF: keine Viewport-Umrechnung (Bildschirmkoordinaten) */
+    b[k++] = 0;
+    b[k++] = 0;
+    b[k++] = 0;
+    b[k++] = S3D(0x14);              /* WM: Statistik, Baryzentrik perspektivisch je Pixel */
+    b[k++] = (1u << 31) | (1u << 11);
+    b[k++] = S3D(0x4C);              /* WM_CHROMAKEY */
+    b[k++] = 0;
+    b[k++] = S3D(0x17) | 9;          /* CONSTANT_PS */
+    for (int i = 0; i < 10; i++)
+        b[k++] = 0;
+    b[k++] = S3D(0x20) | 10;         /* PS: Kernel 0, 1 Binding-Table-Eintrag, 64 Threads, SIMD16, Payload ab r6 */
+    b[k++] = 0;
+    b[k++] = 0;
+    b[k++] = 1u << 18;
+    b[k++] = 0;
+    b[k++] = 0;
+    b[k++] = (63u << 23) | (1u << 1);
+    b[k++] = 6u << 16;
+    b[k++] = 0;
+    b[k++] = 0;
+    b[k++] = 0;
+    b[k++] = 0;
+    b[k++] = S3D(0x4F);              /* PS_EXTRA: Pixel-Shader gueltig, mit Attributen */
+    b[k++] = (1u << 31) | (1u << 8);
+    b[k++] = S3D(0x4D);              /* PS_BLEND: es gibt ein beschreibbares Render-Target */
+    b[k++] = 1u << 30;
+    b[k++] = S3D(0x2A);              /* BINDING_TABLE_POINTERS_PS */
+    b[k++] = S3_BT;
+    b[k++] = S3D(0x2F);              /* SAMPLER_STATE_POINTERS_PS */
+    b[k++] = 0;
+    b[k++] = S3D(0x0F);              /* SCISSOR_STATE_POINTERS */
+    b[k++] = S3_SCISSOR;
+    b[k++] = S3D(0x4E) | 2;          /* WM_DEPTH_STENCIL: kein Tiefen-/Stenciltest */
+    b[k++] = 0;
+    b[k++] = 0;
+    b[k++] = 0;
+    b[k++] = S3D(0x05) | 6;          /* DEPTH_BUFFER: keiner (SURFTYPE_NULL) */
+    b[k++] = (7u << 29) | (1u << 18); /* SURFTYPE_NULL, Format D32_FLOAT (wie IGT) */
+    for (int i = 0; i < 6; i++)
+        b[k++] = 0;
+    b[k++] = S3D(0x07) | 3;          /* HIER_DEPTH_BUFFER */
+    for (int i = 0; i < 4; i++)
+        b[k++] = 0;
+    b[k++] = S3D(0x06) | 3;          /* STENCIL_BUFFER */
+    for (int i = 0; i < 4; i++)
+        b[k++] = 0;
+    b[k++] = S3D(0x04) | 1;          /* CLEAR_PARAMS */
+    b[k++] = 0;
+    b[k++] = 0;
+    b[k++] = DRAWING_RECTANGLE;
+    b[k++] = 0;
+    b[k++] = ((h - 1) << 16) | (w - 1);
+    b[k++] = 0;
+    b[k++] = S3D(0x08) | 3;          /* VERTEX_BUFFERS: Puffer 0, 16 Bytes je Eckpunkt */
+    b[k++] = (0u << 26) | (1u << 14) | 16;
+    b[k++] = base + S3_VB;
+    b[k++] = 0;
+    b[k++] = 3 * 16;
+    b[k++] = S3D(0x09) | 5;          /* VERTEX_ELEMENTS: VUE = 4 x 0 (Kopf), Position x, y, 0, 1, Attribut u, v, 0, 1 */
+    b[k++] = (1u << 25) | (SURF_RGBA32_FLOAT << 16) | 0;
+    b[k++] = (VFC_0 << 28) | (VFC_0 << 24) | (VFC_0 << 20) | (VFC_0 << 16);
+    b[k++] = (1u << 25) | (SURF_RG32_FLOAT << 16) | 0;
+    b[k++] = (VFC_SRC << 28) | (VFC_SRC << 24) | (VFC_0 << 20) | (VFC_1F << 16);
+    b[k++] = (1u << 25) | (SURF_RG32_FLOAT << 16) | 8;
+    b[k++] = (VFC_SRC << 28) | (VFC_SRC << 24) | (VFC_0 << 20) | (VFC_1F << 16);
+    for (uint32_t e = 0; e < 3; e++) { /* VF_INSTANCING: nicht instanziert */
+        b[k++] = S3D(0x49) | 1;
+        b[k++] = e;
+        b[k++] = 0;
+    }
+    b[k++] = S3D(0x4A);              /* VF_SGVS */
+    b[k++] = 0;
+    b[k++] = S3D(0x0C);              /* VF: kein Cut-Index */
+    b[k++] = 0;
+    b[k++] = S3D(0x4B);              /* VF_TOPOLOGY */
+    b[k++] = PRIM_RECTLIST;
+    b[k++] = PRIMITIVE_3D;           /* 3 Eckpunkte, 1 Instanz */
+    b[k++] = 0;
+    b[k++] = 3;
+    b[k++] = 0;
+    b[k++] = 1;
+    b[k++] = 0;
+    b[k++] = 0;
+    b[k++] = PIPE_CONTROL;           /* warten, Render-Cache leeren, Merker schreiben */
+    b[k++] = PC_CS_STALL | PC_RT_FLUSH | PC_DC_FLUSH | PC_WRITE_QWORD | PC_GLOBAL_GTT;
+    b[k++] = core_gtt(C_RES);
+    b[k++] = 0;
+    b[k++] = 0x600D3D00u;
+    b[k++] = 0;
+    b[k++] = MI_BATCH_BUFFER_END;
+    b[k++] = MI_NOOP;
+    igd_clflush((uint64_t)st, 4096);
+    igd_clflush((uint64_t)b, k * 4);
+    return k;
+}
+
+/* Kernel laden, Batch ausfuehren, Statistik vorher/nachher; 0 = fertig */
+static int draw_3d(const char *what, uint32_t r, uint32_t g, uint32_t b, uint32_t a, uint32_t rt_gtt, uint32_t w,
+                   uint32_t h, uint32_t pitch, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1, int stats)
+{
+    uint32_t (*kern)[4] = core_ptr(C_KERN);
+    memset(kern, 0, 2 * 4096);
+    int nk = asm_ps_color(kern, r, g, b, a);
+    igd_clflush((uint64_t)kern, (uint64_t)nk * 16);
+    batch_3d(rt_gtt, w, h, pitch, x0, y0, x1, y1);
+    uint64_t before[NSTAT3D];
+    for (int i = 0; i < NSTAT3D; i++)
+        before[i] = rd64(stat3d[i].reg);
+    begin(4 + 8);
+    emit(MI_BATCH_BUFFER_START);
+    emit(core_gtt(C_BATCH));
+    emit(0);
+    emit(MI_NOOP);
+    uint64_t us = 0;
+    int rc = run(what, 1000, &us);
+    if (rc != 0) /* ACTHD - Batch-Anfang = wo die Engine stehen blieb (Dword = Abstand / 4) */
+        kprintf("igd3d: Batch ab %#x, Zustaende ab %#x, Pixel-Shader ab %#x\n", core_gtt(C_BATCH), core_gtt(C_STATE),
+                core_gtt(C_KERN));
+    if (stats) {
+        kprintf("igd3d: Pipeline-Statistik:");
+        for (int i = 0; i < NSTAT3D; i++)
+            kprintf(" %s %lu%s", stat3d[i].name, (unsigned long)(rd64(stat3d[i].reg) - before[i]),
+                    i + 1 < NSTAT3D ? "," : "\n");
+    }
+    return rc;
+}
+
+static int test_3d(void)
+{
+    int pre = igd_preflight("Stufe 7 - 3D-Pipeline: ein Rechteck");
+    if (pre)
+        return pre;
+    int rc = core_setup();
+    if (rc)
+        return rc;
+    enum { TW = 256, TH = 64, TPAGES = TW * TH * 4 / 4096 };
+    uint32_t base = core_base + 0x40;
+    uint64_t saved[TPAGES];
+    if ((rc = igd_ggtt_claim(base, TPAGES, saved)) != 0)
+        return rc;
+    uint64_t mem = pmm_alloc_frames(TPAGES);
+    if (!mem) {
+        kprintf("igd3d: kein Speicher\n");
+        return -6;
+    }
+    for (uint32_t i = 0; i < TPAGES; i++)
+        igd_ggtt[base + i] = (mem + i * 4096) | IGD_PTE_VALID;
+    igd_ggtt_flush();
+    uint32_t *px = (uint32_t *)mem, mocs[62];
+    for (uint32_t i = 0; i < TW * TH; i++)
+        px[i] = 0x11111111u;
+    igd_clflush(mem, TPAGES * 4096);
+
+    if (!igd_forcewake_get()) {
+        kprintf("igd3d: Forcewake nicht bestaetigt\n");
+        rc = -9;
+        goto out_fw;
+    }
+    for (int i = 0; i < 62; i++)
+        mocs[i] = igd_rd(GFX_MOCS(i));
+    int ring_ok = ring_start();
+    for (int i = 0; i < 62; i++) /* uncached wie bei den anderen Tests */
+        igd_wr(GFX_MOCS(i), 0x09);
+    if (!ring_ok) {
+        dump("Ring startet NICHT");
+        rc = -10;
+        goto out_ring;
+    }
+
+    /* 1. Rechteck [16, 176) x [8, 40) in Rosa-Rot (R 1.0, G 0.2, B 0.6, A 1.0) auf eine Testflaeche 256 x 64 */
+    const uint32_t X0 = 16, Y0 = 8, X1 = 176, Y1 = 40, want = 0xFFFF3399u;
+    if (draw_3d("1. Rechteck ueber die 3D-Pipeline", F_1_0, F_0_2, F_0_6, F_1_0, base << 12, TW, TH, TW * 4, X0, Y0, X1, Y1,
+                1) != 0) {
+        rc = -30;
+        goto out_ring;
+    }
+    igd_clflush(mem, TPAGES * 4096);
+    int inside = 0, outside = 0, first = -1;
+    for (uint32_t y = 0; y < TH; y++)
+        for (uint32_t x = 0; x < TW; x++) {
+            int in = x >= X0 && x < X1 && y >= Y0 && y < Y1;
+            uint32_t v = px[y * TW + x];
+            if (in ? v != want : v != 0x11111111u) {
+                if (first < 0)
+                    first = (int)(y * TW + x);
+                if (in)
+                    inside++;
+                else
+                    outside++;
+            }
+        }
+    kprintf("igd3d: Rechteck %u x %u: innen %d von %u Pixeln falsch, aussen %d veraendert", X1 - X0, Y1 - Y0, inside,
+            (X1 - X0) * (Y1 - Y0), outside);
+    if (first >= 0)
+        kprintf(" (erstes bei (%d, %d): %#x, erwartet %#x)", first % TW, first / TW, px[first],
+                first % TW >= (int)X0 && first % TW < (int)X1 && first / TW >= (int)Y0 && first / TW < (int)Y1 ? want
+                                                                                                        : 0x11111111u);
+    kprintf("\n");
+    if (inside || outside) {
+        rc = -31;
+        goto out_ring;
+    }
+
+    /* 2. Sichtbar (nur an der Konsole): drei Rechtecke in Rot, Gruen, Blau direkt in den Bildspeicher, 4 s */
+    if (!console_gfx_active() && igd_flip_ready && igd_scr_w >= 1200 && igd_scr_h >= 500 && !(igd_scr_stride & 63)) {
+        static const uint32_t col[3][3] = {{F_1_0, F_0_2, F_0_2}, {F_0_2, F_0_8, F_0_4}, {F_0_2, F_0_4, F_1_0}};
+        uint32_t rw = 320, rh = 360, gap = 40, sx = (igd_scr_w - 3 * rw - 2 * gap) / 2, sy = (igd_scr_h - rh) / 2;
+        for (int i = 0; i < 3 && rc == 0; i++) {
+            uint32_t x = sx + (uint32_t)i * (rw + gap);
+            if (draw_3d("2. Rechteck auf dem Bildschirm", col[i][0], col[i][1], col[i][2], F_1_0, igd_surf_a, igd_scr_w,
+                        igd_scr_h, igd_scr_stride, x, sy, x + rw, sy + rh, i == 0) != 0)
+                rc = -32;
+        }
+        if (rc == 0)
+            kprintf("igd3d: drei Rechtecke ueber die 3D-Pipeline gezeichnet (4 s sichtbar)\n");
+        thread_sleep_ms(4000);
+        console_repaint();
+    } else {
+        kprintf("igd3d: sichtbarer Teil nur an der Konsole (ohne Desktop)\n");
+    }
+    if (rc == 0)
+        kprintf("igd3d: die 3D-Pipeline zeichnet\n");
+
+out_ring:
+    ring_stop();
+    for (int i = 0; i < 62; i++)
+        igd_wr(GFX_MOCS(i), mocs[i]);
+out_fw:
+    igd_forcewake_put();
+    for (uint32_t i = 0; i < TPAGES; i++)
+        igd_ggtt[base + i] = saved[i];
+    igd_ggtt_flush();
+    pmm_free_frames(mem, TPAGES);
+    kprintf("igdtest: %s\n", rc == 0 ? "3D-Pipeline funktioniert" : "3D-Pipeline mit Fehlern, bitte Log schicken");
+    return rc;
+}
+
+int igd_3d_test(void)
+{
+    rcs_acquire(1);
+    igd_rcs_comp_wait(0);
+    comp_ready = 0;
+    int rc = test_3d();
+    rcs_release();
+    return rc;
+}

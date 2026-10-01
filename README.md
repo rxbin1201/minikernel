@@ -96,6 +96,11 @@ In der Shell: `burn 5000 & burn 5000 & cpus` zeigt zwei ausgelastete CPUs.
   CPU geprueft, an der Konsole zusaetzlich ein halbtransparentes Farbfeld). Ring, Status- und Befehlsseiten bleiben
   nach dem ersten Test fest in der GGTT; vor jedem Test wird die Engine zurueckgesetzt und vor jedem Auftrag verwirft
   ein `PIPE_CONTROL` TLB und Caches - so laufen die Tests beliebig oft hintereinander
+- **3D-Pipeline** (`igd_rcs.c`, `igdtest 3d`, Stufe 7): erstes Rechteck ueber die 3D-Pipeline, aufgebaut wie IGTs
+  rendercopy fuer Gen9 - Vertex-Buffer mit drei Eckpunkten (RECTLIST in Bildschirmkoordinaten), Vertex-Shader aus,
+  Clipper durchlassen, Rasterizer ohne Culling, Pixel-Shader (SIMD16, eigener Assembler), der eine feste Farbe per
+  Render-Target-Write schreibt. Die CPU prueft die Testflaeche, die Pipeline-Statistik (Eckpunkte, Clipper,
+  Pixel-Shader) zeigt, wie weit die GPU kam; an der Konsole erscheinen drei farbige Rechtecke
 - **Zusammensetzen auf der GPU** (`igd_comp.c`, `SYS_GPUCOMP`; Desktop: `gpu.c`): Bildschirmbild, Hintergrund,
   Fensterbilder und Schatten liegen in geteiltem Speicher, den der Kernel fest in die GGTT einblendet (eigener Bereich,
   Referenz auf das shm-Objekt, solange angemeldet). Je Bild schickt der Desktop alle geaenderten Rechtecke als eine
