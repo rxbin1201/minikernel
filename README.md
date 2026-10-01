@@ -106,10 +106,12 @@ In der Shell: `burn 5000 & burn 5000 & cpus` zeigt zwei ausgelastete CPUs.
   nur mit Breiten in Vielfachen von 16 Pixeln (der Desktop rundet Fensterbilder und Schatten auf), und jeder Auftrag
   wird in Stuecke zerlegt, in denen die Bloecke der Threads genau aufgehen (innen 8 x 8 Pixel, Raender 1 x 8, 8 x 1,
   1 x 1 - je ein eigener Kernel). Cache: die Render-Engine hat eigene Eintraege fuer "uncached" und "write-back im
-  LLC" (L3 der GPU fuer beide aus, damit sie keine alten Fensterinhalte sieht); Standard ist "Quellen im Cache" (das
-  Bildschirmbild als Ziel bleibt uncached, daraus liest der Blitter). Beim Start misst der Kernel alle drei Modi
-  (2048 x 1024 kopieren und mischen) und nimmt "Quellen im Cache", wenn es schneller ist; `igdtest comp cache N`
-  (0 uncached, 1 Quellen im Cache, 2 alles) wechselt im Betrieb, vorher laeuft der Selbsttest.
+  LLC" (L3 der GPU fuer beide aus, damit sie keine alten Fensterinhalte sieht). Standard ist "alles im Cache" (auf
+  dem Test-PC 8,2/6,1 GB/s kopieren/mischen gegen 4,7/3,4 uncached, Desktop doppelt so schnell wie mit der CPU) -
+  aber nur, wenn ein zweiter Selbsttest zeigt, dass der Blitter das von der GPU in den Cache geschriebene Bild beim
+  Anzeigen richtig liest (sonst "Quellen im Cache", sonst uncached). Beim Start misst der Kernel alle drei Modi
+  (2048 x 1024); `igdtest comp cache N` (0 uncached, 1 Quellen im Cache, 2 alles) wechselt im Betrieb, vorher laufen
+  die Selbsttests.
   Taskleiste, Menues und Animationen zeichnet weiter die CPU. Beim Start prueft ein Selbsttest die GPU gegen die CPU
   (ungerade, ueberlappende Rechtecke: jeder Auftrag allein, dann alle als Liste, sonst einzeln nacheinander; ohne und
   mit Zurueckschreiben der CPU-Caches); geht nichts davon, setzt die CPU zusammen wie bisher. `igdtest comp` zeigt Zustand und Messwerte (GPU gegen CPU je Mpx),

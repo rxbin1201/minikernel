@@ -399,6 +399,28 @@ static uint32_t kick(void)
     return n;
 }
 
+/* Rechteck zwischen zwei GGTT-Adressen kopieren und abwarten - so wie bei den Bild-Updates (gleiche Cache-Steuerung);
+ * fuer den Selbsttest des Zusammensetzens. 0 = ok, -1 = Blitter aus oder Fehler */
+int igd_blt_copy_gtt(uint32_t dst, uint32_t dpitch, uint32_t src, uint32_t spitch, int w, int h)
+{
+    if (!blt_on)
+        return -1;
+    if (!reserve(4 + 10 + 6)) {
+        blt_fail("Ring laeuft nicht leer");
+        return -1;
+    }
+    emit(MI_FLUSH_DW_POSTSYNC | MI_FLUSH_DW_STOREDW | MI_INVALIDATE_TLB); /* die Flaechen sind neu in der GGTT */
+    emit((hws_gtt + HWS_SCRATCH) | MI_FLUSH_DW_USE_GTT);
+    emit(0);
+    emit(0);
+    emit_copy(dst, dpitch, 0, 0, src, spitch, 0, 0, w, h);
+    uint32_t n = kick();
+    if (wait_seqno(n, 200))
+        return 0;
+    blt_fail("Blitter wird mit dem Selbsttest nicht fertig");
+    return -1;
+}
+
 int igd_blt_on(void)
 {
     return blt_on;

@@ -48,8 +48,9 @@ static int       mode = -1;     /* -1 = noch nicht geprueft, 0 keins, 1 GPU, 2 C
 static int       enabled = 1;   /* igdtest comp off/on */
 static int       flush_mode;    /* CPU-Caches vor und nach den Auftraegen zurueckschreiben */
 static int       serial_mode;   /* jeden Auftrag einzeln abschicken (falls Auftraege einer Liste sich ueberholen) */
-/* Cache: 0 alles uncached, 1 Quellen im LLC (Ziel uncached: aus dem Bildschirmbild liest der Blitter), 2 alles im LLC */
-static int       cache_mode = 1, pending_cache = -1;
+/* Cache: 0 alles uncached, 1 Quellen im LLC, 2 alles im LLC (Standard, wenn der Blitter das Bildschirmbild danach
+ * richtig liest - siehe blit_check) */
+static int       cache_mode = 2, pending_cache = -1;
 static const char *const cache_names[3] = {"alles uncached", "Quellen im Cache", "alles im Cache"};
 static int       fails;
 static uint32_t  region_base, region_end;
@@ -430,9 +431,10 @@ static int selftest(void)
 
 static const char *why_off = "-"; /* warum keins (igdtest comp) */
 
-/* Tempo der Cache-Modi messen (Flaeche 2048 x 1024, kopieren und mischen); waehlt 1, wenn es schneller ist als 0 */
+/* Tempo der Cache-Modi messen (Flaeche 2048 x 1024, kopieren und mischen) und ins Log schreiben */
 static void benchmark(void)
 {
+    int keep = cache_mode;
     enum { BW = 2048, BH = 1024, BP = BW * BH * 4 / 4096 };
     static uint64_t bf[2][BP];
     uint64_t m0 = pmm_alloc_frames(BP), m1 = m0 ? pmm_alloc_frames(BP) : 0;
@@ -465,10 +467,7 @@ static void benchmark(void)
     kprintf("igdcomp: Tempo %dx%d in MB/s (kopieren/mischen): uncached %lu/%lu, Quellen im Cache %lu/%lu, alles im "
             "Cache %lu/%lu\n", BW, BH, (unsigned long)mbs[0][0], (unsigned long)mbs[0][1], (unsigned long)mbs[1][0],
             (unsigned long)mbs[1][1], (unsigned long)mbs[2][0], (unsigned long)mbs[2][1]);
-    /* Zeit fuer kopieren + mischen vergleichen (1 / MB/s) */
-    uint64_t t0 = mbs[0][0] && mbs[0][1] ? 1000000 / mbs[0][0] + 1000000 / mbs[0][1] : ~0ULL;
-    uint64_t t1 = mbs[1][0] && mbs[1][1] ? 1000000 / mbs[1][0] + 1000000 / mbs[1][1] : ~0ULL;
-    cache_mode = t1 <= t0 ? 1 : 0;
+    cache_mode = keep;
     if (i0)
         surf_drop(&surfs[i0 - 1]);
     if (i1)
@@ -480,12 +479,65 @@ static void benchmark(void)
     memset(&st, 0, sizeof(st));
 }
 
+/* Modus 2: die GPU schreibt das Bildschirmbild in den LLC, der Blitter liest es danach fuer die Anzeige. Sieht er die
+ * neuen Daten oder noch den alten Inhalt des RAMs? Testflaeche D: CPU schreibt Muster X und schreibt es in den RAM
+ * zurueck, GPU kopiert Muster A darueber (im Cache), Blitter kopiert D nach E, CPU vergleicht E mit A. 0 = richtig */
+static int blit_check(void)
+{
+    if (!igd_blt_on()) {
+        kprintf("igdcomp: Blitter aus - das Bildschirmbild liest die CPU, \"alles im Cache\" ist dann sicher\n");
+        return 0;
+    }
+    uint64_t mem = pmm_alloc_frames(3 * TPAGES);
+    if (!mem)
+        return -1;
+    static uint64_t fr[3][TPAGES];
+    for (int k = 0; k < 3; k++)
+        for (int i = 0; i < TPAGES; i++)
+            fr[k][i] = mem + ((uint64_t)k * TPAGES + (uint64_t)i) * 4096;
+    int ia = surf_add(SELF_PID, 0, fr[0], TW, TH), id = surf_add(SELF_PID, 0, fr[1], TW, TH);
+    int ie = surf_add(SELF_PID, 0, fr[2], TW, TH);
+    int bad = -1;
+    for (int round = 0; ia && id && ie && round < 3; round++) {
+        CompSurf *a = &surfs[ia - 1], *d = &surfs[id - 1], *e = &surfs[ie - 1];
+        for (uint32_t i = 0; i < TW * TH; i++) {
+            *spx(a, i * 4) = test_pattern(i, 200 + (uint32_t)round);
+            *spx(d, i * 4) = 0xDEAD0000u | (i & 0xFFFF);
+            *spx(e, i * 4) = 0;
+        }
+        igd_clflush(mem, 3 * TPAGES * 4096); /* alles im RAM, nichts mehr im CPU-Cache */
+        KOp o = {0, d, a, 0, 0, 0, 0, TW, TH};
+        if (exec_ops(&o, 1) != 0 || igd_blt_copy_gtt(e->ggtt << 12, TW * 4, d->ggtt << 12, TW * 4, TW, TH) != 0)
+            break;
+        igd_clflush(mem + 2 * TPAGES * 4096, TPAGES * 4096);
+        bad = 0;
+        int stale = 0;
+        for (uint32_t i = 0; i < TW * TH; i++) {
+            uint32_t v = *spx(e, i * 4);
+            bad += v != *spx(a, i * 4);
+            stale += (v >> 16) == 0xDEAD;
+        }
+        kprintf("igdcomp: Blitter liest das Bild aus dem Cache: Runde %d, %d von %d Pixeln falsch (%d alt)\n", round + 1,
+                bad, TW * TH, stale);
+        if (bad)
+            break;
+    }
+    if (ia)
+        surf_drop(&surfs[ia - 1]);
+    if (id)
+        surf_drop(&surfs[id - 1]);
+    if (ie)
+        surf_drop(&surfs[ie - 1]);
+    pmm_free_frames(mem, 3 * TPAGES);
+    return bad;
+}
+
 /* Cache-Modus wechseln (igdtest comp cache N; ausgefuehrt beim naechsten Bild des Desktops): erst Selbsttest */
 static void apply_cache(int m)
 {
     int old = cache_mode;
     cache_mode = m;
-    if (selftest() != 0) {
+    if (selftest() != 0 || (m == 2 && blit_check() != 0)) {
         kprintf("igdcomp: Selbsttest mit \"%s\" falsch - es bleibt bei \"%s\"\n", cache_names[m], cache_names[old]);
         cache_mode = old;
         return;
@@ -527,13 +579,15 @@ static void comp_init(void)
         }
     scratch_pte = igd_ggtt[region_base];
     mode = 1;
-    cache_mode = 1;
-    if (selftest() != 0) { /* mit Cache falsch: noch einmal ganz ohne */
-        kprintf("igdcomp: Selbsttest mit Quellen im Cache falsch, noch einmal uncached\n");
-        cache_mode = 0;
-    } else {
-        benchmark();
+    /* erst alles im Cache (am schnellsten), sonst nur die Quellen, sonst uncached */
+    for (cache_mode = 2; cache_mode > 0; cache_mode--) {
+        if (selftest() == 0 && (cache_mode < 2 || blit_check() == 0))
+            break;
+        kprintf("igdcomp: \"%s\" geht nicht, naechster Versuch: \"%s\"\n", cache_names[cache_mode],
+                cache_names[cache_mode - 1]);
     }
+    if (cache_mode > 0)
+        benchmark();
     if (cache_mode == 0 && selftest() != 0) {
         kprintf("igdcomp: Selbsttest fehlgeschlagen - der Desktop setzt weiter mit der CPU zusammen\n");
         why_off = "Selbsttest fehlgeschlagen (Einzelheiten: dmesg | grep igdcomp)";
