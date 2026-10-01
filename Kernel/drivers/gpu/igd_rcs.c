@@ -1372,11 +1372,14 @@ out:
 }
 
 /* ---------- Stufe 7: 3D-Pipeline (igdtest 3d) ----------
- * Erstes Rechteck ueber die 3D-Pipeline, aufgebaut wie IGTs rendercopy fuer Gen9: ein Vertex-Buffer mit drei
- * Eckpunkten (RECTLIST, schon in Bildschirmkoordinaten), Vertex-Shader aus (die Punkte gehen unveraendert weiter),
- * Clipper durchlassen, Rasterizer ohne Culling und ohne Viewport-Umrechnung, ein Pixel-Shader (SIMD16), der eine
- * feste Farbe per Render-Target-Write in die Flaeche schreibt. Die CPU prueft das Ergebnis; die Statistikzaehler der
- * Pipeline zeigen, wie weit sie gekommen ist. Gleitkommawerte stehen als Bitmuster da (der Kernel rechnet ohne FPU). */
+ * Aufgebaut wie IGTs rendercopy fuer Gen9. Zwei Arten zu zeichnen:
+ *  - Rechteck (RECTLIST) ohne Vertex-Shader: die Eckpunkte stehen schon in Bildschirmkoordinaten im Vertex-Buffer
+ *    (x, y, u, v), der Pixel-Shader schreibt eine feste Farbe.
+ *  - Dreiecke (TRILIST) mit Vertex-Shader (SIMD8): Eckpunkte x, y, r, g, b, a; der Vertex-Shader rechnet die Position
+ *    mit einer 2x3-Matrix in Bildschirmkoordinaten um und reicht die Farbe weiter, der Pixel-Shader interpoliert sie
+ *    (pln aus den Ebenen-Koeffizienten des Rasterizers).
+ * Clipper durchlassen, Rasterizer ohne Culling und ohne Viewport-Umrechnung. Die Statistikzaehler der Pipeline zeigen,
+ * wie weit die GPU gekommen ist. Gleitkommawerte stehen als Bitmuster da (der Kernel rechnet ohne FPU). */
 
 #define G3D(sub, op, subop)  ((3u << 29) | ((uint32_t)(sub) << 27) | ((uint32_t)(op) << 24) | ((uint32_t)(subop) << 16))
 #define S3D(subop)           G3D(3, 0, subop)     /* 3DSTATE_* */
@@ -1385,13 +1388,18 @@ out:
 #define VF_STATISTICS_ON     (0x680B0000u | 1)
 #define DRAWING_RECTANGLE    (G3D(3, 1, 0x00) | 2)
 #define PRIMITIVE_3D         (G3D(3, 3, 0x00) | 5)
+#define PRIM_TRILIST         0x04
 #define PRIM_RECTLIST        0x0F
 #define SURF_B8G8R8A8_UNORM  0x0C0
 #define SURF_RGBA32_FLOAT    0x000
 #define SURF_RG32_FLOAT      0x085
+#define SFID_URB             0x6
 #define SFID_RC              0x5               /* Data Port Render Cache */
+#define EU_PLN               0x5A
 /* Render-Target-Write SIMD16 ohne Kopf: 8 Register (R, G, B, A je 2), letztes Render-Target, Thread-Ende */
 #define RT_WRITE_SIMD16      (0x80000000u | (8u << 25) | (0xCu << 14) | (1u << 12))
+/* URB-Write SIMD8 (Typ 7) mit Kopf (Handles), 12 Datenregister = 3 vec4 (Kopf, Position, Farbe), Thread-Ende */
+#define URB_WRITE_VUE3       (0x80000000u | (13u << 25) | (1u << 19) | 7u)
 #define VFC_SRC 1u
 #define VFC_0   2u
 #define VFC_1F  3u
@@ -1400,17 +1408,33 @@ out:
 #define F_0_4   0x3ECCCCCDu
 #define F_0_6   0x3F19999Au
 #define F_0_8   0x3F4CCCCDu
+#define K3_PSCOL  0x000                        /* Kernel im Kernelbereich (C_KERN) */
+#define K3_PSINT  0x400
+#define K3_VS     0x800
 
-/* Ganzzahl (< 2^24) als float-Bitmuster */
-static uint32_t f32(uint32_t v)
+/* Festkomma Q16.16 (mit Vorzeichen) als float-Bitmuster */
+static uint32_t f32q(int32_t q)
 {
-    if (!v)
+    if (!q)
         return 0;
-    int e = 31 - __builtin_clz(v);
-    return (uint32_t)(127 + e) << 23 | ((v << (23 - e)) & 0x7FFFFF);
+    uint32_t s = q < 0 ? 0x80000000u : 0, m = q < 0 ? (uint32_t)-q : (uint32_t)q;
+    int e = 31 - __builtin_clz(m);
+    uint32_t mant = e >= 23 ? m >> (e - 23) : m << (23 - e);
+    return s | (uint32_t)(127 + e - 16) << 23 | (mant & 0x7FFFFF);
 }
 
-/* Pipeline-Statistik (je 64 Bit; zaehlt mit VF_STATISTICS, Clipper- und WM-Statistik) */
+static uint32_t f32(uint32_t v) { return f32q((int32_t)(v << 16)); } /* Ganzzahl < 32768 */
+
+/* sin(2 pi i / 64) in Q16 */
+static const int32_t sin64[64] = {
+    0, 6424, 12785, 19024, 25080, 30893, 36410, 41576, 46341, 50660, 54491, 57798, 60547, 62714, 64277, 65220,
+    65536, 65220, 64277, 62714, 60547, 57798, 54491, 50660, 46341, 41576, 36410, 30893, 25080, 19024, 12785, 6424,
+    0, -6424, -12785, -19024, -25080, -30893, -36410, -41576, -46341, -50660, -54491, -57798, -60547, -62714, -64277,
+    -65220, -65536, -65220, -64277, -62714, -60547, -57798, -54491, -50660, -46341, -41576, -36410, -30893, -25080,
+    -19024, -12785, -6424,
+};
+
+/* Pipeline-Statistik (je 64 Bit; zaehlt mit VF_STATISTICS, VS-, Clipper- und WM-Statistik) */
 static const struct {
     uint32_t    reg;
     const char *name;
@@ -1437,6 +1461,46 @@ static int asm_ps_color(uint32_t (*k)[4], uint32_t r, uint32_t g, uint32_t b, ui
     return n;
 }
 
+/* Pixel-Shader: Farbe (Attribut 0) interpolieren. Die Ebenen-Koeffizienten stehen ab r6 (je Komponente 4 floats:
+ * r6.0 R, r6.4 G, r7.0 B, r7.4 A), die Baryzentrik in r2-r5; pln wie im Kernel von IGT */
+static int asm_ps_interp(uint32_t (*k)[4])
+{
+    static const int reg[4] = {6, 6, 7, 7}, sub[4] = {0, 16, 0, 16};
+    int n = 0;
+    for (int c = 0; c < 4; c++)
+        eu_inst(k[n++], EU_PLN, 4, 0, eu_d(EU_F, 112 + 2 * c, 0), eu_r(EU_F, reg[c], sub[c], SCALAR),
+                eu_r(EU_F, 2, 0, 4, 3, 1));
+    eu_send(k[n++], 4, SFID_RC, eu_null(), 112, RT_WRITE_SIMD16);
+    return n;
+}
+
+/* Vertex-Shader (SIMD8, 8 Eckpunkte je Thread): Eingaben r2-r5 Position x, y, z, w und r6-r9 Farbe (je Register eine
+ * Komponente fuer 8 Eckpunkte). x' = m0 x + m1 y + m2, y' = m3 x + m4 y + m5 (Bildschirmkoordinaten), z 0, w 1.
+ * Ausgabe per URB-Write an die Handles aus r1: Kopf (4 x 0), Position, Farbe; Thread-Ende */
+static int asm_vs_affine(uint32_t (*k)[4], const uint32_t m[6])
+{
+    int n = 0;
+    eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 112, 0), eu_r(EU_UD, 1, 0, 4, 3, 1), eu_none());
+    k[n - 1][0] |= 1u << 9; /* NoMask: alle 8 Handles */
+    for (int i = 0; i < 4; i++)
+        eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 113 + i, 0), eu_imm(EU_UD, 0), eu_none());
+    EuOp x = eu_r(EU_F, 2, 0, 4, 3, 1), y = eu_r(EU_F, 3, 0, 4, 3, 1), t = eu_r(EU_F, 20, 0, 4, 3, 1);
+    for (int row = 0; row < 2; row++) {
+        int out = 117 + row;
+        EuOp o = eu_r(EU_F, out, 0, 4, 3, 1);
+        eu_inst(k[n++], EU_MUL, 3, 0, eu_d(EU_F, out, 0), x, eu_imm(EU_F, m[row * 3 + 0]));
+        eu_inst(k[n++], EU_MUL, 3, 0, eu_d(EU_F, 20, 0), y, eu_imm(EU_F, m[row * 3 + 1]));
+        eu_inst(k[n++], EU_ADD, 3, 0, eu_d(EU_F, out, 0), o, t);
+        eu_inst(k[n++], EU_ADD, 3, 0, eu_d(EU_F, out, 0), o, eu_imm(EU_F, m[row * 3 + 2]));
+    }
+    eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_F, 119, 0), eu_imm(EU_F, 0), eu_none());
+    eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_F, 120, 0), eu_imm(EU_F, F_1_0), eu_none());
+    for (int i = 0; i < 4; i++)
+        eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 121 + i, 0), eu_r(EU_UD, 6 + i, 0, 4, 3, 1), eu_none());
+    eu_send(k[n++], 3, SFID_URB, eu_null(), 112, URB_WRITE_VUE3);
+    return n;
+}
+
 /* Lage im Zustandsbereich (Surface- und Dynamic-State-Basis = C_STATE) */
 #define S3_BLEND   0x000   /* BLEND_STATE: alles 0 = nicht mischen, alle Kanaele schreiben */
 #define S3_CC      0x0C0   /* COLOR_CALC_STATE */
@@ -1445,32 +1509,34 @@ static int asm_ps_color(uint32_t (*k)[4], uint32_t r, uint32_t g, uint32_t b, ui
 #define S3_SCISSOR 0x180
 #define S3_BT      0x1C0   /* Binding Table des Pixel-Shaders: 0 = Render-Target */
 #define S3_RT      0x200   /* Surface State des Render-Targets */
-#define S3_VB      0x300   /* Vertex-Buffer: 3 Eckpunkte x, y, u, v (float) */
+#define S3_VB      0x300   /* Vertex-Buffer */
 
-/* Zustaende und Batch fuer ein Rechteck [x0, x1) x [y0, y1) im Render-Target (rt_gtt, w x h Pixel, pitch Bytes) */
-static uint32_t batch_3d(uint32_t rt_gtt, uint32_t w, uint32_t h, uint32_t pitch, uint32_t x0, uint32_t y0, uint32_t x1,
-                         uint32_t y1)
+typedef struct {
+    uint32_t        rt_gtt, w, h, pitch; /* Render-Target (Pixel, Zeilenlaenge in Bytes) */
+    int             vs;                  /* 1: Vertex-Shader, Eckpunkte x, y, r, g, b, a; 0: aus, x, y, u, v */
+    uint32_t        prim, nvert;
+    uint32_t        ps;                  /* Pixel-Shader im Kernelbereich */
+    const uint32_t *verts;               /* float-Bitmuster, 6 bzw. 4 je Eckpunkt */
+} Draw3d;
+
+/* Zustaende und Batch fuer einen Aufruf */
+static uint32_t batch_3d(const Draw3d *d)
 {
     uint8_t *st = core_ptr(C_STATE);
     memset(st, 0, 4096);
     uint32_t *ccvp = (uint32_t *)(st + S3_CCVP), *sfvp = (uint32_t *)(st + S3_SFVP);
-    ccvp[0] = 0;
     ccvp[1] = F_1_0;
-    sfvp[8] = 0; /* Guardband (Clipper ist aus) */
-    sfvp[9] = F_1_0;
-    sfvp[10] = 0;
+    sfvp[9] = F_1_0; /* Guardband (Clipper ist aus) */
     sfvp[11] = F_1_0;
     *(uint32_t *)(st + S3_BT) = S3_RT;
     uint32_t *rt = (uint32_t *)(st + S3_RT);
     rt[0] = (1u << 29) | (SURF_B8G8R8A8_UNORM << 18) | (1u << 16) | (1u << 14); /* 2D, linear */
-    rt[2] = (w - 1) | ((h - 1) << 16);
-    rt[3] = pitch - 1;
+    rt[2] = (d->w - 1) | ((d->h - 1) << 16);
+    rt[3] = d->pitch - 1;
     rt[7] = (4u << 25) | (5u << 22) | (6u << 19) | (7u << 16);
-    rt[8] = rt_gtt;
-    /* RECTLIST: unten rechts, unten links, oben links */
-    uint32_t *vb = (uint32_t *)(st + S3_VB);
-    const uint32_t v[3][4] = {{f32(x1), f32(y1), F_1_0, F_1_0}, {f32(x0), f32(y1), 0, F_1_0}, {f32(x0), f32(y0), 0, 0}};
-    memcpy(vb, v, sizeof(v));
+    rt[8] = d->rt_gtt;
+    uint32_t vsize = d->vs ? 24 : 16;
+    memcpy(st + S3_VB, d->verts, (uint64_t)d->nvert * vsize);
 
     uint32_t *b = core_ptr(C_BATCH), k = 0, base = core_gtt(C_STATE);
     b[k++] = PIPE_CONTROL; /* vor dem Wechsel der Pipeline: alles fertig, Caches leer */
@@ -1498,7 +1564,7 @@ static uint32_t batch_3d(uint32_t rt_gtt, uint32_t w, uint32_t h, uint32_t pitch
     b[k++] = 0;
     b[k++] = 0;
     b[k++] = 0;
-    b[k++] = core_gtt(C_KERN) | 1;   /* Instruction: der Pixel-Shader */
+    b[k++] = core_gtt(C_KERN) | 1;   /* Instruction: die Shader */
     b[k++] = 0;
     b[k++] = 0xFFFFF000u | 1;
     b[k++] = (1u << 12) | 1;
@@ -1525,7 +1591,7 @@ static uint32_t batch_3d(uint32_t rt_gtt, uint32_t w, uint32_t h, uint32_t pitch
     b[k++] = 0;
     b[k++] = S3D(0x18);              /* SAMPLE_MASK */
     b[k++] = 1;
-    /* nicht benutzte Stufen aus: HiZ-Operation, Konstanten, Binding Tables, Sampler, VS, HS, TE, DS, GS */
+    /* nicht benutzte Stufen aus: HiZ-Operation, Konstanten, Binding Tables, Sampler, HS, TE, DS, GS */
     b[k++] = S3D(0x52) | 3;          /* WM_HZ_OP */
     for (int i = 0; i < 4; i++)
         b[k++] = 0;
@@ -1543,8 +1609,22 @@ static uint32_t batch_3d(uint32_t rt_gtt, uint32_t w, uint32_t h, uint32_t pitch
         b[k++] = S3D(s);
         b[k++] = 0;
     }
-    const uint32_t stage[5][2] = {{0x10, 9}, {0x1B, 9}, {0x1C, 4}, {0x1D, 11}, {0x11, 10}}; /* VS, HS, TE, DS, GS */
-    for (int s = 0; s < 5; s++) {
+    b[k++] = S3D(0x10) | 7;          /* VS */
+    if (d->vs) { /* Kernel, Eingaben ab r2 (1 x 256 Bit: Position und Farbe), 64 Threads, Statistik, SIMD8, an */
+        b[k++] = K3_VS;
+        b[k++] = 0;
+        b[k++] = 0;
+        b[k++] = 0;
+        b[k++] = 0;
+        b[k++] = (2u << 20) | (1u << 11) | (0u << 4);
+        b[k++] = (63u << 23) | (1u << 10) | (1u << 2) | 1u;
+        b[k++] = (1u << 21) | (1u << 16); /* Ausgabe fuer SBE: ab 256 Bit (nach Kopf und Position), 1 x 256 Bit */
+    } else {
+        for (int i = 0; i < 8; i++)
+            b[k++] = 0;
+    }
+    const uint32_t stage[4][2] = {{0x1B, 9}, {0x1C, 4}, {0x1D, 11}, {0x11, 10}}; /* HS, TE, DS, GS */
+    for (int s = 0; s < 4; s++) {
         b[k++] = S3D(stage[s][0]) | (stage[s][1] - 2);
         for (uint32_t i = 1; i < stage[s][1]; i++)
             b[k++] = 0;
@@ -1556,7 +1636,7 @@ static uint32_t batch_3d(uint32_t rt_gtt, uint32_t w, uint32_t h, uint32_t pitch
     b[k++] = 1u << 10;
     b[k++] = 0;
     b[k++] = 0;
-    b[k++] = S3D(0x1F) | 4;          /* SBE: 1 Attribut (u, v) aus dem VUE ab 256 Bit */
+    b[k++] = S3D(0x1F) | 4;          /* SBE: 1 Attribut aus dem VUE ab 256 Bit */
     b[k++] = (1u << 22) | (1u << 29) | (1u << 28) | (1u << 11) | (1u << 5);
     b[k++] = 0;
     b[k++] = 0;
@@ -1581,8 +1661,8 @@ static uint32_t batch_3d(uint32_t rt_gtt, uint32_t w, uint32_t h, uint32_t pitch
     b[k++] = S3D(0x17) | 9;          /* CONSTANT_PS */
     for (int i = 0; i < 10; i++)
         b[k++] = 0;
-    b[k++] = S3D(0x20) | 10;         /* PS: Kernel 0, 1 Binding-Table-Eintrag, 64 Threads, SIMD16, Payload ab r6 */
-    b[k++] = 0;
+    b[k++] = S3D(0x20) | 10;         /* PS: 1 Binding-Table-Eintrag, 64 Threads, SIMD16, Koeffizienten ab r6 */
+    b[k++] = d->ps;
     b[k++] = 0;
     b[k++] = 1u << 18;
     b[k++] = 0;
@@ -1607,7 +1687,7 @@ static uint32_t batch_3d(uint32_t rt_gtt, uint32_t w, uint32_t h, uint32_t pitch
     b[k++] = 0;
     b[k++] = 0;
     b[k++] = 0;
-    b[k++] = S3D(0x05) | 6;          /* DEPTH_BUFFER: keiner (SURFTYPE_NULL) */
+    b[k++] = S3D(0x05) | 6;          /* DEPTH_BUFFER: keiner */
     b[k++] = (7u << 29) | (1u << 18); /* SURFTYPE_NULL, Format D32_FLOAT (wie IGT) */
     for (int i = 0; i < 6; i++)
         b[k++] = 0;
@@ -1622,21 +1702,32 @@ static uint32_t batch_3d(uint32_t rt_gtt, uint32_t w, uint32_t h, uint32_t pitch
     b[k++] = 0;
     b[k++] = DRAWING_RECTANGLE;
     b[k++] = 0;
-    b[k++] = ((h - 1) << 16) | (w - 1);
+    b[k++] = ((d->h - 1) << 16) | (d->w - 1);
     b[k++] = 0;
-    b[k++] = S3D(0x08) | 3;          /* VERTEX_BUFFERS: Puffer 0, 16 Bytes je Eckpunkt */
-    b[k++] = (0u << 26) | (1u << 14) | 16;
+    b[k++] = S3D(0x08) | 3;          /* VERTEX_BUFFERS: Puffer 0 */
+    b[k++] = (0u << 26) | (1u << 14) | vsize;
     b[k++] = base + S3_VB;
     b[k++] = 0;
-    b[k++] = 3 * 16;
-    b[k++] = S3D(0x09) | 5;          /* VERTEX_ELEMENTS: VUE = 4 x 0 (Kopf), Position x, y, 0, 1, Attribut u, v, 0, 1 */
-    b[k++] = (1u << 25) | (SURF_RGBA32_FLOAT << 16) | 0;
-    b[k++] = (VFC_0 << 28) | (VFC_0 << 24) | (VFC_0 << 20) | (VFC_0 << 16);
-    b[k++] = (1u << 25) | (SURF_RG32_FLOAT << 16) | 0;
-    b[k++] = (VFC_SRC << 28) | (VFC_SRC << 24) | (VFC_0 << 20) | (VFC_1F << 16);
-    b[k++] = (1u << 25) | (SURF_RG32_FLOAT << 16) | 8;
-    b[k++] = (VFC_SRC << 28) | (VFC_SRC << 24) | (VFC_0 << 20) | (VFC_1F << 16);
-    for (uint32_t e = 0; e < 3; e++) { /* VF_INSTANCING: nicht instanziert */
+    b[k++] = d->nvert * vsize;
+    uint32_t nelem;
+    if (d->vs) { /* Eingaben des Vertex-Shaders: Position x, y, 0, 1 und Farbe r, g, b, a */
+        nelem = 2;
+        b[k++] = S3D(0x09) | (2 * nelem - 1);
+        b[k++] = (1u << 25) | (SURF_RG32_FLOAT << 16) | 0;
+        b[k++] = (VFC_SRC << 28) | (VFC_SRC << 24) | (VFC_0 << 20) | (VFC_1F << 16);
+        b[k++] = (1u << 25) | (SURF_RGBA32_FLOAT << 16) | 8;
+        b[k++] = (VFC_SRC << 28) | (VFC_SRC << 24) | (VFC_SRC << 20) | (VFC_SRC << 16);
+    } else { /* ohne Vertex-Shader ist das schon das VUE: 4 x 0 (Kopf), Position x, y, 0, 1, Attribut u, v, 0, 1 */
+        nelem = 3;
+        b[k++] = S3D(0x09) | (2 * nelem - 1);
+        b[k++] = (1u << 25) | (SURF_RGBA32_FLOAT << 16) | 0;
+        b[k++] = (VFC_0 << 28) | (VFC_0 << 24) | (VFC_0 << 20) | (VFC_0 << 16);
+        b[k++] = (1u << 25) | (SURF_RG32_FLOAT << 16) | 0;
+        b[k++] = (VFC_SRC << 28) | (VFC_SRC << 24) | (VFC_0 << 20) | (VFC_1F << 16);
+        b[k++] = (1u << 25) | (SURF_RG32_FLOAT << 16) | 8;
+        b[k++] = (VFC_SRC << 28) | (VFC_SRC << 24) | (VFC_0 << 20) | (VFC_1F << 16);
+    }
+    for (uint32_t e = 0; e < nelem; e++) { /* VF_INSTANCING: nicht instanziert */
         b[k++] = S3D(0x49) | 1;
         b[k++] = e;
         b[k++] = 0;
@@ -1646,10 +1737,10 @@ static uint32_t batch_3d(uint32_t rt_gtt, uint32_t w, uint32_t h, uint32_t pitch
     b[k++] = S3D(0x0C);              /* VF: kein Cut-Index */
     b[k++] = 0;
     b[k++] = S3D(0x4B);              /* VF_TOPOLOGY */
-    b[k++] = PRIM_RECTLIST;
-    b[k++] = PRIMITIVE_3D;           /* 3 Eckpunkte, 1 Instanz */
+    b[k++] = d->prim;
+    b[k++] = PRIMITIVE_3D;           /* nvert Eckpunkte, 1 Instanz */
     b[k++] = 0;
-    b[k++] = 3;
+    b[k++] = d->nvert;
     b[k++] = 0;
     b[k++] = 1;
     b[k++] = 0;
@@ -1667,15 +1758,10 @@ static uint32_t batch_3d(uint32_t rt_gtt, uint32_t w, uint32_t h, uint32_t pitch
     return k;
 }
 
-/* Kernel laden, Batch ausfuehren, Statistik vorher/nachher; 0 = fertig */
-static int draw_3d(const char *what, uint32_t r, uint32_t g, uint32_t b, uint32_t a, uint32_t rt_gtt, uint32_t w,
-                   uint32_t h, uint32_t pitch, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1, int stats)
+/* Batch ausfuehren, Statistik vorher/nachher; 0 = fertig. stat: Werte der Statistik zurueck (oder 0) */
+static int draw_3d(const char *what, const Draw3d *d, int log, uint64_t *stat)
 {
-    uint32_t (*kern)[4] = core_ptr(C_KERN);
-    memset(kern, 0, 2 * 4096);
-    int nk = asm_ps_color(kern, r, g, b, a);
-    igd_clflush((uint64_t)kern, (uint64_t)nk * 16);
-    batch_3d(rt_gtt, w, h, pitch, x0, y0, x1, y1);
+    batch_3d(d);
     uint64_t before[NSTAT3D];
     for (int i = 0; i < NSTAT3D; i++)
         before[i] = rd64(stat3d[i].reg);
@@ -1685,30 +1771,75 @@ static int draw_3d(const char *what, uint32_t r, uint32_t g, uint32_t b, uint32_
     emit(0);
     emit(MI_NOOP);
     uint64_t us = 0;
-    int rc = run(what, 1000, &us);
-    if (rc != 0) /* ACTHD - Batch-Anfang = wo die Engine stehen blieb (Dword = Abstand / 4) */
-        kprintf("igd3d: Batch ab %#x, Zustaende ab %#x, Pixel-Shader ab %#x\n", core_gtt(C_BATCH), core_gtt(C_STATE),
+    int rc = log ? run(what, 1000, &us) : (submit(), wait_seqno(seqno, 1000) ? 0 : -1);
+    if (rc != 0) { /* ACTHD - Batch-Anfang = wo die Engine stehen blieb (Dword = Abstand / 4) */
+        if (!log) {
+            kprintf("igd3d: %s: KEINE Rueckmeldung\n", what);
+            dump("Zustand");
+            ring_stop();
+            engine_reset();
+        }
+        kprintf("igd3d: Batch ab %#x, Zustaende ab %#x, Shader ab %#x\n", core_gtt(C_BATCH), core_gtt(C_STATE),
                 core_gtt(C_KERN));
-    if (stats) {
+    }
+    for (int i = 0; i < NSTAT3D; i++) {
+        uint64_t v = rd64(stat3d[i].reg) - before[i];
+        if (stat)
+            stat[i] = v;
+    }
+    if (log && stat) {
         kprintf("igd3d: Pipeline-Statistik:");
         for (int i = 0; i < NSTAT3D; i++)
-            kprintf(" %s %lu%s", stat3d[i].name, (unsigned long)(rd64(stat3d[i].reg) - before[i]),
-                    i + 1 < NSTAT3D ? "," : "\n");
+            kprintf(" %s %lu%s", stat3d[i].name, (unsigned long)stat[i], i + 1 < NSTAT3D ? "," : "\n");
     }
     return rc;
 }
 
+/* Kernel in den Kernelbereich schreiben (und aus dem CPU-Cache) */
+static void load_kernel(uint32_t off, const uint32_t (*k)[4], int n)
+{
+    uint8_t *dst = (uint8_t *)core_ptr(C_KERN) + off;
+    memset(dst, 0, 0x400);
+    memcpy(dst, k, (uint64_t)n * 16);
+    igd_clflush((uint64_t)dst, 0x400);
+}
+
+/* Drehung um a (0-63 = 0-360 Grad), Massstab s (Pixel je Einheit), Mittelpunkt (cx, cy): 2x3-Matrix */
+static void rot_matrix(uint32_t m[6], int a, int32_t s, int32_t cx, int32_t cy)
+{
+    int32_t c = sin64[(a + 16) & 63], sn = sin64[a & 63];
+    m[0] = f32q((int32_t)(((int64_t)c * s) >> 0));      /* s cos (Q16: c ist Q16, s ganzzahlig) */
+    m[1] = f32q((int32_t)(((int64_t)-sn * s) >> 0));
+    m[2] = f32q(cx << 16);
+    m[3] = f32q((int32_t)(((int64_t)sn * s) >> 0));
+    m[4] = f32q((int32_t)(((int64_t)c * s) >> 0));
+    m[5] = f32q(cy << 16);
+}
+
+/* Dreieck mit roter, gruener, blauer Ecke um den Ursprung (Einheitskreis): Spitze oben */
+static void tri_verts(uint32_t v[3][6])
+{
+    static const uint32_t pos[3][2] = {{0, 0xBF800000u}, {0x3F5DB3D7u, 0x3F000000u}, {0xBF5DB3D7u, 0x3F000000u}};
+    for (int i = 0; i < 3; i++) {
+        v[i][0] = pos[i][0];
+        v[i][1] = pos[i][1];
+        for (int c = 0; c < 3; c++)
+            v[i][2 + c] = c == i ? F_1_0 : 0;
+        v[i][5] = F_1_0;
+    }
+}
+
 static int test_3d(void)
 {
-    int pre = igd_preflight("Stufe 7 - 3D-Pipeline: ein Rechteck");
+    int pre = igd_preflight("Stufe 7 - 3D-Pipeline: Rechteck, Dreieck mit Vertex-Shader");
     if (pre)
         return pre;
     int rc = core_setup();
     if (rc)
         return rc;
-    enum { TW = 256, TH = 64, TPAGES = TW * TH * 4 / 4096 };
+    enum { TW = 256, TH = 256, TPAGES = TW * TH * 4 / 4096 };
     uint32_t base = core_base + 0x40;
-    uint64_t saved[TPAGES];
+    static uint64_t saved[TPAGES];
     if ((rc = igd_ggtt_claim(base, TPAGES, saved)) != 0)
         return rc;
     uint64_t mem = pmm_alloc_frames(TPAGES);
@@ -1724,6 +1855,7 @@ static int test_3d(void)
         px[i] = 0x11111111u;
     igd_clflush(mem, TPAGES * 4096);
 
+    static uint32_t kbuf[64][4];
     if (!igd_forcewake_get()) {
         kprintf("igd3d: Forcewake nicht bestaetigt\n");
         rc = -9;
@@ -1739,60 +1871,85 @@ static int test_3d(void)
         rc = -10;
         goto out_ring;
     }
+    load_kernel(K3_PSINT, (const uint32_t (*)[4])kbuf, asm_ps_interp(kbuf));
+    uint64_t stat[NSTAT3D];
 
-    /* 1. Rechteck [16, 176) x [8, 40) in Rosa-Rot (R 1.0, G 0.2, B 0.6, A 1.0) auf eine Testflaeche 256 x 64 */
+    /* 1. Rechteck [16, 176) x [8, 40) in Rosa-Rot (R 1.0, G 0.2, B 0.6, A 1.0), ohne Vertex-Shader */
     const uint32_t X0 = 16, Y0 = 8, X1 = 176, Y1 = 40, want = 0xFFFF3399u;
-    if (draw_3d("1. Rechteck ueber die 3D-Pipeline", F_1_0, F_0_2, F_0_6, F_1_0, base << 12, TW, TH, TW * 4, X0, Y0, X1, Y1,
-                1) != 0) {
+    load_kernel(K3_PSCOL, (const uint32_t (*)[4])kbuf, asm_ps_color(kbuf, F_1_0, F_0_2, F_0_6, F_1_0));
+    const uint32_t rv[3][4] = {{f32(X1), f32(Y1), F_1_0, F_1_0}, {f32(X0), f32(Y1), 0, F_1_0}, {f32(X0), f32(Y0), 0, 0}};
+    Draw3d r1 = {base << 12, TW, TH, TW * 4, 0, PRIM_RECTLIST, 3, K3_PSCOL, &rv[0][0]};
+    if (draw_3d("1. Rechteck ueber die 3D-Pipeline", &r1, 1, stat) != 0) {
         rc = -30;
         goto out_ring;
     }
     igd_clflush(mem, TPAGES * 4096);
-    int inside = 0, outside = 0, first = -1;
+    int bad = 0;
     for (uint32_t y = 0; y < TH; y++)
-        for (uint32_t x = 0; x < TW; x++) {
-            int in = x >= X0 && x < X1 && y >= Y0 && y < Y1;
-            uint32_t v = px[y * TW + x];
-            if (in ? v != want : v != 0x11111111u) {
-                if (first < 0)
-                    first = (int)(y * TW + x);
-                if (in)
-                    inside++;
-                else
-                    outside++;
-            }
-        }
-    kprintf("igd3d: Rechteck %u x %u: innen %d von %u Pixeln falsch, aussen %d veraendert", X1 - X0, Y1 - Y0, inside,
-            (X1 - X0) * (Y1 - Y0), outside);
-    if (first >= 0)
-        kprintf(" (erstes bei (%d, %d): %#x, erwartet %#x)", first % TW, first / TW, px[first],
-                first % TW >= (int)X0 && first % TW < (int)X1 && first / TW >= (int)Y0 && first / TW < (int)Y1 ? want
-                                                                                                        : 0x11111111u);
-    kprintf("\n");
-    if (inside || outside) {
+        for (uint32_t x = 0; x < TW; x++)
+            bad += px[y * TW + x] != (x >= X0 && x < X1 && y >= Y0 && y < Y1 ? want : 0x11111111u);
+    kprintf("igd3d: 1. Rechteck %u x %u: %d Pixel falsch\n", X1 - X0, Y1 - Y0, bad);
+    if (bad) {
         rc = -31;
         goto out_ring;
     }
 
-    /* 2. Sichtbar (nur an der Konsole): drei Rechtecke in Rot, Gruen, Blau direkt in den Bildspeicher, 4 s */
-    if (!console_gfx_active() && igd_flip_ready && igd_scr_w >= 1200 && igd_scr_h >= 500 && !(igd_scr_stride & 63)) {
-        static const uint32_t col[3][3] = {{F_1_0, F_0_2, F_0_2}, {F_0_2, F_0_8, F_0_4}, {F_0_2, F_0_4, F_1_0}};
-        uint32_t rw = 320, rh = 360, gap = 40, sx = (igd_scr_w - 3 * rw - 2 * gap) / 2, sy = (igd_scr_h - rh) / 2;
-        for (int i = 0; i < 3 && rc == 0; i++) {
-            uint32_t x = sx + (uint32_t)i * (rw + gap);
-            if (draw_3d("2. Rechteck auf dem Bildschirm", col[i][0], col[i][1], col[i][2], F_1_0, igd_surf_a, igd_scr_w,
-                        igd_scr_h, igd_scr_stride, x, sy, x + rw, sy + rh, i == 0) != 0)
-                rc = -32;
+    /* 2. Dreieck mit Vertex-Shader: Ecken rot (oben), gruen (rechts unten), blau (links unten), Massstab 100,
+     *    Mittelpunkt (128, 128) -> Ecken (128, 28), (214.6, 178), (41.4, 178), Flaeche etwa 12990 Pixel */
+    for (uint32_t i = 0; i < TW * TH; i++)
+        px[i] = 0x11111111u;
+    igd_clflush(mem, TPAGES * 4096);
+    uint32_t m[6], tv[3][6];
+    rot_matrix(m, 0, 100, 128, 128);
+    tri_verts(tv);
+    load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_affine(kbuf, m));
+    Draw3d t1 = {base << 12, TW, TH, TW * 4, 1, PRIM_TRILIST, 3, K3_PSINT, &tv[0][0]};
+    if (draw_3d("2. Dreieck mit Vertex-Shader", &t1, 1, stat) != 0) {
+        rc = -33;
+        goto out_ring;
+    }
+    igd_clflush(mem, TPAGES * 4096);
+    uint32_t written = 0;
+    for (uint32_t i = 0; i < TW * TH; i++)
+        written += px[i] != 0x11111111u;
+    uint32_t c_mid = px[128 * TW + 128], c_r = px[40 * TW + 128], c_g = px[172 * TW + 200], c_b = px[172 * TW + 56];
+    kprintf("igd3d: 2. Dreieck: %u Pixel gezeichnet (erwartet etwa 12990), Mitte %#x, oben %#x, rechts %#x, links %#x\n",
+            written, c_mid, c_r, c_g, c_b);
+    int mr = (int)(c_mid >> 16 & 0xFF), mg = (int)(c_mid >> 8 & 0xFF), mb = (int)(c_mid & 0xFF);
+    int ok = written > 12000 && written < 14000 && mr > 70 && mr < 100 && mg > 70 && mg < 100 && mb > 70 && mb < 100 &&
+             (c_r >> 16 & 0xFF) > 200 && (c_g >> 8 & 0xFF) > 180 && (c_b & 0xFF) > 180 && px[0] == 0x11111111u &&
+             px[TW * TH - 1] == 0x11111111u;
+    kprintf("igd3d: 2. Dreieck %s\n", ok ? "stimmt (Flaeche, Farbverlauf, Ecken)" : "FALSCH");
+    if (!ok) {
+        rc = -34;
+        goto out_ring;
+    }
+
+    /* 3. Sichtbar (nur an der Konsole): sich drehendes Dreieck, 128 Bilder */
+    if (!console_gfx_active() && igd_flip_ready && igd_scr_w >= 800 && igd_scr_h >= 600 && !(igd_scr_stride & 63)) {
+        uint32_t cx = igd_scr_w / 2, cy = igd_scr_h / 2, r = (igd_scr_h * 2 / 5) & ~7u;
+        load_kernel(K3_PSCOL, (const uint32_t (*)[4])kbuf, asm_ps_color(kbuf, F_0_2, F_0_2, F_0_2, F_1_0));
+        const uint32_t bx0 = cx - r - 8, by0 = cy - r - 8, bx1 = cx + r + 8, by1 = cy + r + 8;
+        const uint32_t bg[3][4] = {{f32(bx1), f32(by1), 0, 0}, {f32(bx0), f32(by1), 0, 0}, {f32(bx0), f32(by0), 0, 0}};
+        Draw3d clear = {igd_surf_a, igd_scr_w, igd_scr_h, igd_scr_stride, 0, PRIM_RECTLIST, 3, K3_PSCOL, &bg[0][0]};
+        Draw3d tri = {igd_surf_a, igd_scr_w, igd_scr_h, igd_scr_stride, 1, PRIM_TRILIST, 3, K3_PSINT, &tv[0][0]};
+        uint64_t t0 = time_us();
+        for (int f = 0; f < 128 && rc == 0; f++) {
+            rot_matrix(m, f, (int32_t)r, (int32_t)cx, (int32_t)cy);
+            load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_affine(kbuf, m));
+            if (draw_3d("3. Hintergrund", &clear, 0, 0) != 0 || draw_3d("3. Dreieck", &tri, 0, 0) != 0)
+                rc = -35;
+            thread_sleep_ms(16);
         }
         if (rc == 0)
-            kprintf("igd3d: drei Rechtecke ueber die 3D-Pipeline gezeichnet (4 s sichtbar)\n");
-        thread_sleep_ms(4000);
+            kprintf("igd3d: 3. drehendes Dreieck: 128 Bilder in %lu ms\n", (unsigned long)((time_us() - t0) / 1000));
+        thread_sleep_ms(1000);
         console_repaint();
     } else {
         kprintf("igd3d: sichtbarer Teil nur an der Konsole (ohne Desktop)\n");
     }
     if (rc == 0)
-        kprintf("igd3d: die 3D-Pipeline zeichnet\n");
+        kprintf("igd3d: Vertex-Shader, Rasterizer und Pixel-Shader arbeiten\n");
 
 out_ring:
     ring_stop();

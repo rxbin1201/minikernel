@@ -100,7 +100,10 @@ In der Shell: `burn 5000 & burn 5000 & cpus` zeigt zwei ausgelastete CPUs.
   rendercopy fuer Gen9 - Vertex-Buffer mit drei Eckpunkten (RECTLIST in Bildschirmkoordinaten), Vertex-Shader aus,
   Clipper durchlassen, Rasterizer ohne Culling, Pixel-Shader (SIMD16, eigener Assembler), der eine feste Farbe per
   Render-Target-Write schreibt. Die CPU prueft die Testflaeche, die Pipeline-Statistik (Eckpunkte, Clipper,
-  Pixel-Shader) zeigt, wie weit die GPU kam; an der Konsole erscheinen drei farbige Rechtecke
+  Pixel-Shader) zeigt, wie weit die GPU kam. Danach ein Dreieck mit Vertex-Shader (SIMD8: Position mal 2x3-Matrix,
+  Ausgabe per URB-Write: Kopf, Position, Farbe) und Pixel-Shader, der die Farbe der Ecken interpoliert (`pln`); die
+  CPU prueft Flaeche, Mitte und Ecken. An der Konsole dreht sich danach ein Dreieck mit Farbverlauf (128 Bilder;
+  Sinus aus einer Tabelle, Festkomma in float-Bitmuster umgerechnet, der Kernel hat keine FPU)
 - **Zusammensetzen auf der GPU** (`igd_comp.c`, `SYS_GPUCOMP`; Desktop: `gpu.c`): Bildschirmbild, Hintergrund,
   Fensterbilder und Schatten liegen in geteiltem Speicher, den der Kernel fest in die GGTT einblendet (eigener Bereich,
   Referenz auf das shm-Objekt, solange angemeldet). Je Bild schickt der Desktop alle geaenderten Rechtecke als eine
