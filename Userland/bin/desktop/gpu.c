@@ -7,6 +7,7 @@
 #include "desktop.h"
 
 int gpu_mode;
+FrameProf prof;
 
 #define GMAX 96
 static struct {
@@ -160,11 +161,13 @@ Surface *anim_temps(void)
     if (tmp_failed)
         return 0;
     int b8 = shadow_b8();
+    s64 t0 = sys_time_us();
     int ok = gsurf_new(&tmp[0], gsurf_width(W + 16), H + 16) == 0 && gsurf_new(&tmp[1], gsurf_width(W + 16), H + 16) == 0 &&
              gsurf_new(&tmp[2], gsurf_width(W + 2 * SHADOW + 16), 2 * b8) == 0 &&
              gsurf_new(&tmp[3], gsurf_width(2 * b8), H + 16) == 0;
     for (int i = 0; ok && i < 4; i++)
         ok = gsurf_handle(&tmp[i]) != 0;
+    prof.alloc += (unsigned)(sys_time_us() - t0);
     if (!ok) {
         for (int i = 0; i < 4; i++)
             gsurf_free(&tmp[i]);
@@ -237,10 +240,12 @@ int shadow_ready(Win *w, int alpha)
         return 0;
     }
     /* oben ab Zeile 0, unten ab Zeile b8; links ab Spalte 0, rechts ab Spalte b8 */
+    s64 t0 = sys_time_us();
     gfx_shadow_image(&w->shd_tb, 0, 0, w->w + 2 * S, band, S, S, w->w, w->h, R, S, alpha);
     gfx_shadow_image(&w->shd_tb, 0, b8, w->w + 2 * S, band, S, b8 + R - w->h, w->w, w->h, R, S, alpha);
     gfx_shadow_image(&w->shd_lr, 0, 0, band, lrh, S, -R, w->w, w->h, R, S, alpha);
     gfx_shadow_image(&w->shd_lr, b8, 0, band, lrh, b8 + R - w->w, -R, w->w, w->h, R, S, alpha);
+    prof.shadow += (unsigned)(sys_time_us() - t0);
     w->shd_w = w->w;
     w->shd_h = w->h;
     w->shd_a = alpha;

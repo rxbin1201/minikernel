@@ -152,6 +152,7 @@ void draw_all(void);
 /* ---------- gpu.c: Zusammensetzen auf der GPU ---------- */
 
 extern int gpu_mode;   /* 0 = CPU, 1 = GPU, 2 = CPU-Ersatz im Kernel (gpucomp=soft) */
+extern FrameProf prof; /* Aufschluesselung des laufenden Bildes (an den Kernel: igdtest comp) */
 int  gpu_init(void);   /* nach gfx_open: Bildschirmbild in geteilten Speicher */
 void gpu_quit(void);   /* vor gfx_close */
 int  gsurf_new(Surface *s, int w, int h); /* Flaeche, die die GPU benutzen kann (sonst wie surface_new) */

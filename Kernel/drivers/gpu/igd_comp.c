@@ -63,6 +63,16 @@ static struct {
     uint64_t jobs, ops, us, max_us, busy, errors;
     uint64_t n[3], px[3], t[3]; /* Meldungen des Desktops: 0 CPU, 1 GPU (abgewartet), 2 GPU zeigt selbst an */
 } st;
+/* Aufschluesselung je Bild vom Desktop (Systemaufruf 7, gleiches Layout in Userland/include/user.h) */
+typedef struct {
+    uint32_t total, wait, render, ov, ov_px, shadow, alloc, queue, submit, path;
+} FrameProf;
+enum { PROF_FIELDS = 9, HIST = 64, HIST_US = 250 }; /* Verteilung der Gesamtzeit in Schritten von 250 us */
+static struct {
+    uint64_t  n, sum[PROF_FIELDS];
+    FrameProf max;
+    uint32_t  hist[HIST + 1];
+} prof;
 static CompSurf scanout;     /* angezeigter Puffer als Ziel von "anzeigen" (gilt fuer eine Auftragsliste) */
 static int      async_jobs;  /* abgeschickte, noch nicht abgewartete Auftragslisten */
 
@@ -632,6 +642,7 @@ static void apply_cache(int m)
         return;
     }
     memset(&st, 0, sizeof(st));
+    memset(&prof, 0, sizeof(prof));
     kprintf("igdcomp: jetzt %s (Selbsttest ok), Messwerte zurueckgesetzt\n", cache_names[m]);
 }
 
@@ -732,6 +743,20 @@ int64_t igd_comp_sys(uint32_t pid, uint64_t op, uint64_t a, uint64_t b)
         surf_drop(s);
         return 0;
     }
+    if (op == 7) { /* Aufschluesselung eines Bildes */
+        FrameProf f;
+        if (!process_user_range_ok(process_current(), a, sizeof(f), 0))
+            return ERR_FAULT;
+        memcpy(&f, (const void *)a, sizeof(f));
+        const uint32_t *v = &f.total;
+        prof.n++;
+        for (int i = 0; i < PROF_FIELDS; i++)
+            prof.sum[i] += v[i];
+        if (f.total >= prof.max.total)
+            prof.max = f;
+        prof.hist[f.total / HIST_US < HIST ? f.total / HIST_US : HIST]++;
+        return 0;
+    }
     if (op == 5) { /* auf die zuletzt abgeschickte Liste warten */
         uint64_t us = 0;
         int rc = mode == 1 ? igd_rcs_comp_wait(&us) : 0;
@@ -820,6 +845,38 @@ static uint64_t per_mpx(uint64_t us, uint64_t px)
     return px ? us * 1000000 / px : 0;
 }
 
+/* Gesamtzeit, unter der der Anteil q (Prozent) der Bilder liegt (obere Grenze des Schritts) */
+static uint32_t prof_quantile(int q)
+{
+    uint64_t want = (prof.n * (uint64_t)q + 99) / 100, seen = 0;
+    for (int i = 0; i <= HIST; i++) {
+        seen += prof.hist[i];
+        if (seen >= want)
+            return (uint32_t)(i + 1) * HIST_US;
+    }
+    return (HIST + 1) * HIST_US;
+}
+
+static void prof_report(void)
+{
+    if (!prof.n)
+        return;
+    uint64_t n = prof.n;
+    kprintf("igdcomp: CPU-Zeit des Desktops je Bild (%lu Bilder): Haelfte unter %u us, 90%% unter %u us, Schnitt %lu us\n",
+            (unsigned long)n, prof_quantile(50), prof_quantile(90), (unsigned long)(prof.sum[0] / n));
+    kprintf("igdcomp:   Schnitt: warten %lu, Fenster zeichnen %lu, Ebene %lu (%lu px), Schatten %lu, Anlegen %lu, "
+            "Auftraege %lu, abschicken %lu us\n",
+            (unsigned long)(prof.sum[1] / n), (unsigned long)(prof.sum[2] / n), (unsigned long)(prof.sum[3] / n),
+            (unsigned long)(prof.sum[4] / n), (unsigned long)(prof.sum[5] / n), (unsigned long)(prof.sum[6] / n),
+            (unsigned long)(prof.sum[7] / n), (unsigned long)(prof.sum[8] / n));
+    const FrameProf *m = &prof.max;
+    static const char *const paths[3] = {"CPU", "GPU abgewartet", "GPU ohne Warten"};
+    kprintf("igdcomp:   langsamstes Bild (%s): %u us = warten %u, Fenster zeichnen %u, Ebene %u (%u px), Schatten %u, "
+            "Anlegen %u, Auftraege %u, abschicken %u\n",
+            paths[m->path < 3 ? m->path : 0], m->total, m->wait, m->render, m->ov, m->ov_px, m->shadow, m->alloc,
+            m->queue, m->submit);
+}
+
 void igd_comp_report(void)
 {
     static const char *names[] = {"keins", "GPU", "CPU-Ersatz (gpucomp=soft)"};
@@ -843,6 +900,7 @@ void igd_comp_report(void)
     kprintf("igdcomp: %lu Auftragslisten mit %lu Auftraegen, je %lu us auf der GPU (max %lu us); %lu belegt, %lu Fehler\n",
             (unsigned long)st.jobs, (unsigned long)st.ops, (unsigned long)(st.jobs ? st.us / st.jobs : 0),
             (unsigned long)st.max_us, (unsigned long)st.busy, (unsigned long)st.errors);
+    prof_report();
     static const char *const how[3] = {"CPU", "GPU (abgewartet)", "GPU ohne Warten (CPU-Zeit)"};
     for (int k = 2; k >= 0; k--)
         kprintf("igdcomp: Desktop mit %s: %lu Bilder, %lu Mpx, %lu us je Bild, %lu us je Mpx\n", how[k],

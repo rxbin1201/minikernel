@@ -297,6 +297,10 @@ typedef struct {
     int alpha;           /* mischen: Deckung 0-256 (256 = Alpha der Quelle unveraendert) */
     int step;            /* skalieren: Quellzeile/-spalte = Anfang + (i * step >> 8), 1-65535 */
 } GpuOp;
+/* Aufschluesselung eines Bildes des Desktops (SYS_GPUCOMP 7), alles in Mikrosekunden */
+typedef struct {
+    unsigned total, wait, render, ov, ov_px, shadow, alloc, queue, submit, path; /* path: 0 CPU, 1 GPU, 2 ohne Warten */
+} FrameProf;
 static inline s64 sys_gpucomp(u64 op, u64 a, u64 b)          { return syscall3(SYS_GPUCOMP, op, a, b); }
 /* Benannte Dienste: anmelden, abmelden, verbinden (fds: lesen, schreiben), annehmen (fds: lesen, schreiben, PID;
  * ERR_AGAIN = niemand wartet). Damit finden Programme aus dem Terminal den Desktop. */

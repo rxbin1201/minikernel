@@ -735,8 +735,11 @@ static int ov_ready(void)
         return 1;
     if (ov_failed)
         return 0;
-    if (gsurf_new(&ov_layer, W, H) != 0 || !gsurf_handle(&ov_layer) || surface_new(&ov_black, W, H) != 0 ||
-        surface_new(&ov_white, W, H) != 0) {
+    s64 t0 = sys_time_us();
+    int bad = gsurf_new(&ov_layer, W, H) != 0 || !gsurf_handle(&ov_layer) || surface_new(&ov_black, W, H) != 0 ||
+        surface_new(&ov_white, W, H) != 0;
+    prof.alloc += (unsigned)(sys_time_us() - t0);
+    if (bad) {
         gsurf_free(&ov_layer);
         if (ov_black.px)
             surface_free(&ov_black);
@@ -753,6 +756,7 @@ static int ov_ready(void)
 static void ov_render(const Clip *r)
 {
     int n = r->x1 - r->x0;
+    prof.ov_px += (unsigned)(n * (r->y1 - r->y0));
     for (int y = r->y0; y < r->y1; y++) {
         memset(ov_black.px + (u64)y * (u64)W + (u64)r->x0, 0, (u64)n * 4);
         u32 *wt = ov_white.px + (u64)y * (u64)W + (u64)r->x0;
@@ -826,12 +830,14 @@ static int ov_dim_ready(void)
 {
     if (ov_dim.px)
         return 1;
+    s64 t0 = sys_time_us();
     if (gsurf_new(&ov_dim, W, H) != 0 || !gsurf_handle(&ov_dim)) {
         gsurf_free(&ov_dim);
         return 0;
     }
     for (u64 i = 0; i < (u64)W * (u64)H; i++)
         ov_dim.px[i] = (u32)DIALOG_DIM << 24;
+    prof.alloc += (unsigned)(sys_time_us() - t0);
     return 1;
 }
 
@@ -855,21 +861,40 @@ static int queue_overlay(const Clip *c)
  * Bild (runde Ecken, feiner Rand), darueber Taskleiste, Menues usw. Mit der GPU: alles in einer Auftragsliste, und die
  * GPU zeigt das Bild auch selbst an (der Desktop wartet nicht; braucht einen Mauszeiger als eigene Ebene). Sonst mit
  * der CPU. */
+/* Aufschluesselung des Bildes an den Kernel (igdtest comp) */
+static void prof_send(s64 start, int path)
+{
+    prof.total = (unsigned)(sys_time_us() - start);
+    prof.path = (unsigned)path;
+    if (gpu_mode)
+        sys_gpucomp(7, (u64)&prof, 0);
+}
+
 void draw_all(void)
 {
+    s64 start = sys_time_us(), ta;
+    prof = (FrameProf){0};
     gpu_wait(); /* das letzte Bild liest vielleicht noch aus Flaechen, die sich gleich aendern */
+    ta = sys_time_us();
+    prof.wait = (unsigned)(ta - start);
     for (int i = 0; i < nord; i++)
         render_window(order[i]);
+    s64 tb = sys_time_us();
+    prof.render = (unsigned)(tb - ta);
     if (!ndmg)
         return;
-    s64 t0 = sys_time_us(), px = 0;
+    s64 t0 = tb, px = 0;
     int gpu = gpu_usable() && ov_ready();
     if (gpu) {
+        s64 t = sys_time_us();
         ov_update();
+        prof.ov = (unsigned)(sys_time_us() - t);
     } else { /* Bild mit der CPU: die Ebene beim naechsten GPU-Bild ganz neu */
         nov = 0;
         ov_stale = 1;
     }
+    s64 tq = sys_time_us();
+    unsigned before = prof.shadow + prof.alloc;
     for (int i = 0; gpu && i < ndmg; i++) {
         gpu = queue_gpu(&dmg[i]) && queue_overlay(&dmg[i]);
     }
@@ -878,14 +903,21 @@ void draw_all(void)
     if (gpu && (gfx_hw_cursor_on() || gpu_mode == 2)) { /* die GPU setzt zusammen und zeigt an - nicht warten */
         for (int i = 0; i < ndmg; i++)
             gq_present(dmg[i].x0, dmg[i].y0, dmg[i].x1 - dmg[i].x0, dmg[i].y1 - dmg[i].y0);
+        s64 ts = sys_time_us();
+        prof.queue = (unsigned)(ts - tq) - (prof.shadow + prof.alloc - before);
         if (gq_submit_async() == 0) {
+            prof.submit = (unsigned)(sys_time_us() - ts);
             gpu_stat(2, sys_time_us() - t0, px);
+            prof_send(start, 2);
             ndmg = 0;
             return;
         }
         gpu = 0; /* abgelehnt: alles mit der CPU */
     } else if (gpu) {
+        s64 ts = sys_time_us();
+        prof.queue = (unsigned)(ts - tq) - (prof.shadow + prof.alloc - before);
         gpu = gq_submit() == 0;
+        prof.submit = (unsigned)(sys_time_us() - ts);
     } else {
         gq_cancel();
     }
@@ -897,5 +929,6 @@ void draw_all(void)
     gpu_stat(gpu, sys_time_us() - t0, px);
     for (int i = 0; i < ndmg; i++)
         gfx_present(dmg[i].x0, dmg[i].y0, dmg[i].x1 - dmg[i].x0, dmg[i].y1 - dmg[i].y0);
+    prof_send(start, gpu);
     ndmg = 0;
 }
