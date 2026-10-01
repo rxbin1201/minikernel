@@ -94,6 +94,17 @@ static void forcewake_put(void)
     igd_wr(FORCEWAKE_RENDER, MASKED_OFF(1));
 }
 
+/* auch fuer die anderen Engines (igd_rcs.c) */
+int igd_forcewake_get(void)
+{
+    return forcewake_get();
+}
+
+void igd_forcewake_put(void)
+{
+    forcewake_put();
+}
+
 /* ---------- Ring ---------- */
 
 static void dump_engine(const char *why)

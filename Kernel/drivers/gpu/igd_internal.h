@@ -29,6 +29,9 @@ void     igd_irq_init(const PciDevice *d);              /* igd_irq.c: Bildwechse
 void     igd_cursor_reapply(void);                     /* igd.c: Zeiger-Ebene nach einem Anschlusswechsel */
 void     igd_edid_dump(const uint8_t *edid, int blocks, uint32_t limit_khz, const char *note); /* igd_mode.c */
 
+int  igd_forcewake_get(void);     /* Grafikkern wecken (Render, Blitter, Media); 1 = bestaetigt */
+void igd_forcewake_put(void);
+
 /* Blitter im Dauerbetrieb (igd_blt.c): Bild-Updates aus dem Speicher des laufenden Programms */
 int  igd_blt_init(void);          /* beim Start; 0 = Blitter uebernimmt */
 int  igd_blt_on(void);

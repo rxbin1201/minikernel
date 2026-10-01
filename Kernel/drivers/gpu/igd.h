@@ -86,6 +86,8 @@ void igd_cursor_move(int x, int y, int visible); /* Spitze des Pfeils bei (x, y)
 int  igd_gfx_blit(const uint32_t *src, uint32_t pitch, int x, int y, int w, int h);
 void igd_gfx_end(void); /* Grafikmodus endet: wieder den Framebuffer der Firmware anzeigen */
 void igd_gfx_sync(void);
-int  igd_blt_set_mode(int mode); /* igdtest bltmode N: Bild-Updates per Blitter, 0 = aus (igd_blt.c) */ /* bevor die Konsole selbst in den Framebuffer schreibt: Blitter-Auftraege abwarten */
+int  igd_blt_set_mode(int mode);
+/* Stufe 5, Schritt 1 (igdtest render): Render-Engine starten, Ring, PIPE_CONTROL, Batch-Buffer, Zeitstempel (igd_rcs.c) */
+int  igd_render_test(void); /* igdtest bltmode N: Bild-Updates per Blitter, 0 = aus (igd_blt.c) */ /* bevor die Konsole selbst in den Framebuffer schreibt: Blitter-Auftraege abwarten */
 
 #endif
