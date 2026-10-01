@@ -149,6 +149,16 @@ void ui_app_icon(Surface *s, int icon, int x, int y, int size)
         gfx_capsule(s, x + S * 0.47f, y + S * 0.92f, x + S * 0.53f, y + S * 0.85f, S * 0.05f, 0x3A3A3C, 255);
         break;
     }
+    case ICON_MUSIC: { /* zwei Noten mit Balken auf rot-violettem Grund */
+        gfx_round_rect_grad(s, x, y, size, size, r, 0xFF6B81, 0xB43CF0, 255);
+        float nx = x + S * 0.2f, ny = y + S * 0.2f, n = S * 0.6f;
+        gfx_disc(s, nx + n * 0.28f, ny + n * 0.78f, n * 0.13f, 0xFFFFFF, 255);
+        gfx_disc(s, nx + n * 0.70f, ny + n * 0.70f, n * 0.13f, 0xFFFFFF, 255);
+        gfx_capsule(s, nx + n * 0.39f, ny + n * 0.78f, nx + n * 0.39f, ny + n * 0.22f, n * 0.06f, 0xFFFFFF, 255);
+        gfx_capsule(s, nx + n * 0.81f, ny + n * 0.70f, nx + n * 0.81f, ny + n * 0.14f, n * 0.06f, 0xFFFFFF, 255);
+        gfx_capsule(s, nx + n * 0.39f, ny + n * 0.24f, nx + n * 0.81f, ny + n * 0.16f, n * 0.10f, 0xFFFFFF, 255);
+        break;
+    }
     case ICON_TEXT:
         gfx_round_rect_grad(s, x + size / 8, y, size * 3 / 4, size, size / 12, 0xFFFFFF, 0xF2F2F5, 255);
         gfx_round_frame(s, x + size / 8, y, size * 3 / 4, size, size / 12, 0xC7C7CC, 255);

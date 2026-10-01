@@ -14,7 +14,7 @@
  *   Fenster: runde Ecken, Schatten, links die drei Knoepfe (schliessen, minimieren, zoomen). Verschieben an der
  *   Titelleiste, Groesse aendern an der Ecke unten rechts (wenn das Programm es erlaubt).
  *   Jedes Fenster gehoert einem eigenen Prozess (client.c, Protokoll in winproto.h): Terminal (term), Dateien (files),
- *   Texteditor (textedit), Bildansicht (view), Rechner (calc), Uhr (clock), Info (about), Malen (paint), Snake und
+ *   Texteditor (textedit), Musik (music), Bildansicht (view), Rechner (calc), Uhr (clock), Info (about), Malen (paint), Snake und
  *   Tetris. Der Desktop zeichnet nur Rahmen, Menueleiste und Dock. Grafikprogramme, die man im Terminal startet,
  *   melden sich ueber den Dienst "desktop" und bekommen ebenfalls ein Fenster. "Zur Konsole" beendet den Desktop.
  * Alle Masse sind fuer 1920x1080 angegeben und werden mit U() (ui.h) an groessere Bildschirme angepasst. */
@@ -56,7 +56,7 @@ typedef struct {
 } Win;
 
 /* Aktionen (Menues und Dock). Die ersten sind zugleich die Programmsymbole (ICON_* in ui.h). */
-enum { A_NONE, A_TERM, A_FILES, A_CALC, A_CLOCK, A_ABOUT, A_PAINT, A_SNAKE, A_TETRIS, A_EDIT, A_QUIT = 20, A_SEP,
+enum { A_NONE, A_TERM, A_FILES, A_CALC, A_CLOCK, A_ABOUT, A_PAINT, A_SNAKE, A_TETRIS, A_EDIT, A_MUSIC, A_QUIT = 20, A_SEP,
        A_WIN_NEW, A_WIN_MIN, A_WIN_ZOOM, A_WIN_CLOSE, A_APP_QUIT, A_SNAP_LEFT, A_SNAP_RIGHT, A_NEXT_WIN,
        A_RESTART, A_POWEROFF };
 

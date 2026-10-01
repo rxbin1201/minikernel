@@ -89,7 +89,7 @@ static const struct {
     {"term", "Terminal", A_TERM},   {"files", "Dateien", A_FILES},       {"calc", "Rechner", A_CALC},
     {"clock", "Uhr", A_CLOCK},      {"about", "Info", A_ABOUT},          {"paint", "Malen", A_PAINT},
     {"snake", "Snake", A_SNAKE},    {"tetris", "Tetris", A_TETRIS},      {"textview", "Textansicht", ICON_TEXT},
-    {"view", "Bildansicht", ICON_IMAGE},  {"textedit", "Texteditor", A_EDIT},
+    {"view", "Bildansicht", ICON_IMAGE},  {"textedit", "Texteditor", A_EDIT},   {"music", "Musik", A_MUSIC},
 };
 
 /* Programme, die sich selbst melden (aus dem Terminal gestartet): annehmen und begruessen */
@@ -174,6 +174,9 @@ void open_path(const char *path)
     if (st.is_dir) {
         snprintf(cmd, sizeof(cmd), "files \"%s\"", path);
         launch_app("/bin/files", cmd, A_FILES, "Dateien");
+    } else if (ends_with(path, ".mp3") || ends_with(path, ".wav")) {
+        snprintf(cmd, sizeof(cmd), "music \"%s\"", path);
+        launch_app("/bin/music", cmd, A_MUSIC, "Musik");
     } else if (ends_with(path, ".bmp")) {
         snprintf(cmd, sizeof(cmd), "view \"%s\"", path);
         launch_app("/bin/view", cmd, ICON_IMAGE, "Bildansicht");

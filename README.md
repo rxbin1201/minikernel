@@ -117,6 +117,15 @@ auf einen Ordner oder Ort verschiebt, mit Strg kopiert; zwischen Datentraegern w
 Mausklicks bringen dafuer die gedrueckten Umschalttasten mit (`MouseInfo.kbd_mods`, bei Grafikprogrammen in
 `Event.key`). Auf `/disk` gehen lange Namen (VFAT, auch mit Leerzeichen).
 
+Musik (`music [ordner|datei]`): spielt MP3 und WAV eines Ordners. Oben der laufende Titel (Titel und Interpret aus
+ID3v2/ID3v1, sonst der Dateiname), Fortschritt zum Anklicken/Ziehen, Zurueck/Abspielen/Weiter, Zufall, Wiederholen;
+darunter die Titelliste mit Laengen, unten Ordner wechseln und die Lautstaerke des Programms. Leertaste
+Abspielen/Pause, Pfeil links/rechts 10 s zurueck/vor. Doppelklick auf eine MP3/WAV in Dateien oeffnet sie hier.
+Gespielt wird in Portionen von etwa 0,25 s ueber eine eigene Stimme im Mischer, die Oberflaeche wartet also nie;
+die Pause schickt beim Fortsetzen nach, was im Kernel noch ungespielt lag (keine Luecke). Bei MP3 liest das Programm
+nebenbei alle Frame-Koepfe: daraus die genaue Laenge und eine Sprungtabelle (genaues Springen auch ohne feste
+Bitrate). Die Laenge in der Liste kommt aus dem Xing/Info-Kopf oder der Bitrate.
+
 Texteditor (`textedit [datei]`): Zeilennummern, Markieren mit Maus (Doppelklick Wort, Dreifachklick Zeile) und
 Shift + Pfeil/Pos1/Ende/Bild, Strg + Pfeil wortweise, Strg+A/C/X/V (Zwischenablage des Systems), Strg+Z/Y
 rueckgaengig/wiederholen, Strg+S sichern; Werkzeugleiste mit Neu, Oeffnen, Sichern, Sichern unter. Beim Schliessen

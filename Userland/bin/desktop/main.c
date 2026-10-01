@@ -42,6 +42,7 @@ void do_action(int a)
     case A_TERM: launch_app("/bin/term", "term", A_TERM, "Terminal"); break;
     case A_FILES: launch_app("/bin/files", "files", A_FILES, "Dateien"); break; /* beginnt auf der Platte */
     case A_EDIT: launch_app("/bin/textedit", "textedit", A_EDIT, "Texteditor"); break;
+    case A_MUSIC: launch_app("/bin/music", "music", A_MUSIC, "Musik"); break;
     case A_CALC: launch_app("/bin/calc", "calc", A_CALC, "Rechner"); break;
     case A_CLOCK: launch_app("/bin/clock", "clock", A_CLOCK, "Uhr"); break;
     case A_ABOUT: launch_app("/bin/about", "about", A_ABOUT, "Info"); break;
