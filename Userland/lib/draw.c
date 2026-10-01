@@ -273,31 +273,63 @@ void gfx_round_rect_grad(Surface *s, int x, int y, int w, int h, int r, u32 top,
     }
 }
 
-/* Ganzes Bild src auf das Rechteck (dx, dy, dw, dh) skalieren (bilinear), mit runden Ecken (Radius r) und
- * Transparenz alpha: fuer Animationen (Fenster auf/zu, ins Dock) */
+/* Ganzes Bild src auf das Rechteck (dx, dy, dw, dh) skalieren, mit runden Ecken (Radius r) und Transparenz alpha:
+ * fuer Animationen (Fenster auf/zu, minimieren, maximieren). Kleine Flaechen bilinear; grosse (ab 1 Mio. Pixel, z.B.
+ * beim Maximieren auf 3440x1440) mit dem naechsten Pixel - in der Bewegung sieht man keinen Unterschied, es ist aber
+ * ein Vielfaches schneller (Zeilen mit derselben Quellzeile werden nur kopiert). Die Quellspalten werden je Aufruf
+ * einmal berechnet, die Eckenrundung nur in den Ecken. */
+#define SCALED_MAXW 8192
 void gfx_blit_scaled(Surface *dst, const Surface *src, int dx, int dy, int dw, int dh, int alpha, int r)
 {
+    static u32 colx[SCALED_MAXW]; /* je Zielspalte: Quellspalte << 8 | Gewicht */
     int x0 = dx, y0 = dy, x1 = dx + dw, y1 = dy + dh;
     if (dw < 2 || dh < 2 || alpha <= 0 || !clip_box(dst, &x0, &y0, &x1, &y1))
         return;
+    if (x1 - x0 > SCALED_MAXW)
+        x1 = x0 + SCALED_MAXW;
     if (r * 2 > dw) r = dw / 2;
     if (r * 2 > dh) r = dh / 2;
+    if (alpha > 255) alpha = 255;
     u64 stepx = ((u64)(src->w - 1) << 16) / (u64)(dw - 1), stepy = ((u64)(src->h - 1) << 16) / (u64)(dh - 1);
+    int n = x1 - x0, nearest = (u64)dw * (u64)dh >= 1000000;
+    for (int i = 0; i < n; i++)
+        colx[i] = (u32)(((u64)(x0 + i - dx) * stepx) >> 8);
+    int cl = dx + r, cr = dx + dw - r; /* Spalten [cl, cr) liegen in keiner Ecke */
+    int il = cl - x0, ir = cr - x0;
+    if (il < 0) il = 0;
+    if (ir > n) ir = n;
+    if (il > ir) il = ir;
+    int prev_sy = -1, prev_plain = 0;
+    u32 *prev = 0;
     for (int yy = y0; yy < y1; yy++) {
         u64 fy = (u64)(yy - dy) * stepy;
         int sy = (int)(fy >> 16), wy = (int)(fy >> 8 & 0xFF), sy1 = sy + 1 < src->h ? sy + 1 : sy;
         const u32 *r0 = src->px + (u64)sy * (u64)src->w, *r1 = src->px + (u64)sy1 * (u64)src->w;
-        u32 *dp = dst->px + (u64)yy * (u64)dst->w;
-        for (int xx = x0; xx < x1; xx++) {
-            u64 fx = (u64)(xx - dx) * stepx;
-            int sx = (int)(fx >> 16), wx = (int)(fx >> 8 & 0xFF), sx1 = sx + 1 < src->w ? sx + 1 : sx;
-            u32 top = gfx_mix(r0[sx], r0[sx1], wx), bot = gfx_mix(r1[sx], r1[sx1], wx);
-            u32 c = gfx_mix(top, bot, wy);
-            int a = round_cov(xx, yy, dx, dy, dw, dh, r) * alpha / 256;
-            if (a >= 255)
-                dp[xx] = c;
-            else if (a > 0)
-                dp[xx] = gfx_mix(dp[xx], c, a);
+        u32 *dp = dst->px + (u64)yy * (u64)dst->w + x0;
+        int corner = yy < dy + r || yy >= dy + dh - r, plain = !corner && alpha == 255;
+        if (nearest && plain && prev_plain && sy == prev_sy) { /* dieselbe Quellzeile wie eben: nur kopieren */
+            memcpy(dp, prev, (u64)n * 4);
+            prev = dp;
+            continue;
         }
+        for (int i = 0; i < n; i++) {
+            u32 c, cx = colx[i];
+            if (nearest) {
+                c = r0[cx >> 8];
+            } else {
+                int sx = (int)(cx >> 8), wx = (int)(cx & 0xFF), sx1 = sx + 1 < src->w ? sx + 1 : sx;
+                c = gfx_mix(gfx_mix(r0[sx], r0[sx1], wx), gfx_mix(r1[sx], r1[sx1], wx), wy);
+            }
+            int a = alpha;
+            if (corner && (i < il || i >= ir))
+                a = round_cov(x0 + i, yy, dx, dy, dw, dh, r) * alpha / 256;
+            if (a >= 255)
+                dp[i] = c;
+            else if (a > 0)
+                dp[i] = gfx_mix(dp[i], c, a);
+        }
+        prev_sy = sy;
+        prev_plain = plain;
+        prev = dp;
     }
 }

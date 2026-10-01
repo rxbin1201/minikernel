@@ -514,8 +514,11 @@ static void compose(const Clip *r)
         if (w->anim) { /* waehrend der Animation: skaliert und ein-/ausgeblendet */
             int r[4], a;
             anim_state(w, r, &a);
-            int rad = RADIUS * r[2] / (w->w ? w->w : 1);
-            gfx_shadow(&gfx_screen, r[0], r[1] + shadow_dy() * r[2] / (w->w ? w->w : 1), r[2], r[3], rad, SHADOW,
+            /* Radius und Schattenversatz schrumpfen mit, wachsen aber nie ueber das Normalmass (beim Wiederherstellen
+             * ist das Bild groesser als das Fenster: sonst laege der Schatten ausserhalb des neu gezeichneten Bereichs) */
+            int sc = r[2] < w->w ? r[2] : w->w, ww = w->w ? w->w : 1;
+            int rad = RADIUS * sc / ww;
+            gfx_shadow(&gfx_screen, r[0], r[1] + shadow_dy() * sc / ww, r[2], r[3], rad, SHADOW,
                        (w == f ? 95 : 55) * a / 255);
             gfx_blit_scaled(&gfx_screen, &w->buf, r[0], r[1], r[2], r[3], a, rad);
             continue;
