@@ -90,6 +90,15 @@ laeuft, rechts die minimierten Fenster). Fenster haben runde Ecken, weiche Schat
 (schliessen, minimieren, zoomen; Doppelklick auf die Titelleiste zoomt). Menueleiste und Dock sind Milchglas ueber
 einem berechneten Farbverlauf. Ab 1300 Pixel Hoehe wird alles um 25 % groesser.
 
+Tastenkuerzel (linke Alt-Taste): Alt+Tab naechstes Fenster (mit Shift zurueck), Alt+W Fenster schliessen, Alt+Q
+Programm beenden, Alt+M minimieren, Alt+N neues Fenster, Alt+F zoomen, Alt+Pfeil links/rechts an die Bildschirmhaelfte
+andocken, Alt+Pfeil hoch/runter maximieren bzw. zurueck. Fenster, die man an den linken/rechten Rand zieht, docken an
+die Haelfte an, am oberen Rand fuellen sie den Bildschirm (mit Vorschau); weggezogen bekommen sie ihre alte Groesse.
+Im Logo-Menue: Neu starten und Ausschalten mit Rueckfrage - alle Programme werden gebeten, sich zu beenden; bleibt eins
+offen (z.B. Malen mit ungespeichertem Bild), fragt der Desktop, ob trotzdem.
+Alt-Kombinationen kommen als zwei Bytes (`KEY_ALT`/`KEY_ALT_SHIFT`, dann die Taste) und nur bei Grafikprogrammen an
+(`KEY_MOD_ALT` in `Event.key`); die Konsole verwirft sie.
+
 Animationen (nach der Uhr, nicht nach Bildern): Fenster blenden beim Oeffnen und Schliessen weich ein und aus, fliegen
 beim Minimieren an ihren Platz im Dock und von dort zurueck, Zoomen gleitet auf die neue Groesse. Das Dock
 vergroessert die Symbole unter der Maus (bis 60 %, Nachbarn abgestuft).

@@ -25,10 +25,11 @@
 extern int MENUBAR_H, TITLE_H, DOCK_H, RADIUS, SHADOW;
 
 enum { ANIM_NONE, ANIM_OPEN, ANIM_CLOSE, ANIM_MIN, ANIM_RESTORE, ANIM_ZOOM };
+enum { SNAP_NONE, SNAP_MAX, SNAP_LEFT, SNAP_RIGHT }; /* ganzer Bildschirm, linke/rechte Haelfte */
 
 typedef struct {
     int  used, x, y, w, h, minimized;
-    int  zoomed, zx, zy, zw, zh;  /* gezoomt: vorige Lage */
+    int  zoomed, zx, zy, zw, zh;  /* angedockt (SNAP_*, 0 = frei); zx.. = Lage davor */
     /* Animation: das Fensterbild wird von Rechteck from nach to skaliert (und ein-/ausgeblendet) */
     int  anim;                    /* ANIM_* */
     s64  anim_t0;                 /* Beginn (Mikrosekunden) */
@@ -56,11 +57,13 @@ typedef struct {
 
 /* Aktionen (Menues und Dock). Die ersten sind zugleich die Programmsymbole (ICON_* in ui.h). */
 enum { A_NONE, A_TERM, A_FILES, A_CALC, A_CLOCK, A_ABOUT, A_PAINT, A_SNAKE, A_TETRIS, A_QUIT = 20, A_SEP,
-       A_WIN_NEW, A_WIN_MIN, A_WIN_ZOOM, A_WIN_CLOSE };
+       A_WIN_NEW, A_WIN_MIN, A_WIN_ZOOM, A_WIN_CLOSE, A_APP_QUIT, A_SNAP_LEFT, A_SNAP_RIGHT, A_NEXT_WIN,
+       A_RESTART, A_POWEROFF };
 
 typedef struct {
     const char *label;
     int         action;
+    const char *keys;  /* Tastenkuerzel (nur zur Anzeige) oder 0 */
 } MenuItem;
 
 /* ---------- main.c ---------- */
@@ -113,7 +116,12 @@ void content_rect(const Win *w, int *x, int *y, int *cw, int *ch);
 Win *new_window(const char *title, int w, int h);
 void raise_win(Win *w);
 void minimize(Win *w);
-void zoom_win(Win *w);
+void zoom_win(Win *w);       /* maximieren bzw. zurueck */
+void snap_win(Win *w, int where);         /* SNAP_*: andocken (nur bei aenderbarer Groesse), SNAP_NONE = zurueck */
+void snap_rect(int where, int *r);        /* x, y, w, h dafuer */
+void set_snap_preview(int where);         /* Vorschau beim Ziehen an den Rand (SNAP_NONE = keine) */
+void lower_win(Win *w);                   /* ganz nach hinten */
+void cycle_windows(int dir);              /* Alt+Tab: 1 = naechstes nach vorn, -1 = zurueck */
 Win *focused(void);
 void close_win(Win *w);      /* fragt das Programm; mit Animation, wenn es weg ist */
 void close_win_now(Win *w);
@@ -121,6 +129,16 @@ void anim_tick(void);        /* laufende Fenster-Animationen weiterfuehren */
 int  title_button_at(const Win *w, int x, int y); /* 1 schliessen, 2 minimieren, 3 zoomen, 0 keiner */
 void set_button_hover(Win *w);                    /* Maus ueber den Knoepfen: Symbole zeigen */
 void draw_all(void);
+
+/* ---------- dialog.c: Ausschalten / Neu starten ---------- */
+
+extern int dialog_kind;               /* 0 = keiner */
+void dialog_open(int action);         /* A_POWEROFF oder A_RESTART */
+void draw_dialog(void);
+void damage_dialog(void);
+void dialog_mouse(int x, int y, int down);
+void dialog_key(int k);
+void power_tick(void);                /* jedes Bild: laufendes Ausschalten weiterfuehren */
 
 /* ---------- client.c: die Programme hinter den Fenstern ---------- */
 

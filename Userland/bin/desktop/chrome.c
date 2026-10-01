@@ -161,13 +161,18 @@ int menubar_hit(int x, int y)
  * ==================================================================================================================== */
 
 static const MenuItem logo_menu[] = {
-    {"\xC3\x9C" "ber MiniKernel", A_ABOUT}, {"", A_SEP}, {"Neues Terminal", A_TERM}, {"Dateien", A_FILES},
-    {"Rechner", A_CALC}, {"Uhr", A_CLOCK}, {"", A_SEP}, {"Malen", A_PAINT}, {"Snake", A_SNAKE}, {"Tetris", A_TETRIS},
-    {"", A_SEP}, {"Zur Konsole", A_QUIT},
+    {"\xC3\x9C" "ber MiniKernel", A_ABOUT, 0}, {"", A_SEP, 0}, {"Neues Terminal", A_TERM, 0}, {"Dateien", A_FILES, 0},
+    {"Rechner", A_CALC, 0}, {"Uhr", A_CLOCK, 0}, {"", A_SEP, 0}, {"Malen", A_PAINT, 0}, {"Snake", A_SNAKE, 0},
+    {"Tetris", A_TETRIS, 0}, {"", A_SEP, 0}, {"Neu starten \xE2\x80\xA6", A_RESTART, 0},
+    {"Ausschalten \xE2\x80\xA6", A_POWEROFF, 0}, {"", A_SEP, 0}, {"Zur Konsole", A_QUIT, 0},
 };
 static const MenuItem app_menu[] = {
-    {"Neues Fenster", A_WIN_NEW}, {"Minimieren", A_WIN_MIN}, {"Zoomen", A_WIN_ZOOM}, {"", A_SEP},
-    {"Fenster schlie\xC3\x9F" "en", A_WIN_CLOSE},
+    {"Neues Fenster", A_WIN_NEW, "Alt+N"},          {"N\xC3\xA4" "chstes Fenster", A_NEXT_WIN, "Alt+Tab"},
+    {"", A_SEP, 0},
+    {"Minimieren", A_WIN_MIN, "Alt+M"},             {"Zoomen", A_WIN_ZOOM, "Alt+F"},
+    {"Links anordnen", A_SNAP_LEFT, "Alt+\xE2\x86\x90"}, {"Rechts anordnen", A_SNAP_RIGHT, "Alt+\xE2\x86\x92"},
+    {"", A_SEP, 0},
+    {"Fenster schlie\xC3\x9F" "en", A_WIN_CLOSE, "Alt+W"}, {"Programm beenden", A_APP_QUIT, "Alt+Q"},
 };
 
 static const MenuItem *menu_items(int *n)
@@ -186,7 +191,7 @@ static void menu_box(int *x, int *y, int *w, int *h)
     const MenuItem *m = menu_items(&n);
     *x = menu_open == 1 ? logo_x() - U(6) : appname_x() - U(8);
     *y = MENUBAR_H + U(2);
-    *w = U(230);
+    *w = U(250);
     *h = U(10);
     for (int i = 0; i < n; i++)
         *h += m[i].action == A_SEP ? U(11) : U(24);
@@ -223,8 +228,11 @@ void draw_menu(void)
         int hover = i == menu_hover;
         if (hover)
             gfx_round_rect(s, x + U(5), iy, w - U(10), U(24), U(5), C_ACCENT, 255);
-        text_draw(s, font_ui, FS, x + U(14), iy + (U(24) - text_height(font_ui, FS)) / 2, m[i].label,
-                  hover ? 0xFFFFFF : C_TEXT);
+        int ty = iy + (U(24) - text_height(font_ui, FS)) / 2;
+        text_draw(s, font_ui, FS, x + U(14), ty, m[i].label, hover ? 0xFFFFFF : C_TEXT);
+        if (m[i].keys) /* Tastenkuerzel rechts, grau */
+            text_draw(s, font_ui, FS, x + w - U(14) - text_width(font_ui, FS, m[i].keys), ty, m[i].keys,
+                      hover ? 0xFFFFFF : 0x8E8E93);
     }
 }
 

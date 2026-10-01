@@ -93,6 +93,8 @@ typedef long long          s64;
 #define KEY_DEL   0xFB
 #define KEY_PGUP  0xFC
 #define KEY_PGDN  0xFD
+#define KEY_ALT       0xFE /* SYS_GETCHAR: Alt + die naechste Taste (Kleinbuchstabe, Ziffer, Tab, Sondertaste) */
+#define KEY_ALT_SHIFT 0xFF /* dasselbe mit Shift */
 
 #define SEEK_SET 0
 #define SEEK_CUR 1

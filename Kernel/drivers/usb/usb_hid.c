@@ -39,6 +39,12 @@ static void key_pressed(HidState *s, uint8_t mods, uint8_t usage)
         keymap_key(usage, shift, ctrl, altgr, s->caps); /* Zeichen nach dem eingestellten Layout */
         return;
     }
+    if ((mods & 0x04) && !ctrl && usage >= 0x4A && usage <= 0x52) { /* linke Alt + Pfeil, Pos1, Ende, Bild */
+        static const unsigned char k[9] = {KEY_HOME, KEY_PGUP, KEY_DEL, KEY_END, KEY_PGDN, KEY_RIGHT, KEY_LEFT, KEY_DOWN, KEY_UP};
+        keyboard_deliver(shift ? KEY_ALT_SHIFT : KEY_ALT);
+        keyboard_deliver(k[usage - 0x4A]);
+        return;
+    }
     switch (usage) {
     case 0x4F: keyboard_deliver(KEY_RIGHT); break;
     case 0x50: keyboard_deliver(KEY_LEFT);  break;

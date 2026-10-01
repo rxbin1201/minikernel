@@ -13,7 +13,8 @@ Win     *drag_win;
 int      mouse_x, mouse_y;
 s64      now_us;
 
-static int  drag_dx, drag_dy;
+static int  drag_dx, drag_dy, press_x, press_y;
+static int  snap_zone; /* beim Ziehen an den Rand: SNAP_* */
 static s64  last_click_tick;
 static int  last_click_x, last_click_y;
 static int  quit;
@@ -53,6 +54,17 @@ void do_action(int a)
     case A_WIN_MIN: if (f) minimize(f); break;
     case A_WIN_ZOOM: if (f) zoom_win(f); break;
     case A_WIN_CLOSE: if (f) close_win(f); break;
+    case A_APP_QUIT: /* alle Fenster dieses Programms */
+        if (f)
+            for (int i = nord - 1; i >= 0; i--)
+                if (order[i]->app == f->app && strcmp(order[i]->name, f->name) == 0)
+                    close_win(order[i]);
+        break;
+    case A_SNAP_LEFT: if (f) snap_win(f, f->zoomed == SNAP_LEFT ? SNAP_NONE : SNAP_LEFT); break;
+    case A_SNAP_RIGHT: if (f) snap_win(f, f->zoomed == SNAP_RIGHT ? SNAP_NONE : SNAP_RIGHT); break;
+    case A_NEXT_WIN: cycle_windows(1); break;
+    case A_RESTART:
+    case A_POWEROFF: dialog_open(a); break;
     }
 }
 
@@ -66,6 +78,26 @@ static Win *window_at(int x, int y)
     return 0;
 }
 
+/* Tastenkuerzel des Desktops (linke Alt-Taste); 0 = keins, die Taste geht an das Programm */
+static int shortcut(int k)
+{
+    int c = k & 0xFF, shift = k & KEY_MOD_SHIFT;
+    Win *f = focused();
+    switch (c) {
+    case '\t': cycle_windows(shift ? -1 : 1); return 1;
+    case 'w': do_action(A_WIN_CLOSE); return 1;
+    case 'q': do_action(A_APP_QUIT); return 1;
+    case 'm': do_action(A_WIN_MIN); return 1;
+    case 'n': do_action(A_WIN_NEW); return 1;
+    case 'f': do_action(A_WIN_ZOOM); return 1;
+    case KEY_LEFT: do_action(A_SNAP_LEFT); return 1;
+    case KEY_RIGHT: do_action(A_SNAP_RIGHT); return 1;
+    case KEY_UP: if (f) snap_win(f, SNAP_MAX); return 1;
+    case KEY_DOWN: if (f) snap_win(f, SNAP_NONE); return 1;
+    }
+    return 0;
+}
+
 static int resize_corner(const Win *w, int x, int y)
 {
     return (w->flags & WPF_RESIZABLE) && x >= w->x + w->w - U(16) && y >= w->y + w->h - U(16);
@@ -73,6 +105,10 @@ static int resize_corner(const Win *w, int x, int y)
 
 static void mouse_down(Event *e)
 {
+    if (dialog_kind) { /* Rueckfrage offen: nur ihre Knoepfe */
+        dialog_mouse(e->x, e->y, e->button == 1);
+        return;
+    }
     if (menu_open) {
         int i = menu_hit(e->x, e->y);
         if (i >= 0) {
@@ -130,6 +166,8 @@ static void mouse_down(Event *e)
             drag_win = w;
             drag_dx = e->x - w->x;
             drag_dy = e->y - w->y;
+            press_x = e->x;
+            press_y = e->y;
         }
         return;
     }
@@ -155,6 +193,10 @@ static void mouse_move(Event *e)
 {
     mouse_x = e->x;
     mouse_y = e->y;
+    if (dialog_kind) {
+        dialog_mouse(e->x, e->y, 0);
+        return;
+    }
     if (menu_open) { /* Hervorhebung im Menue */
         int h = menu_hit(e->x, e->y);
         if (h != menu_hover) {
@@ -171,11 +213,25 @@ static void mouse_move(Event *e)
         return;
     }
     Win *w = drag_win;
+    if (drag_mode == 1 && w->zoomed) { /* angedockt: erst ab ein paar Pixeln loesen, dann wieder in alter Groesse */
+        int dx = e->x - press_x, dy = e->y - press_y;
+        if (dx * dx + dy * dy < U(8) * U(8))
+            return;
+        damage_win(w);
+        drag_dx = drag_dx * w->zw / (w->w ? w->w : 1); /* Maus bleibt an derselben Stelle der Titelleiste */
+        w->w = w->zw;
+        w->h = w->zh;
+        w->zoomed = 0;
+        win_dirty_all(w);
+    }
     damage_win(w); /* alte Stelle */
     if (drag_mode == 1) {
         w->x = e->x - drag_dx;
         w->y = e->y - drag_dy;
-        w->zoomed = 0;
+        if (w->flags & WPF_RESIZABLE) { /* an den Rand gezogen: Vorschau zum Andocken */
+            snap_zone = e->x <= U(2) ? SNAP_LEFT : e->x >= W - 1 - U(2) ? SNAP_RIGHT : e->y <= U(3) ? SNAP_MAX : SNAP_NONE;
+            set_snap_preview(snap_zone);
+        }
         if (w->y < MENUBAR_H) w->y = MENUBAR_H;
         if (w->y > H - TITLE_H) w->y = H - TITLE_H;
         if (w->x > W - U(60)) w->x = W - U(60);
@@ -192,7 +248,15 @@ static void mouse_move(Event *e)
 
 static void key(int k)
 {
+    if (dialog_kind) {
+        dialog_key(k);
+        return;
+    }
     if (k == 0x1B && menu_open) {
+        close_menu();
+        return;
+    }
+    if ((k & KEY_MOD_ALT) && shortcut(k)) {
         close_menu();
         return;
     }
@@ -237,6 +301,10 @@ void _start(int argc, char **argv)
             if (e.type == EV_KEY) key(e.key);
             else if (e.type == EV_DOWN) { mouse_down(&e); update_button_hover(e.x, e.y); }
             else if (e.type == EV_UP) {
+                if (drag_mode == 1 && snap_zone && drag_win && drag_win->used)
+                    snap_win(drag_win, snap_zone);
+                snap_zone = SNAP_NONE;
+                set_snap_preview(SNAP_NONE);
                 drag_mode = 0;
                 if (app_grab && app_grab->used)
                     app_input(app_grab, EV_UP, 0, e.x, e.y, e.button, 0);
@@ -269,6 +337,7 @@ void _start(int argc, char **argv)
             last_min = now / 60;
             damage_menubar();
         }
+        power_tick();
         anim_tick();
         dock_tick(now_us - prev_us);
         draw_all(); /* direkt nach dem Bildwechsel: was sich geaendert hat, steht bis zum naechsten Bild */

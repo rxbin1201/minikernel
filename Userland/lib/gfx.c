@@ -482,7 +482,14 @@ static void gfx_collect(void)
 {
     s64 c;
     for (int i = 0; i < 32 && (c = sys_getchar()) >= 0; i++) {
-        Event e = {EV_KEY, (int)c, gfx_cur_x, gfx_cur_y, 0, 0};
+        int k = (int)c;
+        if (k == KEY_ALT || k == KEY_ALT_SHIFT) { /* Alt-Kombination: die Taste kommt gleich dahinter */
+            s64 n = sys_getchar();
+            if (n < 0)
+                continue;
+            k = (int)n | KEY_MOD_ALT | (c == KEY_ALT_SHIFT ? KEY_MOD_SHIFT : 0);
+        }
+        Event e = {EV_KEY, k, gfx_cur_x, gfx_cur_y, 0, 0};
         gfx_push(e);
     }
     MouseInfo m;

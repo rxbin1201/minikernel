@@ -57,6 +57,10 @@ static int next_key(void)
 {
     for (;;) {
         int c = keyboard_getchar();
+        if (c == KEY_ALT || c == KEY_ALT_SHIFT) { /* Alt-Kombination: gehoert den Grafikprogrammen */
+            keyboard_getchar();
+            continue;
+        }
         if (c >= 0)
             return c;
         if (process_wait_tick() != 0)

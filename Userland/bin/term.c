@@ -297,7 +297,7 @@ void _start(int argc, char **argv)
         while (gfx_poll(&e)) {
             if (e.type == EV_CLOSE) {
                 quit();
-            } else if (e.type == EV_KEY) {
+            } else if (e.type == EV_KEY && e.key < 0x100) { /* Alt-Kombinationen gehen nicht an die Shell */
                 unsigned char b = (unsigned char)e.key;
                 sys_write(to_sh, &b, 1);
             } else if (e.type == EV_RESIZE) {

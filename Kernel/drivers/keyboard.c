@@ -149,8 +149,12 @@ static void keyboard_handler(InterruptFrame *f)
             }
             if (!release) {
                 int k = extended_key(code);
-                if (k && !keyboard_scroll_key((unsigned char)k, shift))
+                if (k && lalt && !ctrl) { /* Alt + Pfeil usw. */
+                    keyboard_deliver(shift ? KEY_ALT_SHIFT : KEY_ALT);
                     keyboard_deliver((unsigned char)k);
+                } else if (k && !keyboard_scroll_key((unsigned char)k, shift)) {
+                    keyboard_deliver((unsigned char)k);
+                }
             }
             continue;
         }

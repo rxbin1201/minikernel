@@ -236,28 +236,98 @@ void minimize(Win *w)
         win_dirty(f, 0, 0, f->w, TITLE_H);
 }
 
-void zoom_win(Win *w)
+/* Andocken: ganzer Bildschirm oder eine Haelfte (zwischen Menueleiste und Dock, mit kleinem Rand) */
+void snap_rect(int where, int *r)
 {
-    if (!(w->flags & WPF_RESIZABLE)) /* feste Groesse: das Programm zeichnet genau so viel */
+    int gap = U(6), top = MENUBAR_H + gap, h = dock_top() - top - U(2), half = (W - 3 * gap) / 2;
+    if (where == SNAP_LEFT)
+        set4(r, gap, top, half, h);
+    else if (where == SNAP_RIGHT)
+        set4(r, W - gap - half, top, half, h);
+    else
+        set4(r, gap, top, W - 2 * gap, h);
+}
+
+void snap_win(Win *w, int where)
+{
+    if (!(w->flags & WPF_RESIZABLE) || where == w->zoomed) /* feste Groesse: das Programm zeichnet genau so viel */
         return;
     damage_win(w);
-    int from[4];
+    int from[4], to[4];
     set4(from, w->x, w->y, w->w, w->h);
-    if (w->zoomed) {
-        w->x = w->zx; w->y = w->zy; w->w = w->zw; w->h = w->zh;
-        w->zoomed = 0;
-    } else {
+    if (!w->zoomed) { /* Lage merken, um spaeter zurueckzukehren */
         w->zx = w->x; w->zy = w->y; w->zw = w->w; w->zh = w->h;
-        w->x = U(6);
-        w->y = MENUBAR_H + U(6);
-        w->w = W - U(12);
-        w->h = dock_top() - w->y - U(2);
-        w->zoomed = 1;
     }
+    if (where == SNAP_NONE)
+        set4(to, w->zx, w->zy, w->zw, w->zh);
+    else
+        snap_rect(where, to);
+    w->x = to[0]; w->y = to[1]; w->w = to[2]; w->h = to[3];
+    w->zoomed = where;
     win_dirty_all(w); /* die neue Groesse erfaehrt das Programm nach dem Bild (apps_frame) */
-    int to[4];
-    set4(to, w->x, w->y, w->w, w->h);
     anim_start(w, ANIM_ZOOM, from, to, 220);
+}
+
+void zoom_win(Win *w)
+{
+    snap_win(w, w->zoomed ? SNAP_NONE : SNAP_MAX);
+}
+
+static int snap_preview;
+
+void set_snap_preview(int where)
+{
+    if (where == snap_preview)
+        return;
+    int r[4];
+    if (snap_preview) {
+        snap_rect(snap_preview, r);
+        damage(r[0] - U(4), r[1] - U(4), r[2] + U(8), r[3] + U(8));
+    }
+    snap_preview = where;
+    if (where) {
+        snap_rect(where, r);
+        damage(r[0] - U(4), r[1] - U(4), r[2] + U(8), r[3] + U(8));
+    }
+}
+
+void lower_win(Win *w)
+{
+    int i = 0;
+    while (i < nord && order[i] != w)
+        i++;
+    if (i == nord)
+        return;
+    for (; i > 0; i--)
+        order[i] = order[i - 1];
+    order[0] = w;
+    damage_win(w);
+    Win *f = focused();
+    if (f) {
+        win_dirty(f, 0, 0, f->w, TITLE_H);
+        damage_win(f);
+    }
+    damage_menubar();
+}
+
+/* Alt+Tab: das hinterste sichtbare Fenster nach vorn (so kommt nacheinander jedes dran); zurueck: das vorderste nach
+ * hinten */
+void cycle_windows(int dir)
+{
+    Win *f = focused();
+    if (!f)
+        return;
+    if (dir < 0) {
+        lower_win(f);
+        return;
+    }
+    for (int i = 0; i < nord; i++) {
+        Win *w = order[i];
+        if (!w->minimized && w->anim != ANIM_CLOSE && w != f) {
+            raise_win(w);
+            return;
+        }
+    }
 }
 
 Win *focused(void)
@@ -454,11 +524,18 @@ static void compose(const Clip *r)
         gfx_blit_round(&gfx_screen, &w->buf, 0, 0, w->x, w->y, w->w, w->h, RADIUS);
         gfx_round_frame(&gfx_screen, w->x, w->y, w->w, w->h, RADIUS, 0x000000, 40);
     }
+    if (snap_preview) { /* Vorschau beim Ziehen an den Rand: helles Milchglas */
+        int sr[4];
+        snap_rect(snap_preview, sr);
+        gfx_round_rect(&gfx_screen, sr[0], sr[1], sr[2], sr[3], RADIUS, 0xFFFFFF, 70);
+        gfx_round_frame(&gfx_screen, sr[0], sr[1], sr[2], sr[3], RADIUS, 0xFFFFFF, 170);
+    }
     if (y0 < MENUBAR_H)
         draw_menubar();
     if (y1 > dock_top() - DOCK_H - U(100)) /* vergroesserte Symbole und Namen ragen hoch */
         draw_dock();
     draw_menu();
+    draw_dialog();
     gfx_reset_base_clip();
     gfx_present(x0, y0, x1 - x0, y1 - y0);
 }

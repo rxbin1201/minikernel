@@ -31,9 +31,14 @@ extern Clip    gfx_clip;   /* aktuelles Clip-Rechteck (gfx_set_clip) */
  * EV_RESIZE neue Groesse (x, y = Breite, Hoehe; gfx_screen hat sie schon): alles neu zeichnen */
 enum { EV_NONE, EV_KEY, EV_DOWN, EV_UP, EV_MOVE, EV_WHEEL, EV_CLOSE, EV_FOCUS, EV_RESIZE };
 
+/* EV_KEY mit der linken Alt-Taste: key = KEY_MOD_ALT | Taste (Kleinbuchstabe, Ziffer, '\t' oder KEY_*), mit Shift
+ * zusaetzlich KEY_MOD_SHIFT. Der Desktop benutzt einige davon selbst (Alt+Tab, Alt+W ...). */
+#define KEY_MOD_ALT   0x1000
+#define KEY_MOD_SHIFT 0x2000
+
 typedef struct {
     int type;
-    int key;         /* EV_KEY: Zeichen (UTF-8-Byte) oder KEY_* */
+    int key;         /* EV_KEY: Zeichen (UTF-8-Byte), KEY_* oder mit KEY_MOD_ALT */
     int x, y;        /* Mausposition */
     int button;      /* EV_DOWN/EV_UP: 1 links, 2 rechts */
     int wheel;       /* EV_WHEEL: > 0 = nach oben */

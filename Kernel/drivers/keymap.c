@@ -2,6 +2,7 @@
 #include "drivers/keyboard.h"
 #include "lib/string.h"
 #include "lib/utf8.h"
+#include "core/tty.h"
 
 /* Tabellen: Index = HID-Usage (0x00..0x67), Werte = Unicode-Zeichen; 0 = nichts.
  * Tottasten stehen als DEAD_* (Private-Use-Bereich) in der Tabelle. */
@@ -178,11 +179,18 @@ int keymap_key(uint8_t usage, int shift, int ctrl, int altgr, int caps)
     init_layouts();
     if (usage >= NKEYS)
         return 0;
-    if (altgr == 2) { /* linke Alt-Taste: nur zusammen mit Strg (deutsch) wie AltGr */
+    if (altgr == 2) { /* linke Alt-Taste: zusammen mit Strg (deutsch) wie AltGr, sonst Alt-Kombination */
         if (ctrl && current->ctrl_alt_is_altgr) {
             ctrl = 0;
             altgr = 1;
         } else {
+            uint32_t base = current->normal[usage];
+            if (!ctrl && base && base < 0x7F && (base >= ' ' || base == '\t')) {
+                dead = 0;
+                keyboard_deliver(shift ? KEY_ALT_SHIFT : KEY_ALT);
+                keyboard_deliver((unsigned char)base);
+                return 1;
+            }
             altgr = 0;
         }
     }

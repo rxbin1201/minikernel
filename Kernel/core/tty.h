@@ -21,6 +21,11 @@
 #define KEY_DEL   0xFB
 #define KEY_PGUP  0xFC
 #define KEY_PGDN  0xFD
+/* Linke Alt-Taste + Taste: dieses Byte, dann die Taste (Kleinbuchstabe, Ziffer, Tab, Leertaste oder Sondertaste
+ * oben). Mit Shift KEY_ALT_SHIFT. Beide sind in UTF-8 nie gueltig; der Zeilenmodus und das rohe Lesen der Konsole
+ * verwerfen sie samt Taste - auswerten tut sie nur, wer SYS_GETCHAR liest (Grafikprogramme, der Desktop). */
+#define KEY_ALT       0xFE
+#define KEY_ALT_SHIFT 0xFF
 
 int64_t tty_read(void *buf, uint64_t len);        /* blockiert; ERR_INTR, wenn der Prozess gekillt wird */
 int64_t tty_write(const void *buf, uint64_t len);
