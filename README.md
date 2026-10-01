@@ -90,7 +90,10 @@ In der Shell: `burn 5000 & burn 5000 & cpus` zeigt zwei ausgelastete CPUs.
   geschriebenen Daten der CPU sieht
 - **Render-Engine** (`igd_rcs.c`, erster Schritt Richtung 3D-Beschleunigung, nur auf Befehl): `igdtest render`
   startet den Befehlsprozessor der Render-Engine im Ring-Modus und prueft Leerauftrag, `PIPE_CONTROL` (Schreiben nach
-  getaner Arbeit), Batch-Buffer und den Zeitstempel der GPU (1000 Befehle). Haengt sie, wird sie zurueckgesetzt
+  getaner Arbeit), Batch-Buffer und den Zeitstempel der GPU (1000 Befehle). Haengt sie, wird sie zurueckgesetzt.
+  `igdtest gpgpu` laesst das erste Programm auf den Recheneinheiten (EUs) laufen: GPGPU-Pipeline (wie der Fuelltest von
+  IGT), ein Kernel in EU-Maschinensprache fuellt eine Flaeche (im RAM byteweise geprueft, an der Konsole zusaetzlich
+  zwei graue Baender auf dem Bildschirm)
 - **Bildwechsel-Interrupt** (`igd_irq.c`): die Pipe meldet jeden Bildwechsel per MSI. Grafikprogramme warten mit
   `gfx_vsync()` darauf und laufen so genau im Takt des Monitors (Tetris, Snake, Desktop; `anim` zeigt es), die
   Doppelpufferung wartet darauf statt nachzusehen. Ohne Interrupt (QEMU) ersetzt eine 10-ms-Pause den Takt

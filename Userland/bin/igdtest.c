@@ -18,6 +18,8 @@
  *   igdtest vblank  nichts Sichtbares: Bildwechsel-Interrupts eine Sekunde lang zaehlen und die Wartezeiten messen
  *   igdtest bltmode N  Bild-Updates per Blitter umschalten (0 = aus, 1-6 Testmodi, siehe Ausgabe)
  *   igdtest render  nichts Sichtbares: Render-Engine starten (Ring, PIPE_CONTROL, Batch-Buffer, Zeitmessung)
+ *   igdtest gpgpu   erstes Programm auf den Recheneinheiten: fuellt eine Flaeche im RAM (geprueft), an der Konsole
+ *                   danach zwei graue Baender quer ueber den Bildschirm (3 s)
  * Die Messwerte stehen im Kernel-Log: danach "dmesg > /disk/igd.txt" und die Datei schicken. */
 void _start(int argc, char **argv)
 {
@@ -68,6 +70,9 @@ void _start(int argc, char **argv)
         s64 r = sys_gpu((u64)(13 | m << 8));
         printf("igdtest: Modus %d (%s): %s\n", m, modes[m], r == 0 ? "gesetzt" : "geht nicht, siehe dmesg | grep igdblt");
         sys_exit(r == 0 ? 0 : 1);
+    } else if (argc > 1 && strcmp(argv[1], "gpgpu") == 0) {
+        op = 15;
+        what = "Programm auf den Recheneinheiten, an der Konsole zwei graue Baender";
     } else if (argc > 1 && strcmp(argv[1], "render") == 0) {
         op = 14;
         what = "Render-Engine, nichts Sichtbares";
@@ -81,7 +86,7 @@ void _start(int argc, char **argv)
                info ? "igdinfo" : dp ? "igd" : "igdmode");
         sys_exit(r == 0 ? 0 : 1);
     } else if (argc > 1) {
-        fprintf(2, "Aufruf: igdtest [cursor|blit|info|edid|scale|mode|dp|dpmode|dptrain|output [b|c|d]|vblank|bltmode N|render]\n");
+        fprintf(2, "Aufruf: igdtest [cursor|blit|info|edid|scale|mode|dp|dpmode|dptrain|output [b|c|d]|vblank|bltmode N|render|gpgpu]\n");
         sys_exit(2);
     }
     printf("igdtest: startet in 1 s (%s) ...\n", what);
