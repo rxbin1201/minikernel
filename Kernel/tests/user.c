@@ -559,10 +559,17 @@ void test_graphics(void)
     check("view: Bild anzeigen und beenden", pid > 0 && process_wait(pid, 0, &code, &faulted, 8000) == 0 && code == 0 && !faulted);
     fs_unlink("/disk/GT.BMP");
 
-    /* desktop: im Terminal-Fenster laeuft eine Shell */
+    /* desktop: im Terminal-Fenster laeuft eine Shell. Das Terminal ist ein eigenes Programm (desktop -> term -> sh):
+     * erst tippen, wenn dessen Shell laeuft (Start dauert unterschiedlich lange) */
     fs_unlink("/disk/DT.TXT");
     pid = process_spawn("/bin/desktop", "desktop", 0);
-    thread_sleep_ms(2500);
+    for (int t = 0, up = 0; t < 100 && !up; t++) {
+        thread_sleep_ms(100);
+        ProcInfo pi;
+        for (unsigned i = 0; process_info(i, &pi) == 0 && !up; i++)
+            up = pi.state == 0 && strcmp(pi.name, "sh") == 0 && pi.pid > (unsigned)pid;
+    }
+    thread_sleep_ms(500);
     feed("echo hallo desktop > /disk/DT.TXT\n");
     thread_sleep_ms(2500);
     static char data[64];
