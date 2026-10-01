@@ -509,6 +509,33 @@ static void syscall_do(SyscallFrame *f)
         }
         break;
     case SYS_SOCKET: {
+        if (f->rdi == 2) { /* TCP-Verbindung */
+            uint8_t ip[4] = {(uint8_t)f->rsi, (uint8_t)(f->rsi >> 8), (uint8_t)(f->rsi >> 16), (uint8_t)(f->rsi >> 24)};
+            TcpConn *c = 0;
+            ret = tcp_connect(ip, (uint16_t)f->rdx, (uint32_t)(f->rdx >> 16), &c);
+            if (ret < 0)
+                break;
+            FdObj *o = fdobj_new_tcp(c);
+            if (!o) {
+                tcp_close(c);
+                ret = ERR_NOMEM;
+                break;
+            }
+            ret = process_fd_install(process_current(), o);
+            break;
+        }
+        if (f->rdi == 3) {
+            TcpInfo ti;
+            if (!process_user_range_ok(process_current(), f->rdx, sizeof(ti), 1))
+                ret = ERR_FAULT;
+            else if (tcp_info((int)f->rsi, &ti) != 0)
+                ret = ERR_NOENT;
+            else {
+                memcpy((void *)f->rdx, &ti, sizeof(ti));
+                ret = 0;
+            }
+            break;
+        }
         if (f->rdi != 1 || f->rsi > 65535) {
             ret = ERR_INVAL;
             break;

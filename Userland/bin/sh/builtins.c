@@ -208,7 +208,7 @@ static void print_help(void)
            "            mouse  cpus  burn  dmesg  poweroff  reboot  (siehe 'ls /bin')\n"
            "%sGrafik:%s     desktop (Fenster, Terminal, Dateien, Rechner, Uhr)  paint [bild.bmp]  view bild.bmp  snake  tetris\n"
            "%sNetzwerk:%s   ifconfig [-a | dhcp | 192.168.1.50/24 gw 192.168.1.1]  ping name  nslookup name  ntp [-n]\n"
-           "            udp send ziel port text / udp listen port [-e]  lspci [-v]\n"
+           "            udp send ziel port text / udp listen port [-e]  lspci [-v]  wget [-O datei] http://...  netstat\n"
            "%sSyntax:%s     a | b   a > d   a >> d   a < d   a 2> d   a 2>&1   a ; b   a && b   a || b   a &   # Kommentar\n"
            "            'woertlich'  \"mit $VAR\"  NAME=wert  $NAME ${NAME:-vorgabe}  $?  $1 $# $@  $(befehl)  $((1+2))  *.txt\n"
            "%sBloecke:%s    if befehl; then ...; elif ...; else ...; fi      while befehl; do ...; done   (until ebenso)\n"

@@ -59,7 +59,9 @@
 #define SYS_NETINFO   51 /* (index, NetInfo*) -> 0 oder ERR_NOENT am Ende (Struktur siehe net.h) */
 #define SYS_NETCFG    52 /* (op, index, arg): 0 = statisch (arg: u8[16] ip, maske, gateway, dns), 1 = DHCP starten, 2 = ARP-Eintrag index nach ArpInfo* arg */
 #define SYS_PING      53 /* (ip a|b<<8|c<<16|d<<24, seq | groesse << 16, timeout_ms) -> Mikrosekunden | TTL << 40, oder Fehler */
-#define SYS_SOCKET    54 /* (typ 1 = UDP, port; 0 = frei waehlen) -> fd; ERR_EXIST, wenn der Port belegt ist */
+#define SYS_SOCKET    54 /* (1 = UDP, port; 0 = frei waehlen) -> fd; ERR_EXIST, wenn der Port belegt ist.
+                          * (2 = TCP verbinden, ip (a | b<<8 | c<<16 | d<<24), port | timeout_ms << 16) -> fd.
+                          * (3 = TCP-Verbindung Nr. index, TcpInfo *) -> 0, ERR_NOENT am Ende */
 #define SYS_SENDTO    55 /* (fd, SockMsg*) -> gesendete Bytes */
 #define SYS_RECVFROM  56 /* (fd, SockMsg*, timeout_ms; 0 = nicht warten, 0xFFFFFFFF = unbegrenzt) -> Bytes; ip/port = Absender */
 #define SYS_RESOLVE   57 /* (name, u8 out[max][4], max) -> Anzahl der IPv4-Adressen oder Fehler (DNS) */
@@ -120,6 +122,8 @@ typedef struct {
 #define ERR_NOSYS     (-38)
 #define ERR_NOTEMPTY  (-39)
 #define ERR_NETUNREACH  (-101)
+#define ERR_CONNRESET   (-104)
+#define ERR_CONNREFUSED (-111)
 #define ERR_TIMEDOUT    (-110)
 #define ERR_HOSTUNREACH (-113)
 

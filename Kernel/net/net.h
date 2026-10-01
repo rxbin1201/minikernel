@@ -4,7 +4,8 @@
 #include <stdint.h>
 
 /* Netzwerk: Treiber melden Ethernet-Geraete an (NetDev), darueber liegt ein kleiner IPv4-Stack:
- * ARP, IPv4 (ohne Fragmentierung), ICMP (Echo), UDP (auch als Sockets fuer Programme), DHCP-, DNS- und NTP-Client.
+ * ARP, IPv4 (ohne Fragmentierung), ICMP (Echo), UDP (auch als Sockets fuer Programme), TCP (Verbindungen nach aussen),
+ * DHCP-, DNS- und NTP-Client.
  * Nach dem ersten DHCP-Ergebnis stellt der Kernel die Uhr per NTP (abschaltbar mit "nontp" in cmdline.txt). Empfangen wird im Thread "net":
  * Karten mit MSI wecken ihn per Interrupt, die anderen fragt er ab;
  * blockierende Aufrufe (ping) pollen waehrend des Wartens selbst, damit die Antwortzeit genau gemessen wird.
@@ -78,6 +79,29 @@ int      udp_sendto(UdpSock *s, const uint8_t ip[4], uint16_t port, const void *
  * ERR_AGAIN (nichts da, bei timeout 0), ERR_TIMEDOUT, ERR_INTR. */
 int      udp_recvfrom(UdpSock *s, void *buf, uint32_t max, uint8_t ip[4], uint16_t *port, uint32_t timeout_ms);
 int      udp_pending(UdpSock *s); /* Anzahl wartender Datagramme */
+
+/* --- TCP (als Datei-Deskriptor fuer Programme: read/write/close) --- */
+
+typedef struct TcpConn TcpConn;
+
+/* Verbindung aufbauen (wartet hoechstens timeout_ms). 0 oder ERR_CONNREFUSED, ERR_TIMEDOUT, ERR_NETUNREACH,
+ * ERR_HOSTUNREACH, ERR_NOMEM (zu viele Verbindungen), ERR_INTR */
+int     tcp_connect(const uint8_t ip[4], uint16_t port, uint32_t timeout_ms, TcpConn **out);
+int64_t tcp_recv(TcpConn *c, void *buf, uint64_t max);       /* wartet auf >= 1 Byte; 0 = Ende, ERR_CONNRESET, ERR_INTR */
+int64_t tcp_send(TcpConn *c, const void *buf, uint64_t len); /* alles (wartet auf Platz); Bytes oder Fehler */
+int64_t tcp_pending(TcpConn *c);                             /* wartende Bytes, -1 = Ende */
+void    tcp_close(TcpConn *c);                               /* baut im Hintergrund geordnet ab */
+
+/* Eintrag fuer SYS_SOCKET op 3 (gleiches Layout in Userland/user.h); state: 1 SYN_SENT, 2 ESTABLISHED, 3 FIN_WAIT_1,
+ * 4 FIN_WAIT_2, 5 CLOSING, 6 TIME_WAIT, 7 CLOSE_WAIT, 8 LAST_ACK, 9 CLOSED */
+typedef struct {
+    uint8_t  local_ip[4], ip[4];
+    uint16_t lport, rport;
+    uint32_t state;
+    uint32_t rx_queued, tx_queued;
+    uint32_t rto_ms, srtt_ms;
+} TcpInfo;
+int tcp_info(int index, TcpInfo *out); /* 0 oder -1 am Ende */
 
 /* --- DNS und NTP --- */
 

@@ -9,7 +9,7 @@
  *
  *   core.c  Schnittstellen, Senden/Empfangen, Routing, Netz-Thread, oeffentliche Funktionen
  *   arp.c   ARP          icmp.c  ICMP (Echo)      dhcp.c  DHCP-Client
- *   udp.c   UDP-Sockets  dns.c   DNS mit Cache    ntp.c   NTP */
+ *   udp.c   UDP-Sockets  dns.c   DNS mit Cache    ntp.c   NTP      tcp.c  TCP */
 
 #include "net/net.h"
 #include "core/sched.h"
@@ -132,5 +132,8 @@ void dhcp_in(Iface *f, const uint8_t *b, uint32_t len);
 void dhcp_timer(Iface *f, uint64_t now);
 void udp_in(Iface *f, const uint8_t *iph, const uint8_t *u, uint32_t len);
 void ntp_start(void);
+void tcp_in(Iface *f, const uint8_t *iph, const uint8_t *t, uint32_t len, const uint8_t *src_mac);
+void tcp_flush_acks(void);
+void tcp_timer(uint64_t now);
 
 #endif

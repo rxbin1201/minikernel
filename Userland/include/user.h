@@ -83,6 +83,8 @@ typedef long long          s64;
 #define ERR_ROFS      (-30)
 #define ERR_NOTEMPTY  (-39)
 #define ERR_NETUNREACH  (-101)
+#define ERR_CONNRESET   (-104)
+#define ERR_CONNREFUSED (-111)
 #define ERR_TIMEDOUT    (-110)
 #define ERR_HOSTUNREACH (-113)
 
@@ -211,6 +213,16 @@ typedef struct {
     unsigned      pad;
 } NtpResult;
 
+/* TCP-Verbindung (sys_tcpinfo); state: 1 SYN_SENT, 2 ESTABLISHED, 3 FIN_WAIT_1, 4 FIN_WAIT_2, 5 CLOSING,
+ * 6 TIME_WAIT, 7 CLOSE_WAIT, 8 LAST_ACK, 9 CLOSED */
+typedef struct {
+    unsigned char  local_ip[4], ip[4];
+    unsigned short lport, rport;
+    unsigned       state;
+    unsigned       rx_queued, tx_queued;
+    unsigned       rto_ms, srtt_ms;
+} TcpInfo;
+
 /* ARP-Eintrag (IP -> MAC) */
 typedef struct {
     unsigned char  ip[4], mac[6];
@@ -301,6 +313,14 @@ static inline s64 sys_ping(const unsigned char ip[4], unsigned seq, unsigned siz
 }
 /* UDP: Socket anlegen (port 0 = frei gewaehlt) -> fd; mit sys_close schliessen */
 static inline s64 sys_udp_socket(unsigned port)              { return syscall3(SYS_SOCKET, 1, port, 0); }
+/* TCP: Verbindung aufbauen -> fd (read/write wie eine Datei, read 0 = Gegenseite hat geschlossen; sys_close baut ab).
+ * Fehler: ERR_CONNREFUSED, ERR_TIMEDOUT, ERR_NETUNREACH, ERR_HOSTUNREACH, ERR_INTR */
+static inline s64 sys_tcp_connect(const unsigned char ip[4], unsigned port, unsigned timeout_ms)
+{
+    u64 a = ip[0] | ((u64)ip[1] << 8) | ((u64)ip[2] << 16) | ((u64)ip[3] << 24);
+    return syscall3(SYS_SOCKET, 2, a, (port & 0xFFFF) | ((u64)timeout_ms << 16));
+}
+static inline s64 sys_tcpinfo(unsigned index, TcpInfo *ti)   { return syscall3(SYS_SOCKET, 3, index, (u64)ti); } /* ERR_NOENT am Ende */
 static inline s64 sys_sockport(int fd)                       { return syscall3(SYS_SOCKPORT, fd, 0, 0); }
 static inline s64 sys_cpuinfo(u64 index, CpuInfo *ci)        { return syscall3(SYS_CPUINFO, index, (u64)ci, 0); } /* ERR_NOENT: keine CPU mehr */
 static inline s64 sys_gpu(u64 op)                           { return syscall3(SYS_GPU, op, 0, 0); } /* 1 = Page-Flip-Test, 2 = Mauszeiger-Test, 3 = Blitter-Test, 4 = Info, 5 = EDID, 6 = Skalierer, 7 = Moduswechsel, 8 = DisplayPort, 9 = DP-Moduswechsel, 10 = DP-Link-Training, 11 | Port << 8 = Anschluss, 12 = Bildwechsel */
@@ -334,7 +354,8 @@ static inline const char *net_strerror(s64 e)
     return e == ERR_NOENT ? "Name nicht gefunden" : e == ERR_TIMEDOUT ? "keine Antwort (Zeitueberschreitung)" :
            e == ERR_NETUNREACH ? "kein Netz (keine Adresse oder kein Gateway, siehe ifconfig)" :
            e == ERR_HOSTUNREACH ? "Ziel nicht erreichbar" : e == ERR_INVAL ? "ungueltiger Name" :
-           e == ERR_EXIST ? "Port ist schon belegt" : e == ERR_INTR ? "abgebrochen" : e == ERR_IO ? "ungueltige Antwort" : "Fehler";
+           e == ERR_EXIST ? "Port ist schon belegt" : e == ERR_CONNREFUSED ? "Verbindung abgelehnt" :
+           e == ERR_CONNRESET ? "Verbindung von der Gegenseite abgebrochen" : e == ERR_INTR ? "abgebrochen" : e == ERR_IO ? "ungueltige Antwort" : "Fehler";
 }
 
 static inline void *sys_brk(void *addr)                       { return (void *)syscall3(SYS_BRK, (u64)addr, 0, 0); }

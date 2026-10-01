@@ -44,6 +44,19 @@ Beispiele: `make run CMDLINE="mode=1600x900 kbd=de"`, `make test TESTS=foreign S
 Die Datenplatte `Image/disk.img` (FAT32, Label `MINIKERNEL`, im System unter `/disk`) bleibt bei `make clean` erhalten;
 `make cleandisk` legt sie neu an, `make fatcheck` prueft sie.
 
+## Netzwerk
+
+Treiber fuer Intel-Netzwerkkarten (82540EM/82545EM, 82574L, I217-I219); Karten mit MSI melden Pakete per Interrupt,
+die anderen fragt der Thread `net` ab. Darueber ein IPv4-Stack (`Kernel/net`): ARP, ICMP, DHCP, DNS mit Cache, NTP
+(stellt beim Start die Uhr), UDP-Sockets und TCP-Verbindungen nach aussen. TCP: Wiederholung nach gemessener
+Laufzeit, schnelle Wiederholung nach drei doppelten ACKs, 64 KB Empfangsfenster, geordneter Abbau im Hintergrund nach
+`close`. Programme bekommen eine Verbindung als Datei-Deskriptor (`sys_tcp_connect`, dann `read`/`write`).
+
+Programme: `ifconfig`, `ping`, `nslookup`, `ntp`, `udp`, `netstat` (TCP-Verbindungen) und `wget`:
+`wget http://example.com/` speichert `index.html` im aktuellen Verzeichnis (also z.B. erst `cd /disk`),
+`wget -O - url | less` zeigt die Seite, `-S` die Kopfzeilen der Antwort, `-q` keine Meldungen. Folgt Weiterleitungen,
+versteht Content-Length und "chunked"; nur `http://` (fuer `https://` fehlt TLS).
+
 ## Mehrere CPUs (SMP)
 
 Der Kernel startet alle CPUs aus der ACPI-MADT (QEMU: `make run SMP=N`, Standard 4). Threads und Prozesse kommen aus
@@ -249,7 +262,7 @@ Kernel/
     usb/              xHCI, Tastatur/Maus (HID), Massenspeicher
     net/              Intel e1000/e1000e
   fs/                 VFS, Dateisystem-Schicht; fat/: FAT12/16/32 und exFAT
-  net/                IPv4-Stack: ARP, ICMP, DHCP, UDP, DNS, NTP
+  net/                IPv4-Stack: ARP, ICMP, DHCP, UDP, TCP, DNS, NTP
   lib/                string, kprintf, UTF-8
   tests/              Selbsttests, je Gruppe eine Datei
 

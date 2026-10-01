@@ -47,6 +47,14 @@ FdObj *fdobj_new_udp(struct UdpSock *s)
     return o;
 }
 
+FdObj *fdobj_new_tcp(struct TcpConn *c)
+{
+    FdObj *o = alloc_obj(FD_TCP);
+    if (o)
+        o->tcp = c;
+    return o;
+}
+
 int fdobj_new_pipe(FdObj **read_end, FdObj **write_end)
 {
     Pipe *p = kcalloc(1, sizeof(*p));
@@ -84,6 +92,8 @@ void fdobj_unref(FdObj *o)
         fs_close(&o->file);
     } else if (o->kind == FD_UDP) {
         udp_close(o->udp);
+    } else if (o->kind == FD_TCP) {
+        tcp_close(o->tcp);
     } else if (o->kind == FD_PIPE_R || o->kind == FD_PIPE_W) {
         Pipe *p = o->pipe;
         f = irq_save();
@@ -159,6 +169,8 @@ int64_t fdobj_read(FdObj *o, void *buf, uint64_t len)
         return pipe_read(o->pipe, buf, len);
     case FD_UDP:
         return udp_recvfrom(o->udp, buf, len > 0xFFFFFFFF ? 0xFFFFFFFF : (uint32_t)len, 0, 0, NET_WAIT_FOREVER);
+    case FD_TCP:
+        return tcp_recv(o->tcp, buf, len);
     default:
         return ERR_BADF;
     }
@@ -173,6 +185,8 @@ int64_t fdobj_write(FdObj *o, const void *buf, uint64_t len)
         return fs_write(&o->file, buf, len);
     case FD_PIPE_W:
         return pipe_write(o->pipe, buf, len);
+    case FD_TCP:
+        return tcp_send(o->tcp, buf, len);
     default:
         return ERR_BADF;
     }
@@ -182,6 +196,8 @@ int64_t fdobj_available(FdObj *o)
 {
     if (o->kind == FD_UDP)
         return udp_pending(o->udp);
+    if (o->kind == FD_TCP)
+        return tcp_pending(o->tcp);
     if (o->kind == FD_PIPE_W) { /* Schreibende: freier Platz (so viel geht ohne Warten hinein), -1 = kein Leser mehr */
         uint64_t f = irq_save();
         int64_t r = o->pipe->readers == 0 ? -1 : (int64_t)(PIPE_SIZE - o->pipe->count);

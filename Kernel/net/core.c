@@ -233,6 +233,8 @@ static void ip_in(Iface *f, const uint8_t *h, uint32_t len, const uint8_t *src_m
         icmp_in(f, h, h + ihl, tot - ihl, src_mac);
     else if (h[9] == 17)
         udp_in(f, h, h + ihl, tot - ihl);
+    else if (h[9] == 6)
+        tcp_in(f, h, h + ihl, tot - ihl, src_mac);
 }
 
 static void frame_in(Iface *f, const uint8_t *p, uint32_t len)
@@ -261,6 +263,8 @@ int net_poll_locked(void)
             total++;
         }
     }
+    if (total)
+        tcp_flush_acks();
     return total;
 }
 
@@ -294,6 +298,7 @@ static void periodic_locked(uint64_t now)
         if (f->link && f->want_dhcp)
             dhcp_timer(f, now);
     }
+    tcp_timer(now);
 }
 
 /* Melden alle Karten Pakete per Interrupt (MSI), schlaeft der Thread bis zum naechsten (net_wake) bzw. hoechstens

@@ -7,6 +7,11 @@
 
 /* ---------- Dateien ---------- */
 
+/* Wie viele Sektoren ab Sektor sec des Clusters c (Index idx) am Stueck auf der Platte liegen, hoechstens want:
+ * folgen weitere Cluster der Datei direkt dahinter (beim Anlegen der Normalfall), geht alles in einen Auftrag -
+ * bei kleinen Clustern (512 Bytes) sonst ein Plattenzugriff je Cluster. */
+static uint32_t run_sectors(FatFile *f, uint32_t c, uint32_t idx, uint32_t sec, uint64_t want, int alloc);
+
 /* Liefert den Cluster mit Index idx in der Kette der Datei (legt ihn bei alloc an). */
 static int file_cluster(FatFile *f, uint32_t idx, int alloc, uint32_t *out)
 {
@@ -56,6 +61,21 @@ static int file_cluster(FatFile *f, uint32_t idx, int alloc, uint32_t *out)
     }
     *out = f->cur_cluster;
     return 0;
+}
+
+static uint32_t run_sectors(FatFile *f, uint32_t c, uint32_t idx, uint32_t sec, uint64_t want, int alloc)
+{
+    uint32_t sectors = vol.spc - sec, last = c;
+    if (sectors > want)
+        return (uint32_t)want;
+    while (sectors + vol.spc <= want && sectors + vol.spc <= 128) {
+        uint32_t next;
+        if (file_cluster(f, ++idx, alloc, &next) != 0 || next != last + 1)
+            break;
+        last = next;
+        sectors += vol.spc;
+    }
+    return sectors;
 }
 
 static int file_update_entry(const FatFile *f)
@@ -184,9 +204,7 @@ int64_t fat_read(FatFile *f, void *buf, uint64_t len)
 
         uint64_t chunk;
         if (boff == 0 && len - done >= SECTOR) {
-            uint32_t sectors = (uint32_t)((len - done) / SECTOR);
-            if (sectors > vol.spc - sec)
-                sectors = vol.spc - sec;
+            uint32_t sectors = run_sectors(f, c, (uint32_t)(f->pos / cb), sec, (len - done) / SECTOR, 0);
             if (fat_vread(lba, sectors, out + done) != 0) {
                 ret = done ? (int64_t)done : ERR_IO;
                 goto out;
@@ -252,9 +270,7 @@ int64_t fat_write(FatFile *f, const void *buf, uint64_t len)
 
         uint64_t chunk;
         if (boff == 0 && len - done >= SECTOR) {
-            uint32_t sectors = (uint32_t)((len - done) / SECTOR);
-            if (sectors > vol.spc - sec)
-                sectors = vol.spc - sec;
+            uint32_t sectors = run_sectors(f, c, (uint32_t)(f->pos / cb), sec, (len - done) / SECTOR, 1);
             if (fat_vwrite(lba, sectors, in + done) != 0) {
                 err = ERR_IO;
                 break;

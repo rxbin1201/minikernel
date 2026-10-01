@@ -8,10 +8,11 @@
  * mehreren Prozessen (fork, geerbte stdin/stdout) geteilt werden; es wird mit einem Zaehler verwaltet. Geteilte
  * Dateiobjekte teilen sich auch die Position (wie unter Unix). */
 
-typedef enum { FD_CONSOLE, FD_FILE, FD_PIPE_R, FD_PIPE_W, FD_UDP } FdKind;
+typedef enum { FD_CONSOLE, FD_FILE, FD_PIPE_R, FD_PIPE_W, FD_UDP, FD_TCP } FdKind;
 
 struct Pipe;
 struct UdpSock;
+struct TcpConn;
 
 typedef struct FdObj {
     FdKind          kind;
@@ -19,9 +20,11 @@ typedef struct FdObj {
     FsFile          file;  /* FD_FILE */
     struct Pipe    *pipe;  /* FD_PIPE_R / FD_PIPE_W */
     struct UdpSock *udp;   /* FD_UDP (read = naechstes Datagramm, Absender geht verloren; sonst SYS_RECVFROM) */
+    struct TcpConn *tcp;   /* FD_TCP (read/write: Datenstrom; close baut die Verbindung ab) */
 } FdObj;
 
 FdObj *fdobj_new_udp(struct UdpSock *s);
+FdObj *fdobj_new_tcp(struct TcpConn *c);
 
 FdObj *fdobj_new_console(void);
 FdObj *fdobj_new_file(const FsFile *file);             /* kopiert den geoeffneten FsFile */
@@ -35,7 +38,7 @@ void   fdobj_unref(FdObj *o);                          /* Zaehler senken; bei 0 
 int64_t fdobj_read(FdObj *o, void *buf, uint64_t len);
 int64_t fdobj_write(FdObj *o, const void *buf, uint64_t len);
 int64_t fdobj_seek(FdObj *o, int64_t offset, int whence); /* nur Dateien; sonst ERR_SPIPE */
-/* Pipe-Leseende: Zahl der wartenden Bytes, 0 = noch nichts, -1 = Ende (kein Schreiber mehr). Pipe-Schreibende: freier
+/* Pipe-Leseende und TCP: Zahl der wartenden Bytes, 0 = noch nichts, -1 = Ende (kein Schreiber mehr bzw. geschlossen). Pipe-Schreibende: freier
  * Platz, -1 = kein Leser mehr. Dateien: 1, Konsole: 0 */
 int64_t fdobj_available(FdObj *o);
 

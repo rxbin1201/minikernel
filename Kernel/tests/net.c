@@ -116,6 +116,14 @@ void test_net(void)
     fs_unlink("/disk/N4.TXT");
     fs_unlink("/disk/N5.TXT");
 
+    /* TCP ohne Internet: QEMU antwortet fuer geschlossene Ports des Hosts mit RST, die eigene Adresse hat keinen Server */
+    TcpConn *tc = 0;
+    check("TCP: geschlossener Port 10.0.2.2:1 -> Verbindung abgelehnt", tcp_connect(gw, 1, 3000, &tc) == ERR_CONNREFUSED);
+    check("TCP: eigene Adresse -> abgelehnt, Port 0 ungueltig",
+          tcp_connect(lo, 80, 1000, &tc) == ERR_CONNREFUSED && tcp_connect(gw, 0, 1000, &tc) == ERR_INVAL);
+    TcpInfo ti;
+    check("TCP: danach keine Verbindung mehr offen", tcp_info(0, &ti) != 0);
+
     /* DNS ohne Netz */
     uint8_t ips[8][4];
     check("DNS: IP-Adresse und localhost ohne Anfrage", net_resolve("10.1.2.3", ips, 8) == 1 && ips[0][0] == 10 && ips[0][3] == 3 &&
@@ -143,6 +151,35 @@ void test_net(void)
                 (long)nr.offset_ms);
     check("NTP: Zeit von pool.ntp.org plausibel (nach 2026, Ebene 1-15)", e == 0 && nr.utc > 1767225600ULL &&
                                                                          nr.stratum >= 1 && nr.stratum <= 15);
+
+    /* TCP: HTTP-Abruf von example.com bis zum Verbindungsende */
+    static char page[16384];
+    uint64_t total = 0;
+    int64_t last = -1;
+    TcpConn *c = 0;
+    uint64_t h0 = time_ms();
+    int hn = net_resolve("example.com", ips, 8);
+    int tr = hn > 0 ? tcp_connect(ips[0], 80, 5000, &c) : hn;
+    if (tr == 0) {
+        static const char req[] = "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n";
+        if (tcp_send(c, req, sizeof(req) - 1) == (int64_t)sizeof(req) - 1)
+            while (total < sizeof(page) - 1 && (last = tcp_recv(c, page + total, sizeof(page) - 1 - total)) > 0)
+                total += (uint64_t)last;
+        tcp_close(c);
+    }
+    page[total] = 0;
+    kprintf("  (example.com: %lu Bytes in %lu ms)\n", (unsigned long)total, (unsigned long)(time_ms() - h0));
+    check("TCP: HTTP-Anfrage an example.com, Antwort 200 bis zum Verbindungsende",
+          tr == 0 && last == 0 && memcmp(page, "HTTP/1.", 7) == 0 && memcmp(page + 9, "200", 3) == 0 && strstr_(page, "</html>"));
+    if (fs_disk_volume() >= 0) {
+        write_text("/disk/NET.SH", "wget -O /disk/N6.HTM http://example.com/ > /disk/N7.TXT\n");
+        int rc = run_sh("sh /disk/NET.SH");
+        check("wget-Programm: example.com gespeichert", rc == 0 && file_has("/disk/N6.HTM", "</html>") &&
+                                                       file_has("/disk/N7.TXT", "HTTP-Antwort: 200"));
+        fs_unlink("/disk/NET.SH");
+        fs_unlink("/disk/N6.HTM");
+        fs_unlink("/disk/N7.TXT");
+    }
 }
 
 /* Nur mit TESTS=netpeer und dem Python-Gegenrechner (scratchpad/peer.py) als DNS-, NTP- und UDP-Echo-Server auf 10.0.5.1 */
