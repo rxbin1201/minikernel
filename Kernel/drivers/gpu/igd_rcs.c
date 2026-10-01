@@ -156,7 +156,7 @@ static void begin(uint32_t dwords)
 /* Fester Speicher der Render-Engine: beim ersten Test angelegt und danach behalten (wie beim Blitter). So bleiben die
  * Zuordnungen in der GGTT gleich - neu angelegte Seiten an alten Adressen sah die Engine beim zweiten Lauf noch mit
  * der alten Zuordnung. */
-enum { C_RING = 0, C_HWS = 4, C_BATCH = 5, C_STATE = 9, C_RES = 10, C_KERN = 11, C_CKERN = 13, C_CSTATE = 15, C_PAGES = 23 };
+enum { C_RING = 0, C_HWS = 4, C_BATCH = 5, C_STATE = 9, C_RES = 10, C_KERN = 11, C_CKERN = 13, C_CSTATE = 17, C_PAGES = 25 };
 
 /* Die Engine gehoert entweder einem Test (igdtest render/gpgpu) oder dem Zusammensetzen; nach einem Test richtet das
  * Zusammensetzen sie neu ein (comp_ready = 0) */
@@ -538,8 +538,10 @@ static const uint32_t igt_fill_kernel[10][4] = {
 };
 
 /* ---------- Kopieren und Mischen ----------
- * Konstanten (r1): Dword 0/1 = Ziel x (Bytes) / y, Dword 2/3 = Quelle x (Bytes) / y. Je Thread ein Block 32 x 8 Bytes.
- * Binding Table: 0 = Ziel (lesen und schreiben), 1 = Quelle. */
+ * Konstanten (r1): Dword 0/1 = Ziel x (Bytes) / y, Dword 2/3 = Quelle x (Bytes) / y. Je Thread ein Block bw x bh Bytes
+ * (32 x 8 = 8 x 8 Pixel; fuer Raender auch 4 x 8, 32 x 1, 4 x 1: die Hardware schneidet Bloecke am Rand der Flaeche
+ * nicht ab, deshalb muessen sie genau aufgehen). Im Register liegen kleine Bloecke dicht hintereinander (4 Bytes je
+ * Zeile bei bw = 4), also immer ganze Pixel. Binding Table: 0 = Ziel (lesen und schreiben), 1 = Quelle. */
 
 enum { EU_OR = 0x06, EU_XOR = 0x07, EU_SHR = 0x08, EU_SHL = 0x09 };
 
@@ -549,20 +551,21 @@ static uint32_t mbr_desc(int rlen, int bti)
     return 1u << 25 | (uint32_t)rlen << 20 | 1u << 19 | 0x4u << 14 | (uint32_t)bti;
 }
 
-/* Kopf fuer einen Block 32 x 8 an (Register pos: x, y) in Register hdr */
-static int asm_block_header(uint32_t (*k)[4], int n, int hdr, int pos)
+/* Kopf fuer einen Block bw x bh Bytes an (Register pos: x, y) in Register hdr */
+static int asm_block_header(uint32_t (*k)[4], int n, int hdr, int pos, int bw, int bh)
 {
     eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, hdr, 0), eu_r(EU_UD, 0, 0, 4, 3, 1), eu_none());
     eu_inst(k[n++], EU_MOV, 1, 0, eu_d(EU_UD, hdr, 0), eu_r(EU_UD, pos, 0, 2, 1, 1), eu_none());
-    eu_inst(k[n++], EU_MOV, 0, 0, eu_d(EU_UD, hdr, 8), eu_imm(EU_UD, (7u << 16) | 31), eu_none());
+    eu_inst(k[n++], EU_MOV, 0, 0, eu_d(EU_UD, hdr, 8), eu_imm(EU_UD, (uint32_t)(bh - 1) << 16 | (uint32_t)(bw - 1)),
+            eu_none());
     return n;
 }
 
 /* r2 = Zielposition, r3 = Quellposition (Gruppe * Blockgroesse + Versatz aus den Konstanten) */
-static int asm_positions(uint32_t (*k)[4], int n)
+static int asm_positions(uint32_t (*k)[4], int n, int bw, int bh)
 {
-    eu_inst(k[n++], EU_MUL, 0, 0, eu_d(EU_UD, 2, 0), (EuOp){EU_GRF, EU_UD, 0, 4, 0, 0, 0, 0}, eu_imm(EU_UD, 32));
-    eu_inst(k[n++], EU_MUL, 0, 0, eu_d(EU_UD, 2, 4), (EuOp){EU_GRF, EU_UD, 0, 24, 0, 0, 0, 0}, eu_imm(EU_UD, 8));
+    eu_inst(k[n++], EU_MUL, 0, 0, eu_d(EU_UD, 2, 0), (EuOp){EU_GRF, EU_UD, 0, 4, 0, 0, 0, 0}, eu_imm(EU_UD, (uint32_t)bw));
+    eu_inst(k[n++], EU_MUL, 0, 0, eu_d(EU_UD, 2, 4), (EuOp){EU_GRF, EU_UD, 0, 24, 0, 0, 0, 0}, eu_imm(EU_UD, (uint32_t)bh));
     eu_inst(k[n++], EU_ADD, 1, 0, eu_d(EU_UD, 3, 0), eu_r(EU_UD, 2, 0, 2, 1, 1), eu_r(EU_UD, 1, 8, 2, 1, 1));
     eu_inst(k[n++], EU_ADD, 1, 0, eu_d(EU_UD, 2, 0), eu_r(EU_UD, 2, 0, 2, 1, 1), eu_r(EU_UD, 1, 0, 2, 1, 1));
     return n;
@@ -575,32 +578,41 @@ static int asm_end(uint32_t (*k)[4], int n)
     return n;
 }
 
-/* Kopieren: Quelle lesen (r21..r28), mit Kopf r20 ans Ziel schreiben */
+static int blk_regs(int bw, int bh) { return (bw * bh + 31) / 32; } /* Register fuer einen Block */
+
+/* Kopieren: Quelle lesen (ab r21), mit Kopf r20 ans Ziel schreiben */
+static int asm_copy_blk(uint32_t (*k)[4], int bw, int bh)
+{
+    int nr = blk_regs(bw, bh);
+    int n = asm_positions(k, 0, bw, bh);
+    n = asm_block_header(k, n, 4, 3, bw, bh);
+    eu_send(k[n++], 4, SFID_DP1, eu_d(EU_UD, 21, 0), 4, mbr_desc(nr, 1));
+    n = asm_block_header(k, n, 20, 2, bw, bh);
+    eu_send(k[n++], 4, SFID_DP1, eu_null(), 20, mbw_desc(nr + 1, 0));
+    return asm_end(k, n);
+}
+
 static int asm_copy32x8(uint32_t (*k)[4])
 {
-    int n = asm_positions(k, 0);
-    n = asm_block_header(k, n, 4, 3);
-    eu_send(k[n++], 4, SFID_DP1, eu_d(EU_UD, 21, 0), 4, mbr_desc(8, 1));
-    n = asm_block_header(k, n, 20, 2);
-    eu_send(k[n++], 4, SFID_DP1, eu_null(), 20, mbw_desc(9, 0));
-    return asm_end(k, n);
+    return asm_copy_blk(k, 32, 8);
 }
 
 /* Mischen: Quelle (r21..r28) mit ihrem Alpha (Byte 3 jedes Pixels) ueber das Ziel (r29..r36), Ergebnis r51..r58 mit
  * Kopf r50. Je Kanal: x = s*a + d*(255-a); Ergebnis (x + 128 + ((x + 128) >> 8)) >> 8 = x / 255 gerundet.
  * Je halbe Zeile (16 Bytes = 4 Pixel) in Woertern: r40 = x, r41 = 255-a, r42/r43 Zwischenwerte, r44 zum Packen. */
-static int asm_blend32x8(uint32_t (*k)[4])
+static int asm_blend_blk(uint32_t (*k)[4], int bw, int bh)
 {
-    int n = asm_positions(k, 0);
-    n = asm_block_header(k, n, 4, 3);
-    eu_send(k[n++], 4, SFID_DP1, eu_d(EU_UD, 21, 0), 4, mbr_desc(8, 1));
-    n = asm_block_header(k, n, 5, 2);
-    eu_send(k[n++], 4, SFID_DP1, eu_d(EU_UD, 29, 0), 5, mbr_desc(8, 0));
+    int nr = blk_regs(bw, bh);
+    int n = asm_positions(k, 0, bw, bh);
+    n = asm_block_header(k, n, 4, 3, bw, bh);
+    eu_send(k[n++], 4, SFID_DP1, eu_d(EU_UD, 21, 0), 4, mbr_desc(nr, 1));
+    n = asm_block_header(k, n, 5, 2, bw, bh);
+    eu_send(k[n++], 4, SFID_DP1, eu_d(EU_UD, 29, 0), 5, mbr_desc(nr, 0));
     /* Bytes erst in Woerter umwandeln (mov kann das sicher), dann nur Woerter mit Woertern verrechnen */
     EuOp x = eu_r(EU_UW, 40, 0, 5, 4, 1), ia = eu_r(EU_UW, 41, 0, 5, 4, 1), t = eu_r(EU_UW, 42, 0, 5, 4, 1);
     EuOp u = eu_r(EU_UW, 43, 0, 5, 4, 1), sw = eu_r(EU_UW, 45, 0, 5, 4, 1), aw = eu_r(EU_UW, 46, 0, 5, 4, 1);
     EuOp dw = eu_r(EU_UW, 47, 0, 5, 4, 1);
-    for (int row = 0; row < 8; row++)
+    for (int row = 0; row < nr; row++)
         for (int half = 0; half < 2; half++) {
             int off = half * 16;
             EuOp s = eu_r(EU_UB, 21 + row, off, 5, 4, 1), d = eu_r(EU_UB, 29 + row, off, 5, 4, 1);
@@ -626,9 +638,14 @@ static int asm_blend32x8(uint32_t (*k)[4])
                 eu_inst(k[n++], EU_OR, 2, 0, eu_d(EU_UD, out, osub), eu_r(EU_UD, out, osub, 4, 4, 1), tmp);
             }
         }
-    n = asm_block_header(k, n, 50, 2);
-    eu_send(k[n++], 4, SFID_DP1, eu_null(), 50, mbw_desc(9, 0));
+    n = asm_block_header(k, n, 50, 2, bw, bh);
+    eu_send(k[n++], 4, SFID_DP1, eu_null(), 50, mbw_desc(nr + 1, 0));
     return asm_end(k, n);
+}
+
+static int asm_blend32x8(uint32_t (*k)[4])
+{
+    return asm_blend_blk(k, 32, 8);
 }
 
 /* Dieselbe Rechnung auf der CPU (zum Vergleich) */
@@ -1069,8 +1086,10 @@ int igd_gpgpu_test(void)
  * Zwischen zwei Auftraegen wartet ein PIPE_CONTROL, bis alle Threads fertig sind (spaetere Auftraege lesen, was
  * fruehere geschrieben haben). */
 
-#define CK_BLEND    256   /* Mischen-Kernel hinter dem Kopier-Kernel (Kernelbasis = C_CKERN) */
 #define CS_OPS      0     /* erster Auftrag im Zustandsbereich */
+#define CK_PAGES    4     /* Kernel: je Blockform (IGD_BLK_*) kopieren und mischen */
+
+static uint32_t ck_off[8];  /* Lage der Kernel (Blockform * 2 + mischen) in C_CKERN */
 
 static int comp_start(void)
 {
@@ -1088,16 +1107,24 @@ static int comp_start(void)
     igd_forcewake_put();
     if (!ok)
         return 0;
+    static const int shape[4][2] = {{32, 8}, {4, 8}, {32, 1}, {4, 1}}; /* IGD_BLK_8X8, 1X8, 8X1, 1X1 */
     uint8_t *k = core_ptr(C_CKERN);
-    int nc = asm_copy32x8((uint32_t (*)[4])k);
-    int nb = asm_blend32x8((uint32_t (*)[4])(k + CK_BLEND));
-    if (nc * 16 > CK_BLEND || CK_BLEND + nb * 16 > 2 * 4096) {
-        kprintf("igdcomp: Kernel zu gross (%d / %d Befehle)\n", nc, nb);
-        return 0;
+    uint32_t at = 0;
+    for (int i = 0; i < 8; i++) {
+        static uint32_t tmp[512][4];
+        int bw = shape[i / 2][0], bh = shape[i / 2][1];
+        int nk = (i & 1) ? asm_blend_blk(tmp, bw, bh) : asm_copy_blk(tmp, bw, bh);
+        if (at + (uint32_t)nk * 16 > CK_PAGES * 4096) {
+            kprintf("igdcomp: Kernel passen nicht in %d Seiten\n", CK_PAGES);
+            return 0;
+        }
+        memcpy(k + at, tmp, (uint64_t)nk * 16);
+        ck_off[i] = at;
+        at = (at + (uint32_t)nk * 16 + 63) & ~63u;
     }
-    igd_clflush((uint64_t)k, 2 * 4096);
+    igd_clflush((uint64_t)k, CK_PAGES * 4096);
     comp_ready = 1;
-    kprintf("igdcomp: Render-Engine eingerichtet (Kopieren %d, Mischen %d Befehle)\n", nc, nb);
+    kprintf("igdcomp: Render-Engine eingerichtet (8 Kernel, %u Bytes)\n", at);
     return 1;
 }
 
@@ -1133,7 +1160,7 @@ int igd_rcs_comp(const IgdCompOp *ops, int n, uint64_t *us)
     b[k++] = 0xFFFFF000u | 1;
     b[k++] = (8u << 12) | 1;     /* Dynamic State: 8 Seiten */
     b[k++] = 0xFFFFF000u | 1;
-    b[k++] = (2u << 12) | 1;     /* Kernel: 2 Seiten */
+    b[k++] = ((uint32_t)CK_PAGES << 12) | 1;
     b[k++] = 0 | 1;
     b[k++] = 0;
     b[k++] = 0xFFFFF000u;
@@ -1150,7 +1177,7 @@ int igd_rcs_comp(const IgdCompOp *ops, int n, uint64_t *us)
         const IgdCompOp *o = &ops[i];
         uint32_t off = CS_OPS + (uint32_t)i * 256;
         uint32_t *idd = (uint32_t *)(st + off), *cb = (uint32_t *)(st + off + 64), *bt = (uint32_t *)(st + off + 96);
-        idd[0] = o->blend ? CK_BLEND : 0;
+        idd[0] = ck_off[(o->shape & 3) * 2 + (o->blend != 0)];
         idd[2] = 1u << 18;       /* Single Program Flow */
         idd[4] = off + 96;       /* Binding Table */
         idd[5] = 1u << 16;       /* Konstanten: 1 Register */
@@ -1176,10 +1203,10 @@ int igd_rcs_comp(const IgdCompOp *ops, int n, uint64_t *us)
         b[k++] = 1u << 30;       /* SIMD16 */
         b[k++] = 0;
         b[k++] = 0;
-        b[k++] = (o->dst.w + 31) / 32;
+        b[k++] = o->gx;
         b[k++] = 0;
         b[k++] = 0;
-        b[k++] = (o->dst.h + 7) / 8;
+        b[k++] = o->gy;
         b[k++] = 0;
         b[k++] = 1;
         b[k++] = 0xFFFF;

@@ -45,10 +45,13 @@ void igd_blt_report(void);        /* igdtest info */
 typedef struct {
     uint32_t gtt, w, h, pitch;
 } IgdSurf;
+enum { IGD_BLK_8X8, IGD_BLK_1X8, IGD_BLK_8X1, IGD_BLK_1X1 }; /* Pixel je Thread: die Bloecke muessen genau aufgehen */
 typedef struct {
     int      blend;            /* 0 kopieren, 1 Quelle mit ihrem Alpha (Byte 3) ueber das Ziel mischen */
-    IgdSurf  dst, src;         /* bis zum rechten und unteren Rand des Rechtecks */
-    uint32_t dst_off, src_off; /* linker Rand des Rechtecks in der Flaeche (Bytes; 0 = Flaeche beginnt am Rechteck) */
+    int      shape;            /* IGD_BLK_* */
+    uint32_t gx, gy;           /* Bloecke (Threads) in x und y */
+    IgdSurf  dst, src;         /* Basis an 64 Byte ausgerichtet, bis zum rechten und unteren Rand des Rechtecks */
+    uint32_t dst_off, src_off; /* linker Rand des Rechtecks in der Flaeche (Bytes) */
 } IgdCompOp;
 #define IGD_COMP_MAX_OPS 120
 /* Auftraege der Reihe nach ausfuehren (jeder sieht die Ergebnisse der vorigen) und abwarten.
