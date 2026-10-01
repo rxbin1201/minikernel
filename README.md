@@ -80,6 +80,12 @@ In der Shell: `burn 5000 & burn 5000 & cpus` zeigt zwei ausgelastete CPUs.
   3440x1440 mit 100 Hz. `resolution` listet sie mit
   Bildrate und schaltet sofort um (`resolution 2560x1440@60`), die Konsole passt sich an. Fuer den naechsten Start
   speichert es `igdmode=2560x1440@60` und `mode=max` (der Framebuffer der Firmware muss gross genug sein)
+- **Blitter fuer die Bild-Updates** (`igd_blt.c`): statt der CPU kopiert die Blitter-Engine der GPU die fertigen
+  Bilder der Grafikprogramme (z.B. des Desktops) in den Bildspeicher. Das Programmbild wird dafuer in die GGTT
+  eingeblendet (nur wenn es sich aendert); Teil-Updates laufen im Hintergrund, bei ganzen Bildern laufen waehrend des
+  Kopierens andere Threads. Die GPU liest ueber "Write-Back im LLC" (sieht die Daten der CPU ohne clflush) und schreibt
+  uncached in die Bildpuffer. Ein Selbsttest beim Start prueft das; sonst und mit `noblt` kopiert wie vorher die CPU.
+  `igdtest info` zeigt, wie viel der Blitter uebernommen hat
 - **Bildwechsel-Interrupt** (`igd_irq.c`): die Pipe meldet jeden Bildwechsel per MSI. Grafikprogramme warten mit
   `gfx_vsync()` darauf und laufen so genau im Takt des Monitors (Tetris, Snake, Desktop; `anim` zeigt es), die
   Doppelpufferung wartet darauf statt nachzusehen. Ohne Interrupt (QEMU) ersetzt eine 10-ms-Pause den Takt

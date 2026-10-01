@@ -29,6 +29,14 @@ void     igd_irq_init(const PciDevice *d);              /* igd_irq.c: Bildwechse
 void     igd_cursor_reapply(void);                     /* igd.c: Zeiger-Ebene nach einem Anschlusswechsel */
 void     igd_edid_dump(const uint8_t *edid, int blocks, uint32_t limit_khz, const char *note); /* igd_mode.c */
 
+/* Blitter im Dauerbetrieb (igd_blt.c): Bild-Updates aus dem Speicher des laufenden Programms */
+int  igd_blt_init(void);          /* beim Start; 0 = Blitter uebernimmt */
+int  igd_blt_on(void);
+int  igd_blt_sync(void);          /* warten, bis alles kopiert ist (vor Schreiben der CPU); 0 = ok */
+/* 1 = in Auftrag gegeben (wait = 1: ganzes Bild, kehrt erst zurueck, wenn es fertig ist), 0 = die CPU muss kopieren */
+int  igd_blt_copy_user(uint32_t dst, const uint32_t *src, uint32_t pitch, int x, int y, int w, int h, int wait);
+void igd_blt_report(void);        /* igdtest info */
+
 /* Doppelpufferung (igd.c): A = Framebuffer der Firmware, B = zweiter Puffer im RAM */
 extern int       igd_flip_ready;
 extern uint32_t  igd_scr_w, igd_scr_h, igd_scr_stride;

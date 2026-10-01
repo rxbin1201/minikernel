@@ -159,6 +159,9 @@ void console_gfx_release(uint32_t pid)
     uint64_t f = irq_save();
     gfx_mode = 0;
     gfx_owner = 0;
+    irq_restore(f);
+    igd_gfx_sync(); /* der Blitter kopiert vielleicht noch ein Bild des Programms */
+    f = irq_save();
     /* Konsole wiederherstellen: das Abbild enthaelt alles, was inzwischen ausgegeben wurde */
     memmove((void *)fb, shadow, (uint64_t)height_px * pitch * sizeof(uint32_t));
     cursor_show();

@@ -250,6 +250,7 @@ void igd_init(const BootInfo *bi)
     }
     display_init(bi);
     igd_irq_init(&d);
+    igd_blt_init();
 }
 
 /* ---------- Stufe 2: Page-Flipping (nur auf Befehl: igdtest) ---------- */
@@ -569,7 +570,8 @@ free_frames:
  * gleich grosser Puffer im RAM. Ein komplettes Bild eines Grafikprogramms kommt in den gerade nicht angezeigten Puffer,
  * dann wird beim naechsten Bildwechsel umgeschaltet: kein Tearing. Teil-Updates gehen in den angezeigten Puffer; der
  * andere wird vor seiner naechsten Anzeige ohnehin ganz ueberschrieben. Gewartet wird erst, bevor der naechste Puffer
- * beschrieben wird: das Programm laeuft so von selbst im Takt der Bildrate.
+ * beschrieben wird: das Programm laeuft so von selbst im Takt der Bildrate. Kopiert wird nach Moeglichkeit vom Blitter
+ * der GPU (igd_blt.c): Teil-Updates im Hintergrund, ganze Bilder waehrend andere Threads laufen.
  * "noigd" in der Kommandozeile schaltet beides ab (dann wie vorher alles in Software). */
 
 static int       hw_cursor;           /* Zeiger-Ebene eingerichtet */
@@ -830,7 +832,10 @@ int igd_gfx_blit(const uint32_t *src, uint32_t pitch, int x, int y, int w, int h
         wait_flip();
         uint64_t t1 = time_us();
         int to_b = !front_b;
-        copy_rect(to_b ? igd_buf_b : igd_buf_a, src, pitch, 0, 0, w, h, to_b);
+        if (!igd_blt_copy_user(to_b ? igd_surf_b : igd_surf_a, src, pitch, 0, 0, w, h, 1)) {
+            igd_blt_sync();
+            copy_rect(to_b ? igd_buf_b : igd_buf_a, src, pitch, 0, 0, w, h, to_b);
+        }
         pending = to_b ? igd_surf_b : igd_surf_a;
         igd_wr(PLANE_SURF(igd_state.scanout_pipe), pending);
         front_b = to_b;
@@ -842,17 +847,26 @@ int igd_gfx_blit(const uint32_t *src, uint32_t pitch, int x, int y, int w, int h
             bstat.full_max_us = t2 - t1;
         return 1;
     }
-    copy_rect(front_b ? igd_buf_b : igd_buf_a, src, pitch, x, y, w, h, front_b); /* Teil-Update: in den angezeigten Puffer */
+    /* Teil-Update: in den angezeigten Puffer. Der Blitter kopiert im Hintergrund; die CPU (kleine Ausschnitte) muss nicht
+     * auf ihn warten - er liest das Programmbild erst beim Kopieren, also nie aelteres als die CPU jetzt */
+    if (!igd_blt_copy_user(front_b ? igd_surf_b : igd_surf_a, src, pitch, x, y, w, h, 0))
+        copy_rect(front_b ? igd_buf_b : igd_buf_a, src, pitch, x, y, w, h, front_b);
     bstat.part_n++;
     bstat.part_px += (uint64_t)w * (uint64_t)h;
     bstat.part_us += time_us() - t0;
     return 1;
 }
 
+void igd_gfx_sync(void)
+{
+    igd_blt_sync();
+}
+
 void igd_gfx_end(void)
 {
     if (!igd_flip_ready)
         return;
+    igd_blt_sync();
     wait_flip();
     if (front_b) { /* die Konsole zeichnet in A */
         pending = igd_surf_a;
@@ -896,8 +910,10 @@ int igd_info_report(void)
             (unsigned long)bstat.full_max_us, (unsigned long)us_avg(bstat.full_wait_us, bstat.full_n));
     kprintf("igdinfo: Teil-Updates: %lu, je %lu Pixel, %lu us\n", (unsigned long)bstat.part_n,
             (unsigned long)us_avg(bstat.part_px, bstat.part_n), (unsigned long)us_avg(bstat.part_us, bstat.part_n));
+    igd_blt_report();
     if (!igd_flip_ready)
         return 0;
+    igd_blt_sync();
     if (front_b || pending) {
         kprintf("igdinfo: Puffer B wird gerade angezeigt, Vergleich uebersprungen\n");
         return 0;

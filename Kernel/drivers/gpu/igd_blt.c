@@ -1,4 +1,5 @@
-/* Intel-Grafik Gen9, Stufe 3: Blitter-Engine (BCS). Rechtecke fuellen und kopieren durch die GPU.
+/* Intel-Grafik Gen9, Stufe 3: Blitter-Engine (BCS). Rechtecke fuellen und kopieren durch die GPU; im Dauerbetrieb
+ * uebernimmt sie die Bild-Updates der Grafikprogramme (igd_blt_copy_user), igdtest blit prueft sie einzeln.
  *
  * Die Engine arbeitet Befehle aus einem Ringpuffer ab (klassischer Ring-Modus, keine Execlists): der Kernel schreibt
  * Befehle ans Ende und schiebt RING_TAIL weiter, die Engine liest ab RING_HEAD. Hinter jedem Auftrag steht MI_FLUSH_DW
@@ -10,6 +11,8 @@
 #include "drivers/gpu/igd_internal.h"
 #include "arch/x86_64/apic.h"
 #include "console/console.h"
+#include "core/cmdline.h"
+#include "mm/paging.h"
 #include "core/sched.h"
 #include "lib/kprintf.h"
 #include "lib/string.h"
@@ -254,6 +257,311 @@ static int bench(const char *label)
     return 0;
 }
 
+/* ---------- Dauerbetrieb: Bild-Updates der Grafikprogramme per Blitter ----------
+ *
+ * Statt die CPU jedes fertige Bild (bzw. jeden geaenderten Ausschnitt) in den Bildspeicher kopieren zu lassen, kopiert
+ * der Blitter. Dafuer wird der Bildpuffer des Programms (normaler Speicher im Adressraum des Programms) Seite fuer
+ * Seite in ein Fenster der GGTT eingeblendet; das passiert nur, wenn sich der Puffer aendert. Teil-Updates werden nur
+ * in Auftrag gegeben (der Aufruf kehrt sofort zurueck, die GPU kopiert im Hintergrund); ganze Bilder kopiert der
+ * Blitter in den verdeckten Puffer, der Kernel wartet darauf (und laesst dabei andere Threads laufen) und schaltet um.
+ *
+ * Caching: der Blitter liest das Programmbild ueber einen PPAT-Eintrag "Write-Back im LLC" - die GPU teilt sich den
+ * Last-Level-Cache mit der CPU, sie sieht also, was die CPU gerade geschrieben hat, ohne dass jemand clflush braucht.
+ * Er schreibt in die Bildpuffer ueber einen Eintrag "uncached": die Display-Engine liest am Cache vorbei. Welche
+ * Eintraege das sind, steht in den PPAT-Registern (von der Firmware gesetzt); fehlt einer, bleibt es bei der CPU.
+ * Beim Start prueft ein Selbsttest, ob der Blitter die frisch von der CPU geschriebenen Daten richtig kopiert.
+ * "noblt" in der Kommandozeile schaltet das ab. */
+
+#define PPAT_LO     0x40E0
+#define PPAT_HI     0x40E4
+#define WIN_PAGES   10240   /* Fenster fuer Programmbilder: 40 MiB (3840x2160x4 passt) */
+#define SMALL_PX    16384   /* kleinere Ausschnitte kopiert die CPU (der Auftrag kostet mehr als das Kopieren) */
+
+static int       blt_on;
+static uint32_t  pte_wb, pte_uc;                /* PAT-Bits im GGTT-Eintrag: Programmbilder bzw. Bildpuffer */
+static uint32_t  win_base;                      /* GGTT-Index des Fensters */
+static uint64_t *win_phys;                      /* eingeblendete Seiten */
+static void     *win_as;                        /* Adressraum, Startadresse und Seitenzahl der Einblendung */
+static uint64_t  win_va;
+static uint32_t  win_n;
+static uint32_t  last_n;                        /* Nummer des zuletzt abgeschickten Auftrags */
+
+static struct {
+    uint64_t part_n, part_px, part_us;          /* Teil-Updates: Anzahl, Pixel, CPU-Zeit fuers Abschicken */
+    uint64_t full_n, full_us, full_max_us;      /* ganze Bilder: Zeit bis der Blitter fertig ist */
+    uint64_t remaps, cpu_fallback;
+} bs;
+
+static uint32_t pat_bits(int idx) /* PPAT-Index -> Bits im GGTT-Eintrag (PWT 3, PCD 4, PAT 7) */
+{
+    return (uint32_t)(((idx & 1) << 3) | ((idx & 2) << 3) | ((idx & 4) << 5));
+}
+
+static void blt_fail(const char *why)
+{
+    kprintf("igdblt: %s - Bild-Updates wieder per CPU\n", why);
+    dump_engine("Zustand");
+    forcewake_get();
+    igd_wr(GDRST, GRDOM_BLT);
+    WAIT_UNTIL(!(igd_rd(GDRST) & GRDOM_BLT), 100);
+    forcewake_put();
+    blt_on = 0;
+    win_as = 0;
+}
+
+/* Auftrag mit n Dwords beginnen; am Ende des Rings erst warten, bis alles fertig ist (dann ist Umbrechen sicher) */
+static int reserve(uint32_t dwords)
+{
+    emit_pos = tail;
+    if (emit_pos + dwords * 4 + 64 > RING_BYTES) {
+        if (!wait_seqno(last_n, 200))
+            return 0;
+        while (emit_pos < RING_BYTES)
+            emit(MI_NOOP);
+        emit_pos = 0;
+    }
+    return 1;
+}
+
+static uint32_t kick(void)
+{
+    forcewake_get();
+    uint32_t n = submit();
+    forcewake_put();
+    last_n = n;
+    return n;
+}
+
+int igd_blt_on(void)
+{
+    return blt_on;
+}
+
+/* Wartet, bis der Blitter alles erledigt hat (vor jedem Schreiben der CPU in die Bildpuffer). 0 = ok */
+int igd_blt_sync(void)
+{
+    if (!blt_on)
+        return 0;
+    if (wait_seqno(last_n, 200))
+        return 0;
+    blt_fail("Blitter antwortet nicht");
+    return -1;
+}
+
+/* Programmbild (Adressraum des laufenden Prozesses) ins Fenster einblenden; 1 = Bereich [va, va+bytes) ist drin */
+static int window_map(uint64_t va, uint64_t bytes)
+{
+    void *as = as_current();
+    uint64_t first = va & ~0xFFFULL, last = (va + bytes - 1) & ~0xFFFULL;
+    uint32_t need = (uint32_t)((last - first) / 4096 + 1);
+    if (need > WIN_PAGES)
+        return 0;
+    if (win_as == as && first >= win_va && last < win_va + (uint64_t)win_n * 4096) {
+        /* noch dieselben Seiten? (Erste und letzte pruefen: ein neuer Puffer an derselben Stelle hat andere) */
+        uint64_t p0, p1;
+        uint32_t i0 = (uint32_t)((first - win_va) / 4096), i1 = (uint32_t)((last - win_va) / 4096);
+        if (as_translate(as, first, &p0, 0) && as_translate(as, last, &p1, 0) && (p0 & ~0xFFFULL) == win_phys[i0] &&
+            (p1 & ~0xFFFULL) == win_phys[i1])
+            return 1;
+    }
+    if (igd_blt_sync() != 0) /* die GPU liest vielleicht noch aus der alten Einblendung */
+        return 0;
+    /* Auch Seiten davor (hoechstens die Haelfte des freien Platzes) und danach: spaetere Ausschnitte desselben Bildes
+     * liegen dann meist schon im Fenster */
+    uint64_t phys;
+    for (uint32_t back = 0; back < (WIN_PAGES - need) / 2 && first >= 4096 && as_translate(as, first - 4096, &phys, 0); back++)
+        first -= 4096;
+    uint32_t n = 0;
+    for (; n < WIN_PAGES; n++) {
+        if (!as_translate(as, first + (uint64_t)n * 4096, &phys, 0))
+            break;
+        phys &= ~0xFFFULL;
+        win_phys[n] = phys;
+        igd_ggtt[win_base + n] = phys | IGD_PTE_VALID | pte_wb;
+    }
+    igd_ggtt_flush();
+    bs.remaps++;
+    win_va = first;
+    win_n = n;
+    int ok = (va & ~0xFFFULL) + (uint64_t)need * 4096 <= first + (uint64_t)n * 4096;
+    win_as = ok ? as : 0;
+    return ok;
+}
+
+/* Rechteck (w x h) aus dem Programmbild src (Zeilenlaenge pitch Pixel) nach (x, y) in den Bildpuffer dst (GGTT-Adresse)
+ * kopieren lassen. 1 = in Auftrag gegeben, 0 = geht nicht (dann kopiert die CPU; vorher igd_blt_sync). */
+int igd_blt_copy_user(uint32_t dst, const uint32_t *src, uint32_t pitch, int x, int y, int w, int h, int wait)
+{
+    if (!blt_on)
+        return 0;
+    if (!wait && (uint64_t)w * (uint64_t)h < SMALL_PX)
+        return 0;
+    uint64_t t0 = time_us(), va = (uint64_t)src, bytes = ((uint64_t)(h - 1) * pitch + (uint64_t)w) * 4;
+    if (pitch * 4 > 32767 || !window_map(va, bytes)) {
+        bs.cpu_fallback++;
+        return 0;
+    }
+    /* Quelle: Seitenanfang im Fenster, Lage des Rechtecks darin als Koordinaten */
+    uint64_t off = va - win_va, page_off = off & ~0xFFFULL, in = off & 0xFFF;
+    uint32_t sgtt = (win_base << 12) + (uint32_t)page_off, spitch = pitch * 4;
+    int sx = (int)((in % spitch) / 4), sy = (int)(in / spitch);
+    if (!reserve(10 + 6)) {
+        blt_fail("Ring laeuft nicht leer");
+        return 0;
+    }
+    emit_copy(dst, igd_scr_stride, x, y, sgtt, spitch, sx, sy, w, h);
+    uint32_t n = kick();
+    if (!wait) {
+        bs.part_n++;
+        bs.part_px += (uint64_t)w * (uint64_t)h;
+        bs.part_us += time_us() - t0;
+        return 1;
+    }
+    /* ganzes Bild: auf den Blitter warten, dabei andere Threads laufen lassen */
+    uint64_t end = time_ms() + 200;
+    for (;;) {
+        igd_clflush((uint64_t)&hws[HWS_SEQNO / 4], 4);
+        if ((int32_t)(hws[HWS_SEQNO / 4] - n) >= 0)
+            break;
+        if (time_ms() > end) {
+            blt_fail("Blitter wird mit einem Bild nicht fertig");
+            return 0;
+        }
+        thread_yield();
+    }
+    uint64_t d = time_us() - t0;
+    bs.full_n++;
+    bs.full_us += d;
+    if (d > bs.full_max_us)
+        bs.full_max_us = d;
+    return 1;
+}
+
+void igd_blt_report(void)
+{
+    if (!blt_on) {
+        kprintf("igdinfo: Blitter: aus (Bild-Updates per CPU)\n");
+        return;
+    }
+    kprintf("igdinfo: Blitter an, GPU-Takt jetzt %u MHz: %lu Teil-Updates (je %lu Pixel, Abschicken %lu us), "
+            "%lu ganze Bilder (je %lu us, max %lu us)\n",
+            cur_mhz(), (unsigned long)bs.part_n, (unsigned long)(bs.part_n ? bs.part_px / bs.part_n : 0),
+            (unsigned long)(bs.part_n ? bs.part_us / bs.part_n : 0), (unsigned long)bs.full_n,
+            (unsigned long)(bs.full_n ? bs.full_us / bs.full_n : 0), (unsigned long)bs.full_max_us);
+    kprintf("igdinfo: Blitter: %lu Mal Programmbild neu eingeblendet, %lu Mal doch per CPU\n", (unsigned long)bs.remaps,
+            (unsigned long)bs.cpu_fallback);
+}
+
+/* Beim Start (nach der Doppelpufferung): Ring, Statusseite, Fenster einrichten, PPAT pruefen, Selbsttest */
+int igd_blt_init(void)
+{
+    if (!igd_flip_ready || cmdline_has("noblt")) {
+        if (igd_flip_ready)
+            kprintf("igdblt: 'noblt': Bild-Updates per CPU\n");
+        return -1;
+    }
+    if (!forcewake_get()) {
+        forcewake_put();
+        kprintf("igdblt: Grafikkern wacht nicht auf (Forcewake): Bild-Updates per CPU\n");
+        return -1;
+    }
+    uint64_t pat = igd_rd(PPAT_LO) | ((uint64_t)igd_rd(PPAT_HI) << 32);
+    forcewake_put();
+    int wb = -1, uc = -1;
+    for (int i = 0; i < 8; i++) {
+        uint32_t b = (uint32_t)(pat >> (8 * i)) & 0xFF, type = b & 3, tgt = (b >> 2) & 3;
+        if (wb < 0 && type == 3 && tgt != 0) /* Write-Back, im LLC */
+            wb = i;
+        if (uc < 0 && type == 0)
+            uc = i;
+    }
+    kprintf("igdblt: PPAT %#lx: Programmbilder ueber Eintrag %d (Write-Back/LLC), Bildpuffer ueber %d (uncached)\n",
+            (unsigned long)pat, wb, uc);
+    if (wb < 0 || uc < 0) {
+        kprintf("igdblt: passende PPAT-Eintraege fehlen: Bild-Updates per CPU (bitte Log schicken)\n");
+        return -1;
+    }
+    pte_wb = pat_bits(wb);
+    pte_uc = pat_bits(uc);
+
+    /* GGTT: Ring (4) + Statusseite (1) + Selbsttest (2) + Fenster, oberhalb von Puffer B */
+    uint32_t base = igd_ggtt_entries / 4 + 0x8000, pages = 4 + 1 + 2 + WIN_PAGES;
+    uint64_t *saved = kmalloc(sizeof(uint64_t) * pages);
+    win_phys = kmalloc(sizeof(uint64_t) * WIN_PAGES);
+    uint64_t ring_phys = pmm_alloc_frames(4), hws_phys = pmm_alloc_frame(), t_phys = pmm_alloc_frames(2);
+    if (!saved || !win_phys || !ring_phys || !hws_phys || !t_phys || igd_ggtt_claim(base, pages, saved)) {
+        kprintf("igdblt: kein Speicher bzw. GGTT belegt: Bild-Updates per CPU\n");
+        kfree(saved);
+        return -1;
+    }
+    kfree(saved); /* die Eintraege gehoeren ab jetzt dauerhaft uns */
+    memset((void *)ring_phys, 0, RING_BYTES);
+    memset((void *)hws_phys, 0, 4096);
+    igd_clflush(ring_phys, RING_BYTES);
+    igd_clflush(hws_phys, 4096);
+    for (uint32_t i = 0; i < 4; i++)
+        igd_ggtt[base + i] = (ring_phys + i * 4096) | IGD_PTE_VALID;
+    igd_ggtt[base + 4] = hws_phys | IGD_PTE_VALID;
+    igd_ggtt[base + 5] = t_phys | IGD_PTE_VALID | pte_wb;            /* Selbsttest: Quelle wie ein Programmbild */
+    igd_ggtt[base + 6] = (t_phys + 4096) | IGD_PTE_VALID | pte_uc;   /* Ziel wie ein Bildpuffer */
+    /* Bildpuffer A (Firmware) und B: der Blitter schreibt uncached hinein */
+    uint32_t fb_pages = (uint32_t)(((uint64_t)igd_scr_stride * igd_scr_h + 4095) / 4096);
+    for (uint32_t s = 0; s < 2; s++) {
+        uint32_t first = (s ? igd_surf_b : igd_surf_a) >> 12;
+        for (uint32_t i = 0; i < fb_pages; i++) {
+            uint64_t e = igd_ggtt[first + i];
+            igd_ggtt[first + i] = (e & ~(uint64_t)0x98) | pte_uc; /* PAT-Bits ersetzen, Adresse bleibt */
+        }
+    }
+    igd_ggtt_flush();
+    ring = (uint32_t *)ring_phys;
+    hws = (volatile uint32_t *)hws_phys;
+    ring_gtt = base << 12;
+    hws_gtt = (base + 4) << 12;
+    win_base = base + 7;
+    seqno = last_n = 0;
+
+    forcewake_get();
+    ring_ok = ring_start();
+    uint32_t cap = igd_rd(RP_STATE_CAP), rp0 = cap & 0xFF;
+    if (rp0)
+        igd_wr(RPNSWREQ, (rp0 * 3) << 23); /* hoechster Takt, solange der GT wach ist (im Leerlauf schlaeft er trotzdem) */
+    forcewake_put();
+    if (!ring_ok) {
+        kprintf("igdblt: Ring startet nicht: Bild-Updates per CPU\n");
+        return -1;
+    }
+
+    /* Selbsttest: die CPU schreibt ein Muster (ohne clflush), der Blitter kopiert es, die CPU vergleicht */
+    uint32_t *s = (uint32_t *)t_phys, *d = (uint32_t *)(t_phys + 4096);
+    memset(d, 0, 4096);
+    igd_clflush((uint64_t)d, 4096);
+    for (int i = 0; i < 1024; i++)
+        s[i] = 0x00A5C3E1u ^ ((uint32_t)i * 2654435761u);
+    blt_on = 1;
+    uint64_t t0 = time_us();
+    reserve(10 + 6);
+    emit_copy((base + 6) << 12, 128, 0, 0, (base + 5) << 12, 128, 0, 0, 32, 32);
+    uint32_t n = kick();
+    if (!wait_seqno(n, 100)) {
+        blt_fail("Selbsttest: keine Rueckmeldung");
+        return -1;
+    }
+    uint64_t us = time_us() - t0;
+    igd_clflush((uint64_t)d, 4096);
+    int bad = 0;
+    for (int i = 0; i < 1024; i++)
+        bad += d[i] != s[i];
+    if (bad) {
+        kprintf("igdblt: Selbsttest: %d von 1024 Pixeln falsch (GPU sieht die CPU-Daten nicht) - Bild-Updates per CPU\n", bad);
+        blt_on = 0;
+        return -1;
+    }
+    kprintf("igdblt: Blitter uebernimmt die Bild-Updates (Selbsttest ok, %lu us; GPU-Takt bis %u MHz)\n",
+            (unsigned long)us, rp0 * 50);
+    return 0;
+}
+
 /* ---------- Test (igdtest blit) ---------- */
 
 #define TEST_W     512
@@ -276,6 +584,17 @@ int igd_blit_test(void)
     if (rc) {
         kfree(saved);
         return rc;
+    }
+    /* Laeuft der Blitter schon fuer die Bild-Updates: anhalten, der Test nimmt einen eigenen Ring; danach weiter */
+    int resume = blt_on;
+    uint32_t *keep_ring = ring, keep_rg = ring_gtt, keep_hg = hws_gtt, keep_seq = seqno;
+    volatile uint32_t *keep_hws = hws;
+    if (resume) {
+        igd_blt_sync();
+        blt_on = 0;
+        forcewake_get();
+        ring_stop();
+        forcewake_put();
     }
     uint64_t ring_phys = pmm_alloc_frames(4), hws_phys = pmm_alloc_frame(), test_phys = pmm_alloc_frames(TEST_PAGES);
     if (!ring_phys || !hws_phys || !test_phys) {
@@ -441,6 +760,20 @@ out_free:
     if (test_phys)
         pmm_free_frames(test_phys, TEST_PAGES);
     kfree(saved);
+    if (resume) { /* Dauerbetrieb mit seinem Ring wieder aufnehmen */
+        ring = keep_ring;
+        hws = keep_hws;
+        ring_gtt = keep_rg;
+        hws_gtt = keep_hg;
+        seqno = last_n = keep_seq;
+        hws[HWS_SEQNO / 4] = seqno;
+        igd_clflush((uint64_t)&hws[HWS_SEQNO / 4], 4);
+        forcewake_get();
+        ring_ok = ring_start();
+        forcewake_put();
+        blt_on = ring_ok;
+        kprintf("igdblt: Dauerbetrieb %s\n", blt_on ? "laeuft wieder" : "startet nicht, Bild-Updates per CPU");
+    }
     kprintf("igdtest: %s\n", rc == 0 ? "Blitter funktioniert" : "Blitter mit Fehlern, bitte Log schicken");
     return rc;
 }
