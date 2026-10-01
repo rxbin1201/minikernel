@@ -367,6 +367,8 @@ static EuOp eu_d(int type, int reg, int sub_bytes) /* Ziel: Schrittweite 1 */
 }
 static EuOp eu_imm(int type, uint32_t v)
 {
+    if (type == EU_UW || type == EU_W) /* Wort-Immediates stehen in beiden Haelften */
+        v = (v & 0xFFFF) | (v & 0xFFFF) << 16;
     EuOp o = {EU_IMM, type, 0, 0, 0, 0, 0, v};
     return o;
 }
@@ -391,7 +393,10 @@ static void eu_inst(uint32_t *o, int op, int exec, int ctrl, EuOp d, EuOp s0, Eu
     }
     o[2] = (uint32_t)s0.sub | (uint32_t)s0.reg << 5 | (uint32_t)s0.hs << 16 | (uint32_t)s0.w << 18 |
            (uint32_t)s0.vs << 21 | (uint32_t)s1.file << 25 | (uint32_t)s1.type << 27;
-    o[3] = s1.imm;
+    if (s1.file == EU_GRF) /* Quelle 1 als Register: gleiche Felder wie Quelle 0, im letzten Dword */
+        o[3] = (uint32_t)s1.sub | (uint32_t)s1.reg << 5 | (uint32_t)s1.hs << 16 | (uint32_t)s1.w << 18 | (uint32_t)s1.vs << 21;
+    else
+        o[3] = s1.imm;
 }
 
 static EuOp eu_none(void)
@@ -462,6 +467,107 @@ static const uint32_t igt_fill_kernel[10][4] = {
     {0x07800031, 0x20000a40, 0x0e000e00, 0x82000010},
 };
 
+/* ---------- Kopieren und Mischen ----------
+ * Konstanten (r1): Dword 0/1 = Ziel x (Bytes) / y, Dword 2/3 = Quelle x (Bytes) / y. Je Thread ein Block 32 x 8 Bytes.
+ * Binding Table: 0 = Ziel (lesen und schreiben), 1 = Quelle. */
+
+enum { EU_OR = 0x06, EU_XOR = 0x07, EU_SHR = 0x08, EU_SHL = 0x09 };
+
+/* Nachrichtenbeschreibung "Media Block Read": Kopf (1 Register), Antwort rlen Register */
+static uint32_t mbr_desc(int rlen, int bti)
+{
+    return 1u << 25 | (uint32_t)rlen << 20 | 1u << 19 | 0x4u << 14 | (uint32_t)bti;
+}
+
+/* Kopf fuer einen Block 32 x 8 an (Register pos: x, y) in Register hdr */
+static int asm_block_header(uint32_t (*k)[4], int n, int hdr, int pos)
+{
+    eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, hdr, 0), eu_r(EU_UD, 0, 0, 4, 3, 1), eu_none());
+    eu_inst(k[n++], EU_MOV, 1, 0, eu_d(EU_UD, hdr, 0), eu_r(EU_UD, pos, 0, 2, 1, 1), eu_none());
+    eu_inst(k[n++], EU_MOV, 0, 0, eu_d(EU_UD, hdr, 8), eu_imm(EU_UD, (7u << 16) | 31), eu_none());
+    return n;
+}
+
+/* r2 = Zielposition, r3 = Quellposition (Gruppe * Blockgroesse + Versatz aus den Konstanten) */
+static int asm_positions(uint32_t (*k)[4], int n)
+{
+    eu_inst(k[n++], EU_MUL, 0, 0, eu_d(EU_UD, 2, 0), (EuOp){EU_GRF, EU_UD, 0, 4, 0, 0, 0, 0}, eu_imm(EU_UD, 32));
+    eu_inst(k[n++], EU_MUL, 0, 0, eu_d(EU_UD, 2, 4), (EuOp){EU_GRF, EU_UD, 0, 24, 0, 0, 0, 0}, eu_imm(EU_UD, 8));
+    eu_inst(k[n++], EU_ADD, 1, 0, eu_d(EU_UD, 3, 0), eu_r(EU_UD, 2, 0, 2, 1, 1), eu_r(EU_UD, 1, 8, 2, 1, 1));
+    eu_inst(k[n++], EU_ADD, 1, 0, eu_d(EU_UD, 2, 0), eu_r(EU_UD, 2, 0, 2, 1, 1), eu_r(EU_UD, 1, 0, 2, 1, 1));
+    return n;
+}
+
+static int asm_end(uint32_t (*k)[4], int n)
+{
+    eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 112, 0), eu_r(EU_UD, 0, 0, 4, 3, 1), eu_none());
+    eu_send(k[n++], 4, SFID_SPAWNER, eu_null(), 112, EOT_DESC);
+    return n;
+}
+
+/* Kopieren: Quelle lesen (r21..r28), mit Kopf r20 ans Ziel schreiben */
+static int asm_copy32x8(uint32_t (*k)[4])
+{
+    int n = asm_positions(k, 0);
+    n = asm_block_header(k, n, 4, 3);
+    eu_send(k[n++], 4, SFID_DP1, eu_d(EU_UD, 21, 0), 4, mbr_desc(8, 1));
+    n = asm_block_header(k, n, 20, 2);
+    eu_send(k[n++], 4, SFID_DP1, eu_null(), 20, mbw_desc(9, 0));
+    return asm_end(k, n);
+}
+
+/* Mischen: Quelle (r21..r28) mit ihrem Alpha (Byte 3 jedes Pixels) ueber das Ziel (r29..r36), Ergebnis r51..r58 mit
+ * Kopf r50. Je Kanal: x = s*a + d*(255-a); Ergebnis (x + 128 + ((x + 128) >> 8)) >> 8 = x / 255 gerundet.
+ * Je halbe Zeile (16 Bytes = 4 Pixel) in Woertern: r40 = x, r41 = 255-a, r42/r43 Zwischenwerte, r44 zum Packen. */
+static int asm_blend32x8(uint32_t (*k)[4])
+{
+    int n = asm_positions(k, 0);
+    n = asm_block_header(k, n, 4, 3);
+    eu_send(k[n++], 4, SFID_DP1, eu_d(EU_UD, 21, 0), 4, mbr_desc(8, 1));
+    n = asm_block_header(k, n, 5, 2);
+    eu_send(k[n++], 4, SFID_DP1, eu_d(EU_UD, 29, 0), 5, mbr_desc(8, 0));
+    /* Bytes erst in Woerter umwandeln (mov kann das sicher), dann nur Woerter mit Woertern verrechnen */
+    EuOp x = eu_r(EU_UW, 40, 0, 5, 4, 1), ia = eu_r(EU_UW, 41, 0, 5, 4, 1), t = eu_r(EU_UW, 42, 0, 5, 4, 1);
+    EuOp u = eu_r(EU_UW, 43, 0, 5, 4, 1), sw = eu_r(EU_UW, 45, 0, 5, 4, 1), aw = eu_r(EU_UW, 46, 0, 5, 4, 1);
+    EuOp dw = eu_r(EU_UW, 47, 0, 5, 4, 1);
+    for (int row = 0; row < 8; row++)
+        for (int half = 0; half < 2; half++) {
+            int off = half * 16;
+            EuOp s = eu_r(EU_UB, 21 + row, off, 5, 4, 1), d = eu_r(EU_UB, 29 + row, off, 5, 4, 1);
+            EuOp a = eu_r(EU_UB, 21 + row, off + 3, 3, 2, 0); /* <4;4,0>: Alpha je Pixel viermal */
+            eu_inst(k[n++], EU_MOV, 4, 0, eu_d(EU_UW, 45, 0), s, eu_none());
+            eu_inst(k[n++], EU_MOV, 4, 0, eu_d(EU_UW, 46, 0), a, eu_none());
+            eu_inst(k[n++], EU_MOV, 4, 0, eu_d(EU_UW, 47, 0), d, eu_none());
+            eu_inst(k[n++], EU_MUL, 4, 0, eu_d(EU_UW, 40, 0), sw, aw);                       /* x = s * a */
+            eu_inst(k[n++], EU_XOR, 4, 0, eu_d(EU_UW, 41, 0), aw, eu_imm(EU_UW, 0xFF));      /* 255 - a */
+            eu_inst(k[n++], EU_MUL, 4, 0, eu_d(EU_UW, 42, 0), dw, ia);                       /* d * (255 - a) */
+            eu_inst(k[n++], EU_ADD, 4, 0, eu_d(EU_UW, 40, 0), x, t);
+            eu_inst(k[n++], EU_ADD, 4, 0, eu_d(EU_UW, 40, 0), x, eu_imm(EU_UW, 128));
+            eu_inst(k[n++], EU_SHR, 4, 0, eu_d(EU_UW, 43, 0), x, eu_imm(EU_UW, 8));
+            eu_inst(k[n++], EU_ADD, 4, 0, eu_d(EU_UW, 40, 0), x, u);
+            eu_inst(k[n++], EU_SHR, 4, 0, eu_d(EU_UW, 40, 0), x, eu_imm(EU_UW, 8));
+            /* 4 Pixel packen: Kanal c steht in Wort 4p + c; erst als Dword holen, dann schieben und odern */
+            int out = 51 + row, osub = off;
+            eu_inst(k[n++], EU_MOV, 2, 0, eu_d(EU_UD, out, osub), eu_r(EU_UW, 40, 0, 3, 0, 0), eu_none());
+            for (int c = 1; c < 4; c++) {
+                EuOp tmp = eu_r(EU_UD, 44, 0, 4, 4, 1);
+                eu_inst(k[n++], EU_MOV, 2, 0, eu_d(EU_UD, 44, 0), eu_r(EU_UW, 40, 2 * c, 3, 0, 0), eu_none());
+                eu_inst(k[n++], EU_SHL, 2, 0, eu_d(EU_UD, 44, 0), tmp, eu_imm(EU_UD, 8u * c));
+                eu_inst(k[n++], EU_OR, 2, 0, eu_d(EU_UD, out, osub), eu_r(EU_UD, out, osub, 4, 4, 1), tmp);
+            }
+        }
+    n = asm_block_header(k, n, 50, 2);
+    eu_send(k[n++], 4, SFID_DP1, eu_null(), 50, mbw_desc(9, 0));
+    return asm_end(k, n);
+}
+
+/* Dieselbe Rechnung auf der CPU (zum Vergleich) */
+static uint8_t blend_ref(uint8_t s, uint8_t d, uint8_t a)
+{
+    uint32_t x = (uint32_t)s * a + (uint32_t)d * (255u - a) + 128;
+    return (uint8_t)((x + (x >> 8)) >> 8);
+}
+
 /* ---------- Batch und Zustaende ---------- */
 
 #define PIPELINE_SELECT_GPGPU   (0x69040000u | (3u << 8) | 2) /* Gen9: Maske fuer die Auswahl-Bits */
@@ -476,42 +582,52 @@ static const uint32_t igt_fill_kernel[10][4] = {
 #define GFX_MOCS(i)             (0xC800 + 4u * (uint32_t)(i))  /* Cache-Steuerung der Render-Engine */
 #define SURF_R8_UNORM           0x140
 #define EU_THREADS              168                            /* GT2: 24 EUs x 7 Threads */
+#define KERN_MAX                512                            /* Befehle (2 Seiten) */
 
-/* Lage in der Zustandsseite (alle Basisadressen = Anfang der Seite) */
-#define ST_KERNEL   0x000   /* bis zu 16 Befehle */
+/* Lage in der Zustandsseite (Surface- und Dynamic-Basis = Anfang der Seite; Kernel in eigenen Seiten) */
 #define ST_CURBE    0x100
 #define ST_IDD      0x140
-#define ST_BT       0x180
-#define ST_SURF     0x1C0
+#define ST_BT       0x180   /* 2 Eintraege */
+#define ST_SURF0    0x1C0
+#define ST_SURF1    0x200
 
-/* Zustandsseite: Kernel, Fuellwert, Flaeche (GGTT-Adresse, Breite/Hoehe in Bytes/Zeilen, Zeilenlaenge) */
-static void gpgpu_state(uint32_t *st, const uint32_t (*kern)[4], int nk, uint32_t surf, uint32_t w, uint32_t h,
-                        uint32_t pitch, uint32_t value)
+typedef struct {
+    uint32_t gtt, w, h, pitch; /* Flaeche: GGTT-Adresse, Breite (Bytes), Hoehe, Zeilenlaenge */
+} GpuSurf;
+
+static void surf_state(uint32_t *ss, const GpuSurf *s)
+{
+    ss[0] = (1u << 29) | (SURF_R8_UNORM << 18) | (1u << 16) | (1u << 14); /* 2D, R8, VALIGN4, HALIGN4, linear */
+    ss[2] = (s->w - 1) | ((s->h - 1) << 16);
+    ss[3] = s->pitch - 1;
+    ss[7] = (4u << 25) | (5u << 22) | (6u << 19) | (7u << 16); /* Kanalzuordnung R, G, B, A */
+    ss[8] = s->gtt;
+}
+
+/* Zustandsseite: Konstanten (8 Dwords), Ziel (Binding Table 0) und Quelle (1, darf fehlen) */
+static void gpgpu_state(uint32_t *st, const uint32_t curbe[8], const GpuSurf *dst, const GpuSurf *src)
 {
     memset(st, 0, 4096);
-    memcpy(st + ST_KERNEL / 4, kern, (uint64_t)nk * 16);
-    st[ST_CURBE / 4] = value;
+    memcpy(st + ST_CURBE / 4, curbe, 32);
     uint32_t *idd = st + ST_IDD / 4;
-    idd[0] = ST_KERNEL;      /* Kernel relativ zur Instruction-Basis */
+    idd[0] = 0;              /* Kernel am Anfang der Instruction-Basis */
     idd[2] = 1u << 18;       /* Single Program Flow */
     idd[4] = ST_BT;          /* Binding Table relativ zur Surface-State-Basis, 0 Eintraege vorladen */
     idd[5] = 1u << 16;       /* Konstanten: 1 Register (32 Byte) ab Offset 0 */
     idd[6] = 1;              /* 1 Thread je Gruppe */
-    st[ST_BT / 4] = ST_SURF; /* Eintrag 0 -> Surface State */
-    uint32_t *ss = st + ST_SURF / 4;
-    ss[0] = (1u << 29) | (SURF_R8_UNORM << 18) | (1u << 16) | (1u << 14); /* 2D, R8, VALIGN4, HALIGN4, linear */
-    ss[2] = (w - 1) | ((h - 1) << 16);
-    ss[3] = pitch - 1;
-    ss[7] = (4u << 25) | (5u << 22) | (6u << 19) | (7u << 16); /* Kanalzuordnung R, G, B, A */
-    ss[8] = surf;
+    st[ST_BT / 4] = ST_SURF0;
+    st[ST_BT / 4 + 1] = ST_SURF1;
+    surf_state(st + ST_SURF0 / 4, dst);
+    surf_state(st + ST_SURF1 / 4, src ? src : dst);
 }
 
 /* Batch: gx x gy Thread-Gruppen, threads = so viele duerfen gleichzeitig laufen */
-static uint32_t gpgpu_batch(uint32_t *b, uint32_t st_gtt, uint32_t res_gtt, uint32_t gx, uint32_t gy, uint32_t threads)
+static uint32_t gpgpu_batch(uint32_t *b, uint32_t st_gtt, uint32_t kern_gtt, uint32_t res_gtt, uint32_t gx, uint32_t gy,
+                            uint32_t threads)
 {
     uint32_t k = 0;
     b[k++] = PIPELINE_SELECT_GPGPU;
-    b[k++] = STATE_BASE_ADDRESS; /* wie IGT: allgemein 0, Surface/Dynamic/Instruction = Zustandsseite */
+    b[k++] = STATE_BASE_ADDRESS; /* wie IGT: allgemein 0, Surface/Dynamic = Zustandsseite, Instruction = Kernel */
     b[k++] = 0 | 1;
     b[k++] = 0;
     b[k++] = 0 | 1;              /* Stateless Data Port: MOCS */
@@ -521,12 +637,12 @@ static uint32_t gpgpu_batch(uint32_t *b, uint32_t st_gtt, uint32_t res_gtt, uint
     b[k++] = 0;
     b[k++] = 0;                  /* Indirect Object */
     b[k++] = 0;
-    b[k++] = st_gtt | 1;         /* Instruction */
+    b[k++] = kern_gtt | 1;       /* Instruction */
     b[k++] = 0;
     b[k++] = 0xFFFFF000u | 1;    /* Groessen */
     b[k++] = (1u << 12) | 1;
     b[k++] = 0xFFFFF000u | 1;
-    b[k++] = (1u << 12) | 1;
+    b[k++] = (2u << 12) | 1;     /* Kernel: 2 Seiten */
     b[k++] = 0 | 1;              /* Bindless Surface State */
     b[k++] = 0;
     b[k++] = 0xFFFFF000u;
@@ -575,15 +691,18 @@ static uint32_t gpgpu_batch(uint32_t *b, uint32_t st_gtt, uint32_t res_gtt, uint
     return k;
 }
 
-/* Eine Fuellung vorbereiten und ueber den Ring ausfuehren; 0 = fertig (Zeit in *us) */
-static uint32_t *g_st, *g_batch;
-static uint32_t g_st_gtt, g_batch_gtt, g_res_gtt;
+static uint32_t *g_st, *g_batch, *g_kern;
+static uint32_t g_st_gtt, g_batch_gtt, g_res_gtt, g_kern_gtt;
 
-static int gpgpu_fill(const char *what, const uint32_t (*kern)[4], int nk, int block_w, int block_h, uint32_t surf,
-                      uint32_t w, uint32_t h, uint32_t pitch, uint32_t value, uint32_t threads, uint64_t *us)
+/* Kernel auf gx x gy Gruppen ausfuehren; 0 = fertig (Zeit in *us) */
+static int gpgpu_go(const char *what, const uint32_t (*kern)[4], int nk, const uint32_t curbe[8], const GpuSurf *dst,
+                    const GpuSurf *src, uint32_t gx, uint32_t gy, uint32_t threads, uint64_t *us)
 {
-    gpgpu_state(g_st, kern, nk, surf, w, h, pitch, value);
-    uint32_t k = gpgpu_batch(g_batch, g_st_gtt, g_res_gtt, w / (uint32_t)block_w, h / (uint32_t)block_h, threads);
+    memset(g_kern, 0, KERN_MAX * 16);
+    memcpy(g_kern, kern, (uint64_t)nk * 16);
+    gpgpu_state(g_st, curbe, dst, src);
+    uint32_t k = gpgpu_batch(g_batch, g_st_gtt, g_kern_gtt, g_res_gtt, gx, gy, threads);
+    igd_clflush((uint64_t)g_kern, KERN_MAX * 16);
     igd_clflush((uint64_t)g_st, 4096);
     igd_clflush((uint64_t)g_batch, k * 4);
     begin(4 + 8);
@@ -594,9 +713,43 @@ static int gpgpu_fill(const char *what, const uint32_t (*kern)[4], int nk, int b
     return run(what, 2000, us);
 }
 
+/* Fuellen: ganze Flaeche mit value (Kernel 16 x 1 mit Byte bzw. 32 x 8 mit Dword) */
+static int gpgpu_fill(const char *what, const uint32_t (*kern)[4], int nk, int bw, int bh, const GpuSurf *s,
+                      uint32_t value, uint32_t threads, uint64_t *us)
+{
+    uint32_t c[8] = {value, 0, 0, 0, 0, 0, 0, 0};
+    return gpgpu_go(what, kern, nk, c, s, 0, s->w / (uint32_t)bw, s->h / (uint32_t)bh, threads, us);
+}
+
+/* Kopieren bzw. Mischen eines Rechtecks (w Bytes x h Zeilen, Vielfache von 32 bzw. 8) von src (sx, sy) nach dst (dx, dy) */
+static int gpgpu_rect(const char *what, const uint32_t (*kern)[4], int nk, const GpuSurf *dst, uint32_t dx, uint32_t dy,
+                      const GpuSurf *src, uint32_t sx, uint32_t sy, uint32_t w, uint32_t h, uint64_t *us)
+{
+    uint32_t c[8] = {dx, dy, sx, sy, 0, 0, 0, 0};
+    return gpgpu_go(what, kern, nk, c, dst, src, w / 32, h / 8, EU_THREADS, us);
+}
+
 static uint64_t mbps(uint64_t bytes, uint64_t us)
 {
     return bytes / (us ? us : 1);
+}
+
+/* Muster fuer die Tests: Farbe und Alpha je Pixel aus Position und Startwert */
+static uint32_t pattern(uint32_t i, uint32_t seed)
+{
+    uint32_t v = (i + seed) * 2654435761u;
+    return v ^ (v >> 13);
+}
+
+/* Bildschirmgrosse Flaeche Seite fuer Seite (die GPU sieht sie am Stueck, die CPU je Seite) */
+static uint32_t big_rd(const uint64_t *pg, uint64_t off)
+{
+    volatile uint32_t *p = (volatile uint32_t *)(pg[off / 4096] + off % 4096);
+    return *p;
+}
+static void big_wr(const uint64_t *pg, uint64_t off, uint32_t v)
+{
+    *(uint32_t *)(pg[off / 4096] + off % 4096) = v;
 }
 
 int igd_gpgpu_test(void)
@@ -605,31 +758,30 @@ int igd_gpgpu_test(void)
     if (pre)
         return pre;
 
-    /* 0. Assembler: baut er den IGT-Kernel bitgenau nach? */
-    uint32_t k16[16][4], k32[16][4];
-    int n16 = asm_fill16(k16), n32 = asm_fill32x8(k32), diff = 0;
+    /* 0. Assembler: baut er den IGT-Kernel bitgenau nach? Dann die eigenen Kernel */
+    static uint32_t k16[16][4], k32[16][4], kcopy[32][4], kblend[KERN_MAX][4];
+    int n16 = asm_fill16(k16), n32 = asm_fill32x8(k32), ncopy = asm_copy32x8(kcopy), nblend = asm_blend32x8(kblend);
+    int diff = 0;
     for (int i = 0; i < 10; i++)
         for (int j = 0; j < 4; j++)
-            if (k16[i][j] != igt_fill_kernel[i][j]) {
-                if (!diff)
-                    kprintf("igdgpu: Assembler weicht ab bei Befehl %d, Dword %d: %#x statt %#x\n", i, j, k16[i][j],
-                            igt_fill_kernel[i][j]);
+            if (k16[i][j] != igt_fill_kernel[i][j])
                 diff++;
-            }
-    if (n16 != 10 || diff) {
+    if (n16 != 10 || diff || nblend > KERN_MAX) {
         kprintf("igdgpu: Assembler stimmt NICHT mit dem IGT-Kernel ueberein (%d Abweichungen) - Abbruch\n", diff);
         return -30;
     }
-    kprintf("igdgpu: Assembler erzeugt den IGT-Kernel bitgenau (10 Befehle); schneller Kernel: %d Befehle\n", n32);
+    kprintf("igdgpu: Assembler erzeugt den IGT-Kernel bitgenau; Kernel: Fuellen %d, Kopieren %d, Mischen %d Befehle\n",
+            n32, ncopy, nblend);
 
-    /* GGTT: Ring (4) + Statusseite (1) + Batch (1) + Zustaende (1) + Ergebnis (1) + Testflaeche (16 = 1024 x 64 Byte)
-     * + grosse Flaeche (so gross wie der Bildschirm, Seite fuer Seite) */
-    enum { P_RING = 0, P_HWS = 4, P_BATCH = 5, P_STATE = 6, P_RES = 7, P_SURF = 8, P_BIG = 24 };
+    /* GGTT: Ring (4) + Status (1) + Batch (1) + Zustaende (1) + Ergebnis (1) + Kernel (2) + zwei Testflaechen (je 16 =
+     * 1024 x 64 Bytes) + zwei bildschirmgrosse Flaechen (Seite fuer Seite) */
+    enum { P_RING = 0, P_HWS = 4, P_BATCH = 5, P_STATE = 6, P_RES = 7, P_KERN = 8, P_SA = 10, P_SB = 26, P_BIG = 42 };
     uint32_t big_w = igd_flip_ready ? igd_scr_stride : 13760, big_h = igd_flip_ready ? igd_scr_h : 1440;
+    big_w &= ~31u;
     big_h &= ~7u;
-    uint32_t big_pages = (uint32_t)(((uint64_t)big_w * big_h + 4095) / 4096), pages = P_BIG + big_pages;
+    uint32_t big_pages = (uint32_t)(((uint64_t)big_w * big_h + 4095) / 4096), pages = P_BIG + 2 * big_pages;
     uint32_t base = igd_ggtt_entries / 2 + 0x50000;
-    uint64_t *saved = kmalloc(sizeof(uint64_t) * pages), *big = kmalloc(sizeof(uint64_t) * big_pages);
+    uint64_t *saved = kmalloc(sizeof(uint64_t) * pages), *big = kmalloc(sizeof(uint64_t) * 2 * big_pages);
     uint32_t mocs[62];
     int rc = !saved || !big ? -6 : igd_ggtt_claim(base, pages, saved);
     if (rc) {
@@ -639,10 +791,10 @@ int igd_gpgpu_test(void)
     }
     uint64_t mem = pmm_alloc_frames(P_BIG);
     uint32_t got = 0;
-    for (; mem && got < big_pages; got++)
+    for (; mem && got < 2 * big_pages; got++)
         if (!(big[got] = pmm_alloc_frame()))
             break;
-    if (!mem || got < big_pages) {
+    if (!mem || got < 2 * big_pages) {
         kprintf("igdgpu: kein Speicher\n");
         rc = -6;
         goto out_mem;
@@ -651,21 +803,24 @@ int igd_gpgpu_test(void)
     igd_clflush(mem, P_BIG * 4096);
     for (uint32_t i = 0; i < P_BIG; i++)
         igd_ggtt[base + i] = (mem + i * 4096) | IGD_PTE_VALID;
-    for (uint32_t i = 0; i < big_pages; i++)
+    for (uint32_t i = 0; i < 2 * big_pages; i++)
         igd_ggtt[base + P_BIG + i] = big[i] | IGD_PTE_VALID;
     igd_ggtt_flush();
     ring = (uint32_t *)mem;
     hws = (volatile uint32_t *)(mem + P_HWS * 4096);
     g_batch = (uint32_t *)(mem + P_BATCH * 4096);
     g_st = (uint32_t *)(mem + P_STATE * 4096);
+    g_kern = (uint32_t *)(mem + P_KERN * 4096);
     volatile uint32_t *res = (volatile uint32_t *)(mem + P_RES * 4096);
-    uint8_t *surf = (uint8_t *)(mem + P_SURF * 4096);
+    uint8_t *sa = (uint8_t *)(mem + P_SA * 4096), *sb = (uint8_t *)(mem + P_SB * 4096);
     ring_gtt = base << 12;
     hws_gtt = (base + P_HWS) << 12;
     g_batch_gtt = (base + P_BATCH) << 12;
     g_st_gtt = (base + P_STATE) << 12;
     g_res_gtt = (base + P_RES) << 12;
-    uint32_t surf_gtt = (base + P_SURF) << 12, big_gtt = (base + P_BIG) << 12;
+    g_kern_gtt = (base + P_KERN) << 12;
+    GpuSurf SA = {(base + P_SA) << 12, 1024, 64, 1024}, SB = {(base + P_SB) << 12, 1024, 64, 1024};
+    GpuSurf BIG = {(base + P_BIG) << 12, big_w, big_h, big_w}, BIG2 = {(base + P_BIG + big_pages) << 12, big_w, big_h, big_w};
     seqno = 0;
 
     if (!igd_forcewake_get()) {
@@ -684,95 +839,121 @@ int igd_gpgpu_test(void)
         goto out_ring;
     }
 
-    /* 1. Testflaeche mit dem assemblierten IGT-Kernel (wie beim letzten Mal), jedes Byte pruefen */
+    /* 1. Fuellen (wie beim letzten Mal): schneller Kernel, jedes Dword pruefen */
     uint64_t us = 0;
-    if (gpgpu_fill("1. IGT-Kernel aus dem Assembler, 1024 x 64 Bytes", k16, n16, 16, 1, surf_gtt, 1024, 64, 1024, 0x5A, 2,
-                   &us) != 0) {
+    if (gpgpu_fill("1. Fuellen 1024 x 64 Bytes", k32, n32, 32, 8, &SA, 0x11223344u, EU_THREADS, &us) != 0) {
         rc = -20;
         goto out_ring;
     }
-    igd_clflush((uint64_t)surf, 16 * 4096);
+    igd_clflush((uint64_t)sa, 16 * 4096);
     int bad = 0;
-    for (int i = 0; i < 1024 * 64; i++)
-        bad += surf[i] != 0x5A;
-    kprintf("igdgpu: Merker %#x, Flaeche: %d von 65536 Bytes falsch\n", rd_scratch(&res[0]), bad);
+    for (int i = 0; i < 1024 * 64 / 4; i++)
+        bad += ((uint32_t *)sa)[i] != 0x11223344u;
+    kprintf("igdgpu: Fuellen: %d von 16384 Dwords falsch\n", bad);
     if (bad) {
         rc = -21;
         goto out_ring;
     }
 
-    /* 2. Schneller Kernel (32 x 8 Bytes, ganzes Dword), viele Threads: Testflaeche mit einer Farbe, jedes Dword pruefen */
-    if (gpgpu_fill("2. schneller Kernel, 1024 x 64 Bytes", k32, n32, 32, 8, surf_gtt, 1024, 64, 1024, 0x11223344u,
-                   EU_THREADS, &us) != 0) {
+    /* 2. Kopieren: Muster in A, B leer; Rechteck 512 x 32 Bytes von A (128, 8) nach B (256, 16) */
+    for (int i = 0; i < 1024 * 64 / 4; i++)
+        ((uint32_t *)sa)[i] = pattern((uint32_t)i, 7);
+    memset(sb, 0, 16 * 4096);
+    igd_clflush((uint64_t)sa, 16 * 4096);
+    igd_clflush((uint64_t)sb, 16 * 4096);
+    if (gpgpu_rect("2. Kopieren 512 x 32 Bytes", kcopy, ncopy, &SB, 256, 16, &SA, 128, 8, 512, 32, &us) != 0) {
         rc = -22;
         goto out_ring;
     }
-    igd_clflush((uint64_t)surf, 16 * 4096);
-    const uint32_t *sw = (const uint32_t *)surf;
+    igd_clflush((uint64_t)sb, 16 * 4096);
     bad = 0;
     int first = -1;
-    for (int i = 0; i < 1024 * 64 / 4; i++)
-        if (sw[i] != 0x11223344u) {
-            if (first < 0)
-                first = i;
-            bad++;
+    for (int y = 0; y < 64; y++)
+        for (int x = 0; x < 1024; x++) {
+            int in = x >= 256 && x < 256 + 512 && y >= 16 && y < 16 + 32;
+            uint8_t want = in ? sa[(y - 16 + 8) * 1024 + (x - 256 + 128)] : 0;
+            if (sb[y * 1024 + x] != want) {
+                if (first < 0)
+                    first = y * 1024 + x;
+                bad++;
+            }
         }
-    kprintf("igdgpu: schneller Kernel: %d von 16384 Dwords falsch", bad);
+    kprintf("igdgpu: Kopieren: %d von 65536 Bytes falsch", bad);
     if (first >= 0)
-        kprintf(" (erstes bei Byte %d, Zeile %d: %#x)", first * 4 % 1024, first * 4 / 1024, sw[first]);
+        kprintf(" (erstes bei x %d, y %d: %#x)", first % 1024, first / 1024, sb[first]);
     kprintf("\n");
     if (bad) {
         rc = -23;
         goto out_ring;
     }
 
-    /* 3. Tempo: bildschirmgrosse Flaeche (im RAM), drei Stufen */
-    uint64_t bytes = (uint64_t)big_w * big_h, t1, t2, t3;
-    if (gpgpu_fill("3a. IGT-Kernel, 2 Threads gleichzeitig", k16, n16, 16, 1, big_gtt, big_w, big_h, big_w, 0x33, 2, &t1) ||
-        gpgpu_fill("3b. IGT-Kernel, 168 Threads gleichzeitig", k16, n16, 16, 1, big_gtt, big_w, big_h, big_w, 0x44,
-                   EU_THREADS, &t2) ||
-        gpgpu_fill("3c. schneller Kernel, 168 Threads", k32, n32, 32, 8, big_gtt, big_w, big_h, big_w, 0x55667788u,
-                   EU_THREADS, &t3)) {
+    /* 3. Mischen: Quelle A (Muster mit Alpha), Ziel B (anderes Muster); ganze Flaeche, gegen die CPU pruefen */
+    static uint8_t orig[1024 * 64];
+    for (int i = 0; i < 1024 * 64 / 4; i++)
+        ((uint32_t *)sb)[i] = pattern((uint32_t)i, 99);
+    memcpy(orig, sb, sizeof(orig));
+    igd_clflush((uint64_t)sb, 16 * 4096);
+    if (gpgpu_rect("3. Mischen 1024 x 64 Bytes", kblend, nblend, &SB, 0, 0, &SA, 0, 0, 1024, 64, &us) != 0) {
         rc = -24;
         goto out_ring;
     }
-    kprintf("igdgpu: %u x %u Bytes (%lu KB): IGT-Kernel %lu us (%lu MB/s), mit 168 Threads %lu us (%lu MB/s), "
-            "schneller Kernel %lu us (%lu MB/s)\n",
-            big_w, big_h, (unsigned long)(bytes / 1024), (unsigned long)t1, (unsigned long)mbps(bytes, t1), (unsigned long)t2,
-            (unsigned long)mbps(bytes, t2), (unsigned long)t3, (unsigned long)mbps(bytes, t3));
-    bad = 0; /* Stichprobe: je Seite ein Dword */
-    for (uint32_t i = 0; i < big_pages; i++) {
-        uint32_t off = (i * 4096 + 1028) % 4096;
-        if ((uint64_t)i * 4096 + off + 4 > bytes)
-            break;
-        igd_clflush(big[i] + off, 4);
-        bad += *(volatile uint32_t *)(big[i] + off) != 0x55667788u;
+    igd_clflush((uint64_t)sb, 16 * 4096);
+    bad = 0;
+    first = -1;
+    for (int i = 0; i < 1024 * 64; i++) {
+        uint8_t a = sa[(i & ~3) + 3], want = blend_ref(sa[i], orig[i], a);
+        if (sb[i] != want) {
+            if (first < 0)
+                first = i;
+            bad++;
+        }
     }
-    kprintf("igdgpu: Stichprobe (je Seite ein Dword): %d falsch\n", bad);
+    kprintf("igdgpu: Mischen: %d von 65536 Bytes falsch", bad);
+    if (first >= 0)
+        kprintf(" (erstes Byte %d: GPU %#x, CPU %#x; Quelle %#x, Ziel %#x, Alpha %#x)", first, sb[first],
+                blend_ref(sa[first], orig[first], sa[(first & ~3) + 3]), sa[first], orig[first], sa[(first & ~3) + 3]);
+    kprintf("\n");
     if (bad) {
         rc = -25;
         goto out_ring;
     }
 
-    /* 4. Sichtbar (nur an der Konsole): zwei farbige Baender quer ueber den Bildschirm, 4 s, dann zurueck */
-    if (!console_gfx_active() && igd_flip_ready && igd_scr_stride <= 16384 && igd_scr_stride % 32 == 0) {
-        static const struct { uint32_t y, h, c; } band[2] = {{448, 128, 0x2060C0}, {704, 128, 0xE08020}};
-        for (int i = 0; i < 2 && rc == 0; i++) { /* y Vielfaches von 64: Anfang auf einer Seitengrenze */
-            if (band[i].y + band[i].h > igd_scr_h)
-                break;
-            if (gpgpu_fill(i ? "oranges Band" : "blaues Band", k32, n32, 32, 8, igd_surf_a + band[i].y * igd_scr_stride,
-                           igd_scr_stride, band[i].h, igd_scr_stride, band[i].c, EU_THREADS, &us) != 0)
-                rc = -26;
-            else
-                kprintf("igdgpu: Band %d: %u x %u Bytes in %lu us\n", i + 1, igd_scr_stride, band[i].h, (unsigned long)us);
-        }
-        thread_sleep_ms(4000);
+    /* 4. Tempo bei Bildschirmgroesse: fuellen, kopieren, mischen */
+    uint64_t bytes = (uint64_t)big_w * big_h, tf, tc, tb;
+    if (gpgpu_fill("4a. Fuellen (Bildschirm)", k32, n32, 32, 8, &BIG, 0x80402010u, EU_THREADS, &tf) ||
+        gpgpu_rect("4b. Kopieren (Bildschirm)", kcopy, ncopy, &BIG2, 0, 0, &BIG, 0, 0, big_w, big_h, &tc) ||
+        gpgpu_rect("4c. Mischen (Bildschirm)", kblend, nblend, &BIG2, 0, 0, &BIG, 0, 0, big_w, big_h, &tb)) {
+        rc = -26;
+        goto out_ring;
+    }
+    kprintf("igdgpu: %u x %u Bytes (%lu KB): fuellen %lu us (%lu MB/s), kopieren %lu us (%lu MB/s), mischen %lu us (%lu MB/s)\n",
+            big_w, big_h, (unsigned long)(bytes / 1024), (unsigned long)tf, (unsigned long)mbps(bytes, tf),
+            (unsigned long)tc, (unsigned long)mbps(bytes, tc), (unsigned long)tb, (unsigned long)mbps(bytes, tb));
+
+    /* 5. Sichtbar (nur an der Konsole): halbtransparentes Farbfeld (Verlauf, Alpha 176) ueber die Konsole, 5 s */
+    if (!console_gfx_active() && igd_flip_ready && igd_scr_w >= 1600 + 64 && igd_scr_h >= 600 + 64) {
+        uint32_t pw = 1600, ph = 600, px = ((igd_scr_w - pw) / 2) & ~7u, py = ((igd_scr_h - ph) / 2) & ~7u;
+        for (uint32_t y = 0; y < ph; y++)
+            for (uint32_t x = 0; x < pw; x++) {
+                uint32_t r = 40 + 180 * x / pw, g = 90 + 100 * y / ph, b = 230 - 120 * x / pw;
+                big_wr(big, (uint64_t)y * big_w + x * 4, 0xB0000000u | r << 16 | g << 8 | b);
+            }
+        for (uint32_t i = 0; i < big_pages; i++)
+            igd_clflush(big[i], 4096);
+        GpuSurf FB = {igd_surf_a, igd_scr_stride, igd_scr_h, igd_scr_stride};
+        if (gpgpu_rect("5. Farbfeld ueber die Konsole mischen", kblend, nblend, &FB, px * 4, py, &BIG, 0, 0, pw * 4, ph, &us) != 0)
+            rc = -27;
+        else
+            kprintf("igdgpu: Farbfeld %u x %u Pixel gemischt in %lu us\n", pw, ph, (unsigned long)us);
+        thread_sleep_ms(5000);
         console_repaint();
     } else {
         kprintf("igdgpu: sichtbarer Teil nur an der Konsole (ohne Desktop)\n");
     }
+    (void)big_rd;
+    (void)res;
     if (rc == 0)
-        kprintf("igdgpu: Assembler und schneller Kernel laufen\n");
+        kprintf("igdgpu: Fuellen, Kopieren und Mischen laufen auf den Recheneinheiten\n");
 
 out_ring:
     ring_stop();
