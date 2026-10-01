@@ -1111,6 +1111,7 @@ out_mem:
 int igd_render_test(void)
 {
     rcs_acquire(1);
+    igd_rcs_comp_wait(0);
     comp_ready = 0;
     int rc = render_test();
     rcs_release();
@@ -1120,6 +1121,7 @@ int igd_render_test(void)
 int igd_gpgpu_test(void)
 {
     rcs_acquire(1);
+    igd_rcs_comp_wait(0);
     comp_ready = 0;
     int rc = gpgpu_test();
     rcs_release();
@@ -1135,6 +1137,52 @@ int igd_gpgpu_test(void)
  * fruehere geschrieben haben). */
 
 #define CS_OPS      0     /* erster Auftrag im Zustandsbereich */
+#define HWS_TS0     0x300 /* Zeitstempel vor und nach dem Auftrag (12 MHz) */
+#define HWS_TS1     0x304
+
+static uint32_t comp_pending; /* laufende Nummer des noch offenen Auftrags, 0 = keiner */
+static int      comp_ts_new;  /* Zeitstempel des letzten Auftrags noch nicht gemeldet */
+
+static uint64_t comp_gpu_us(void)
+{
+    igd_clflush((uint64_t)&hws[HWS_TS0 / 4], 8);
+    return (uint64_t)(uint32_t)(hws[HWS_TS1 / 4] - hws[HWS_TS0 / 4]) / 12;
+}
+
+/* Offenen Auftrag abwarten; haengt die Engine: zuruecksetzen. 0 = nichts mehr offen */
+static int comp_finish(uint64_t *us)
+{
+    if (us)
+        *us = 0;
+    if (comp_pending && !wait_seqno(comp_pending, 500)) {
+        kprintf("igdcomp: Render-Engine wird mit einem Auftrag nicht fertig\n");
+        dump("Zustand");
+        igd_forcewake_get();
+        ring_stop();
+        engine_reset();
+        igd_forcewake_put();
+        comp_ready = 0;
+        comp_pending = 0;
+        comp_ts_new = 0;
+        return -2;
+    }
+    comp_pending = 0;
+    if (comp_ts_new && us)
+        *us = comp_gpu_us();
+    if (us)
+        comp_ts_new = 0;
+    return 0;
+}
+
+int igd_rcs_comp_wait(uint64_t *us)
+{
+    if (!comp_pending && !(us && comp_ts_new)) {
+        if (us)
+            *us = 0;
+        return 0;
+    }
+    return comp_finish(us);
+}
 #define CK_PAGES    4     /* Kernel: je Blockform (IGD_BLK_*) kopieren und mischen */
 #define L3_MOCS(r)  (0xB020 + 4u * (uint32_t)(r)) /* L3-Cache-Steuerung (LNCFCMOCS), Eintraege 2r und 2r + 1 */
 #define L3_UC       0x10u /* L3 uncached */
@@ -1190,7 +1238,7 @@ static int comp_start(void)
     return 1;
 }
 
-int igd_rcs_comp(const IgdCompOp *ops, int n, uint64_t *us)
+int igd_rcs_comp(const IgdCompOp *ops, int n, uint64_t *us, int async)
 {
     if (n <= 0)
         return 0;
@@ -1199,6 +1247,10 @@ int igd_rcs_comp(const IgdCompOp *ops, int n, uint64_t *us)
     if (!rcs_acquire(0))
         return -1;
     int rc = 0;
+    if (comp_finish(0) != 0) { /* Batch und Zustaende werden gleich neu beschrieben */
+        rc = -2;
+        goto out;
+    }
     if (!comp_ready && !comp_start()) {
         rc = -2;
         goto out;
@@ -1296,25 +1348,24 @@ int igd_rcs_comp(const IgdCompOp *ops, int n, uint64_t *us)
         rc = -2;
         goto out;
     }
-    uint64_t t0 = time_us();
-    begin(4 + 8);
+    begin(4 + 8 + 8);
+    emit(MI_STORE_REG_MEM); /* Zeitstempel vorher */
+    emit(R_TIMESTAMP);
+    emit(hws_gtt + HWS_TS0);
+    emit(0);
     emit(MI_BATCH_BUFFER_START);
     emit(core_gtt(C_BATCH));
     emit(0);
     emit(MI_NOOP);
-    uint32_t sn = submit();
-    int ok = wait_seqno(sn, 500);
-    if (us)
-        *us = time_us() - t0;
-    if (!ok) {
-        kprintf("igdcomp: Render-Engine wird mit %d Auftraegen nicht fertig\n", n);
-        dump("Zustand");
-        ring_stop();
-        engine_reset();
-        comp_ready = 0;
-        rc = -2;
-    }
+    emit(MI_STORE_REG_MEM); /* und nachher (der Batch endet mit einem PIPE_CONTROL, der auf alle Threads wartet) */
+    emit(R_TIMESTAMP);
+    emit(hws_gtt + HWS_TS1);
+    emit(0);
+    comp_pending = submit();
+    comp_ts_new = 1;
     igd_forcewake_put();
+    if (!async && comp_finish(us) != 0)
+        rc = -2;
 out:
     rcs_release();
     return rc;

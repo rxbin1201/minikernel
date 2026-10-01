@@ -82,6 +82,7 @@ int gfx_text_width(const char *t);
 void gfx_draw_scaled(Surface *dst, const Surface *src, int dx, int dy, int dw, int dh);
 /* Rechteck aus gfx_screen in die Anzeige uebernehmen, Zeiger darueber zeichnen */
 void gfx_compose(int x, int y, int w, int h);
+int  gfx_hw_cursor_on(void); /* der Mauszeiger ist eine eigene Ebene (nichts ins Bild einzeichnen) */
 void gfx_present(int x, int y, int w, int h);
 void gfx_present_all(void);
 /* Im Fenster: Gezeichnetes sofort melden (sonst beim naechsten gfx_poll/gfx_vsync), z.B. vor einer langen Arbeit */

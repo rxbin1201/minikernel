@@ -61,9 +61,13 @@ typedef struct {
     uint32_t dx, dy, sx, sy;   /* linke obere Ecke des Rechtecks in Ziel und Quelle (x in Bytes) */
 } IgdCompOp;
 #define IGD_COMP_MAX_OPS 120
-/* Auftraege der Reihe nach ausfuehren (jeder sieht die Ergebnisse der vorigen) und abwarten.
- * 0 = fertig (GPU-Zeit in *us), -1 = Engine gerade belegt (igdtest), -2 = Engine-Fehler */
-int igd_rcs_comp(const IgdCompOp *ops, int n, uint64_t *us);
+/* Auftraege der Reihe nach ausfuehren (jeder sieht die Ergebnisse der vorigen). Vorher wird ein noch offener Auftrag
+ * abgewartet. async = 0: auch diesen abwarten (GPU-Zeit in *us); async = 1: nur abschicken (igd_rcs_comp_wait).
+ * 0 = fertig bzw. abgeschickt, -1 = Engine gerade belegt (igdtest), -2 = Engine-Fehler */
+int igd_rcs_comp(const IgdCompOp *ops, int n, uint64_t *us, int async);
+/* offenen Auftrag abwarten (0 = keiner mehr offen; GPU-Zeit des Auftrags in *us, 0 wenn schon gemeldet) */
+int igd_rcs_comp_wait(uint64_t *us);
+int igd_front_surface(uint32_t *gtt, uint32_t *pitch, uint32_t *w, uint32_t *h); /* angezeigter Puffer, 0 = ok */
 
 /* Doppelpufferung (igd.c): A = Framebuffer der Firmware, B = zweiter Puffer im RAM */
 extern int       igd_flip_ready;

@@ -15,6 +15,7 @@
 #include "core/cmdline.h"
 #include "core/process.h"
 #include "core/syscall.h"
+#include "console/console.h"
 #include "lib/kprintf.h"
 #include "lib/string.h"
 #include "mm/pmm.h"
@@ -36,7 +37,7 @@ typedef struct {
 
 /* Auftrag aus dem Programm (gleiches Layout in Userland/include/user.h) */
 typedef struct {
-    uint16_t kind; /* 1 kopieren, 2 mischen, 3 senkrecht skalieren, 4 waagerecht skalieren */
+    uint16_t kind; /* 1 kopieren, 2 mischen, 3 senkrecht skalieren, 4 waagerecht skalieren, 5 anzeigen */
     uint16_t dst, src;
     uint16_t pad;
     int32_t  dx, dy, sx, sy, w, h;
@@ -60,8 +61,10 @@ static uint64_t  scratch_pte;
 
 static struct {
     uint64_t jobs, ops, us, max_us, busy, errors;
-    uint64_t n[2], px[2], t[2]; /* Meldungen des Desktops: 0 CPU, 1 GPU */
+    uint64_t n[3], px[3], t[3]; /* Meldungen des Desktops: 0 CPU, 1 GPU (abgewartet), 2 GPU zeigt selbst an */
 } st;
+static CompSurf scanout;     /* angezeigter Puffer als Ziel von "anzeigen" (gilt fuer eine Auftragsliste) */
+static int      async_jobs;  /* abgeschickte, noch nicht abgewartete Auftragslisten */
 
 /* ---------- Flaechen ---------- */
 
@@ -113,6 +116,8 @@ static int surf_add(uint32_t pid, void *shm, const uint64_t *frames, uint32_t w,
 
 static void surf_drop(CompSurf *s)
 {
+    if (mode == 1)
+        igd_rcs_comp_wait(0); /* die GPU liest vielleicht noch daraus */
     uint64_t fl = spin_lock(&lock);
     void *shm = s->shm;
     for (uint32_t i = 0; s->ggtt && i < s->pages; i++)
@@ -144,7 +149,7 @@ void igd_comp_release(uint32_t pid)
 
 /* ---------- Ausfuehren ---------- */
 
-enum { K_COPY, K_BLEND, K_VSCALE, K_HSCALE };
+enum { K_COPY, K_BLEND, K_VSCALE, K_HSCALE, K_PRESENT };
 typedef struct {
     int       kind;       /* K_* */
     CompSurf *d, *s;
@@ -207,7 +212,16 @@ static uint32_t blend_px(uint32_t s, uint32_t d, uint32_t g)
 /* CPU-Ersatz (gpucomp=soft, Selbsttest): direkt in den Frames */
 static void exec_soft(const KOp *o)
 {
-    if (o->kind >= K_VSCALE) {
+    if (o->kind == K_PRESENT) { /* zeilenweise zusammensuchen und wie ein Grafikprogramm anzeigen */
+        static uint32_t row[4096];
+        for (int y = 0; y < o->h; y++) {
+            for (int x = 0; x < o->w; x++)
+                row[x] = *spx(o->s, ((uint64_t)(o->sy + y) * o->s->w + (uint64_t)(o->sx + x)) * 4);
+            console_gfx_blit(row, (uint32_t)o->w, o->dx, o->dy + y, o->w, 1);
+        }
+        return;
+    }
+    if (o->kind == K_VSCALE || o->kind == K_HSCALE) {
         for (int y = 0; y < o->h; y++)
             for (int x = 0; x < o->w; x++) {
                 int sx = o->sx + (o->kind == K_HSCALE ? scale_src(o, x) : x);
@@ -267,7 +281,7 @@ static IgdSurf gsurf(const CompSurf *s, uint32_t mocs)
  * der Stuecke (hoechstens 4). */
 static int split_op(const KOp *o, IgdCompOp *g)
 {
-    if (o->kind >= K_VSCALE) { /* Skalieren: immer ganze Bloecke (scale_ok) */
+    if (o->kind == K_VSCALE || o->kind == K_HSCALE) { /* Skalieren: immer ganze Bloecke (scale_ok) */
         IgdCompOp *p = g;
         p->op = o->kind == K_VSCALE ? IGD_OP_VSCALE : IGD_OP_HSCALE;
         p->shape = IGD_BLK_8X8;
@@ -292,13 +306,13 @@ static int split_op(const KOp *o, IgdCompOp *g)
         if (w <= 0 || h <= 0)
             continue;
         IgdCompOp *p = &g[n++];
-        p->op = o->kind == K_BLEND ? IGD_OP_BLEND : IGD_OP_COPY;
+        p->op = o->kind == K_BLEND ? IGD_OP_BLEND : IGD_OP_COPY; /* anzeigen = kopieren */
         p->shape = sh;
         p->galpha = (uint32_t)o->g;
         p->step = 0;
         p->gx = (uint32_t)(sh == IGD_BLK_8X8 || sh == IGD_BLK_8X1 ? w / 8 : w);
         p->gy = (uint32_t)(sh == IGD_BLK_8X8 || sh == IGD_BLK_1X8 ? h / 8 : h);
-        p->dst = gsurf(o->d, cache_mode == 2 ? IGD_MOCS_WB : 0);
+        p->dst = gsurf(o->d, cache_mode == 2 && o->d != &scanout ? IGD_MOCS_WB : 0); /* den Bildspeicher liest der Monitor */
         p->src = gsurf(o->s, cache_mode >= 1 ? IGD_MOCS_WB : 0);
         p->dx = (uint32_t)(o->dx + x) * 4;
         p->dy = (uint32_t)(o->dy + y);
@@ -308,11 +322,20 @@ static int split_op(const KOp *o, IgdCompOp *g)
     return n;
 }
 
-/* Stuecke an die Render-Engine; 0 = fertig */
-static int submit_gpu(const IgdCompOp *g, int m)
+static void count_us(uint64_t us)
+{
+    st.us += us;
+    if (us > st.max_us)
+        st.max_us = us;
+}
+
+static int exec_async; /* die letzte Liste nur abschicken (Systemaufruf 6) */
+
+/* Stuecke an die Render-Engine; 0 = fertig (bzw. abgeschickt) */
+static int submit_gpu(const IgdCompOp *g, int m, int last)
 {
     uint64_t us = 0;
-    int rc = igd_rcs_comp(g, m, &us);
+    int rc = igd_rcs_comp(g, m, &us, exec_async && last);
     if (rc == -1) {
         st.busy++;
         return -1;
@@ -327,9 +350,10 @@ static int submit_gpu(const IgdCompOp *g, int m)
     }
     st.jobs++;
     st.ops += (uint64_t)m;
-    st.us += us;
-    if (us > st.max_us)
-        st.max_us = us;
+    if (exec_async && last)
+        async_jobs++;
+    else
+        count_us(us);
     return 0;
 }
 
@@ -352,25 +376,27 @@ static int exec_ops(const KOp *ops, int n)
             int sw, sh;
             src_rect(o, &sw, &sh);
             flush_rect(o->s, o->sx, o->sy, sw, sh);
-            flush_rect(o->d, o->dx, o->dy, o->w, o->h);
+            if (o->d != &scanout)
+                flush_rect(o->d, o->dx, o->dy, o->w, o->h);
         }
         if (m + 4 > IGD_COMP_MAX_OPS) {
-            if (submit_gpu(g, m) != 0)
+            if (submit_gpu(g, m, 0) != 0)
                 return -1;
             m = 0;
         }
         m += split_op(o, g + m);
         if (serial_mode) {
-            if (submit_gpu(g, m) != 0)
+            if (submit_gpu(g, m, i + 1 == n) != 0)
                 return -1;
             m = 0;
         }
     }
-    if (m && submit_gpu(g, m) != 0)
+    if (m && submit_gpu(g, m, 1) != 0)
         return -1;
     if (flush_mode)
         for (int i = 0; i < n; i++)
-            flush_rect(ops[i].d, ops[i].dx, ops[i].dy, ops[i].w, ops[i].h);
+            if (ops[i].d != &scanout)
+                flush_rect(ops[i].d, ops[i].dx, ops[i].dy, ops[i].w, ops[i].h);
     return 0;
 }
 
@@ -595,9 +621,12 @@ static int blit_check(void)
 /* Cache-Modus wechseln (igdtest comp cache N; ausgefuehrt beim naechsten Bild des Desktops): erst Selbsttest */
 static void apply_cache(int m)
 {
-    int old = cache_mode;
+    int old = cache_mode, keep = exec_async;
     cache_mode = m;
-    if (selftest() != 0 || (m == 2 && blit_check() != 0)) {
+    exec_async = 0; /* die Tests warten jeden Auftrag ab */
+    int bad = selftest() != 0 || (m == 2 && blit_check() != 0);
+    exec_async = keep;
+    if (bad) {
         kprintf("igdcomp: Selbsttest mit \"%s\" falsch - es bleibt bei \"%s\"\n", cache_names[m], cache_names[old]);
         cache_mode = old;
         return;
@@ -668,7 +697,7 @@ int64_t igd_comp_sys(uint32_t pid, uint64_t op, uint64_t a, uint64_t b)
     if (op == 0)
         return enabled ? mode : 0;
     if (op == 4) { /* Messwert des Desktops */
-        int k = a ? 1 : 0;
+        int k = a > 2 ? 2 : (int)a;
         st.n[k]++;
         st.t[k] += b & 0xFFFFFFFFu;
         st.px[k] += b >> 32;
@@ -703,9 +732,27 @@ int64_t igd_comp_sys(uint32_t pid, uint64_t op, uint64_t a, uint64_t b)
         surf_drop(s);
         return 0;
     }
-    if (op == 3) { /* ausfuehren: GpuOp[b] */
+    if (op == 5) { /* auf die zuletzt abgeschickte Liste warten */
+        uint64_t us = 0;
+        int rc = mode == 1 ? igd_rcs_comp_wait(&us) : 0;
+        if (us)
+            count_us(us);
+        return rc ? ERR_IO : 0;
+    }
+    if (op == 3 || op == 6) { /* ausfuehren: GpuOp[b]; 6 = nicht abwarten (mit "anzeigen" am Ende) */
         if (!enabled)
             return ERR_AGAIN;
+        exec_async = op == 6 && mode == 1;
+        if (mode == 1) { /* angezeigter Puffer fuer "anzeigen" */
+            uint32_t gtt, pitch, w, h;
+            scanout.pid = 0;
+            if (console_gfx_owner(pid) && igd_front_surface(&gtt, &pitch, &w, &h) == 0 && !(pitch & 63)) {
+                scanout = (CompSurf){pid, 0, 0, pitch / 4, h, 0, gtt >> 12}; /* Breite = Zeilenlaenge (gsurf) */
+                (void)w;
+            }
+        } else {
+            scanout = (CompSurf){console_gfx_owner(pid) ? pid : 0, 0, 0, 4096, 4096, 0, 0};
+        }
         if (pending_cache >= 0) {
             int m = pending_cache;
             pending_cache = -1;
@@ -718,19 +765,23 @@ int64_t igd_comp_sys(uint32_t pid, uint64_t op, uint64_t a, uint64_t b)
         for (uint64_t i = 0; i < b; i++) {
             GpuOp u;
             memcpy(&u, (const void *)(a + i * sizeof(GpuOp)), sizeof(u));
-            CompSurf *d = surf_get(pid, u.dst), *s = surf_get(pid, u.src);
-            if (!d || !s || d == s || u.kind < 1 || u.kind > 4)
+            CompSurf *d = u.kind == 5 ? (scanout.pid ? &scanout : 0) : surf_get(pid, u.dst), *s = surf_get(pid, u.src);
+            if (!d || !s || d == s || u.kind < 1 || u.kind > 5)
                 return ERR_INVAL;
             KOp o = {u.kind - 1, d, s, u.dx, u.dy, u.sx, u.sy, u.w, u.h, u.alpha < 0 ? 0 : u.alpha > 256 ? 256 : u.alpha,
                      u.step};
-            if (o.kind >= K_VSCALE ? !scale_ok(&o) : !clip_op(&o)) {
-                if (o.kind >= K_VSCALE)
+            if (o.kind == K_VSCALE || o.kind == K_HSCALE ? !scale_ok(&o) : !clip_op(&o)) {
+                if (o.kind == K_VSCALE || o.kind == K_HSCALE)
                     return ERR_INVAL; /* Skalieren muss genau passen */
                 continue;
             }
             kops[n++] = o;
-            if (n == (int)(sizeof(kops) / sizeof(kops[0])) || i + 1 == b) {
-                if (exec_ops(kops, n) != 0)
+            if (n == (int)(sizeof(kops) / sizeof(kops[0])) && i + 1 < b) { /* Zwischenstueck: immer abwarten */
+                int keep = exec_async;
+                exec_async = 0;
+                int rc = exec_ops(kops, n);
+                exec_async = keep;
+                if (rc != 0)
                     return ERR_AGAIN;
                 n = 0;
             }
@@ -792,8 +843,9 @@ void igd_comp_report(void)
     kprintf("igdcomp: %lu Auftragslisten mit %lu Auftraegen, je %lu us auf der GPU (max %lu us); %lu belegt, %lu Fehler\n",
             (unsigned long)st.jobs, (unsigned long)st.ops, (unsigned long)(st.jobs ? st.us / st.jobs : 0),
             (unsigned long)st.max_us, (unsigned long)st.busy, (unsigned long)st.errors);
-    for (int k = 1; k >= 0; k--)
-        kprintf("igdcomp: Desktop mit %s: %lu Bilder, %lu Mpx, %lu us je Bild, %lu us je Mpx\n", k ? "GPU" : "CPU",
+    static const char *const how[3] = {"CPU", "GPU (abgewartet)", "GPU ohne Warten (CPU-Zeit)"};
+    for (int k = 2; k >= 0; k--)
+        kprintf("igdcomp: Desktop mit %s: %lu Bilder, %lu Mpx, %lu us je Bild, %lu us je Mpx\n", how[k],
                 (unsigned long)st.n[k], (unsigned long)(st.px[k] / 1000000), (unsigned long)(st.n[k] ? st.t[k] / st.n[k] : 0),
                 (unsigned long)per_mpx(st.t[k], st.px[k]));
 }

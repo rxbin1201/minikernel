@@ -88,6 +88,7 @@ int gpu_init(void)
 
 void gpu_quit(void)
 {
+    gpu_wait();
     if (!screen_orig)
         return;
     Surface s = gfx_screen;
@@ -178,6 +179,31 @@ void gq_cancel(void)
     nq = q_bad = 0;
 }
 
+static int async_pending;
+
+void gq_present(int x, int y, int w, int h)
+{
+    gq_put(5, &gfx_screen, x, y, &gfx_screen, x, y, w, h, 256, 0);
+}
+
+int gq_submit_async(void)
+{
+    int bad = q_bad;
+    s64 r = !bad && nq ? sys_gpucomp(6, (u64)q, (u64)nq) : 0;
+    nq = q_bad = 0;
+    if (bad || r < 0)
+        return -1;
+    async_pending = 1;
+    return 0;
+}
+
+void gpu_wait(void)
+{
+    if (async_pending)
+        sys_gpucomp(5, 0, 0);
+    async_pending = 0;
+}
+
 int gq_submit(void)
 {
     int bad = q_bad;
@@ -189,7 +215,7 @@ int gq_submit(void)
 void gpu_stat(int gpu, s64 us, s64 px)
 {
     if (gpu_mode && us >= 0)
-        sys_gpucomp(4, (u64)(gpu != 0), (u64)us | (u64)px << 32);
+        sys_gpucomp(4, (u64)gpu, (u64)us | (u64)px << 32); /* 0 CPU, 1 GPU, 2 GPU ohne Warten */
 }
 
 /* ---------- Schatten als Bild ----------

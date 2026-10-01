@@ -665,8 +665,21 @@ static void overlays(const Clip *r)
 /* Geaenderte Fenster neu zeichnen, dann die geaenderten Rechtecke zusammensetzen: Hintergrund, je Fenster Schatten und
  * Bild (runde Ecken, feiner Rand) - alle Rechtecke in einem Auftrag an die GPU, sonst mit der CPU -, darueber
  * Taskleiste und Menues; anzeigen */
+/* Liegt in keinem geaenderten Rechteck etwas, das die CPU ueber die Fenster zeichnet? Dann darf die GPU das Bild
+ * selbst anzeigen (und der Desktop wartet nicht auf sie). Der Mauszeiger muss eine eigene Ebene sein. */
+static int overlay_free(void)
+{
+    if (menu_open || dialog_kind || snap_preview || !(gfx_hw_cursor_on() || gpu_mode == 2))
+        return 0;
+    for (int i = 0; i < ndmg; i++)
+        if (dmg[i].y1 > dock_top() - U(50))
+            return 0;
+    return 1;
+}
+
 void draw_all(void)
 {
+    gpu_wait(); /* das letzte Bild liest vielleicht noch aus Fensterbildern, die sich gleich aendern */
     for (int i = 0; i < nord; i++)
         render_window(order[i]);
     if (!ndmg)
@@ -675,10 +688,23 @@ void draw_all(void)
     int gpu = gpu_usable();
     for (int i = 0; gpu && i < ndmg; i++)
         gpu = queue_gpu(&dmg[i]);
-    if (gpu)
+    if (gpu && overlay_free()) { /* die GPU setzt zusammen und zeigt an - nicht warten */
+        for (int i = 0; i < ndmg; i++) {
+            gq_present(dmg[i].x0, dmg[i].y0, dmg[i].x1 - dmg[i].x0, dmg[i].y1 - dmg[i].y0);
+            px += (s64)(dmg[i].x1 - dmg[i].x0) * (dmg[i].y1 - dmg[i].y0);
+        }
+        if (gq_submit_async() == 0) {
+            gpu_stat(2, sys_time_us() - t0, px);
+            ndmg = 0;
+            return;
+        }
+        px = 0;
+        gpu = 0; /* abgelehnt: alles mit der CPU */
+    } else if (gpu) {
         gpu = gq_submit() == 0;
-    else
+    } else {
         gq_cancel();
+    }
     for (int i = 0; i < ndmg; i++) {
         if (!gpu)
             compose_cpu(&dmg[i]);

@@ -823,10 +823,23 @@ static void copy_rect(uint8_t *dst, const uint32_t *src, uint32_t pitch, int x, 
     __asm__ __volatile__("sfence" : : : "memory"); /* Non-Temporal- bzw. write-combining-Puffer leeren */
 }
 
+/* Der angezeigte Puffer (dorthin gehen Teil-Updates) - fuer das Anzeigen durch die Render-Engine (igd_comp.c) */
+int igd_front_surface(uint32_t *gtt, uint32_t *pitch, uint32_t *w, uint32_t *h)
+{
+    if (!igd_flip_ready)
+        return -1;
+    *gtt = front_b ? igd_surf_b : igd_surf_a;
+    *pitch = igd_scr_stride;
+    *w = igd_scr_w;
+    *h = igd_scr_h;
+    return 0;
+}
+
 int igd_gfx_blit(const uint32_t *src, uint32_t pitch, int x, int y, int w, int h)
 {
     if (!igd_flip_ready || x < 0 || y < 0 || (uint32_t)(x + w) > igd_scr_w || (uint32_t)(y + h) > igd_scr_h)
         return 0;
+    igd_rcs_comp_wait(0); /* die Render-Engine schreibt vielleicht noch ein Bild in den Puffer (igd_comp.c) */
     uint64_t t0 = time_us();
     if (x == 0 && y == 0 && (uint32_t)w == igd_scr_w && (uint32_t)h == igd_scr_h) { /* ganzes Bild: in den Hintergrund, umschalten */
         wait_flip();
@@ -859,6 +872,7 @@ int igd_gfx_blit(const uint32_t *src, uint32_t pitch, int x, int y, int w, int h
 
 void igd_gfx_sync(void)
 {
+    igd_rcs_comp_wait(0);
     igd_blt_sync();
 }
 
@@ -866,6 +880,7 @@ void igd_gfx_end(void)
 {
     if (!igd_flip_ready)
         return;
+    igd_rcs_comp_wait(0);
     igd_blt_sync();
     wait_flip();
     if (front_b) { /* die Konsole zeichnet in A */

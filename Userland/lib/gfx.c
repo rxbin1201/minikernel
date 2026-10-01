@@ -380,6 +380,11 @@ static void gfx_blit_from(const u32 *src, int x, int y, int w, int h)
     sys_gfx(1, &b);
 }
 
+int gfx_hw_cursor_on(void)
+{
+    return gfx_hw_cursor;
+}
+
 /* SYS_GFX 3: Hardware-Mauszeiger setzen; 0 = ok, sonst gibt es keinen */
 static s64 gfx_hw_cursor_set(void)
 {

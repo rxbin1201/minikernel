@@ -110,7 +110,10 @@ In der Shell: `burn 5000 & burn 5000 & cpus` zeigt zwei ausgelastete CPUs.
   waagerecht: Spalten 1 x 8), Schrittweite 8.8 aus den Konstanten; danach mischt der Mischen-Kernel mit der Deckung der
   Animation (r1.4, 256 = unveraendert). Die Deckung der runden Ecken steht in Byte 3 des Fensterbildes (sonst 255) und
   wird mitskaliert; die Schattenstreifen werden nur entlang der Kante gestreckt, ihre Ecken bleiben unveraendert.
-  Cache: die Render-Engine hat eigene Eintraege fuer "uncached" und "write-back im
+  Liegt in keinem geaenderten Rechteck etwas, das die CPU darueber zeichnet (Taskleiste, Menue, Dialog, Andock-
+  Vorschau), haengt der Desktop "anzeigen" an die Liste (die GPU kopiert die Rechtecke uncached in den angezeigten
+  Puffer) und wartet nicht: abgewartet wird erst vor dem naechsten Bild bzw. bevor CPU oder Blitter in den Bildspeicher
+  schreiben oder eine Flaeche abgemeldet wird. Die GPU-Zeit misst der Zeitstempel der Render-Engine. Cache: die Render-Engine hat eigene Eintraege fuer "uncached" und "write-back im
   LLC" (L3 der GPU fuer beide aus, damit sie keine alten Fensterinhalte sieht). Standard ist "alles im Cache" (auf
   dem Test-PC 8,2/6,1 GB/s kopieren/mischen gegen 4,7/3,4 uncached, Desktop doppelt so schnell wie mit der CPU) -
   aber nur, wenn ein zweiter Selbsttest zeigt, dass der Blitter das von der GPU in den Cache geschriebene Bild beim

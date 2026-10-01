@@ -164,6 +164,9 @@ Surface *anim_temps(void);  /* 4 Hilfsflaechen fuer Animationen (Bild senkrecht,
                              * links/rechts), 0 = keine */
 void gq_cancel(void);
 int  gq_submit(void);  /* 0 = alles fertig gezeichnet, sonst muss die CPU den Bereich zeichnen */
+void gq_present(int x, int y, int w, int h); /* Rechteck des Bildschirmbilds von der GPU anzeigen lassen */
+int  gq_submit_async(void); /* abschicken ohne zu warten (0 = angenommen); gpu_wait vor dem naechsten Bild */
+void gpu_wait(void);        /* die zuletzt abgeschickte Liste abwarten */
 void gpu_stat(int gpu, s64 us, s64 px);
 int  shadow_ready(Win *w, int alpha);     /* Schattenbild passend zu Groesse und Staerke; 0 = geht nicht */
 void shadow_free(Win *w);

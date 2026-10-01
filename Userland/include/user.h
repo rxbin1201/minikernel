@@ -285,10 +285,12 @@ static inline s64 sys_shm_size(unsigned id)                { return syscall3(SYS
 
 /* Zusammensetzen auf der GPU (Desktop): 0 Art -> 0 keins, 1 GPU, 2 CPU-Ersatz im Kernel; 1 shm-Flaeche anmelden
  * (nummer, breite | hoehe << 16) -> Nummer; 2 abmelden; 3 Auftraege ausfuehren (GpuOp *, anzahl) -> 0 wenn fertig;
- * 4 Messwert (0 CPU / 1 GPU, mikrosekunden | pixel << 32) */
+ * 4 Messwert (0 CPU / 1 GPU / 2 GPU ohne Warten, mikrosekunden | pixel << 32); 5 auf die letzte Liste warten;
+ * 6 wie 3, aber nur abschicken */
 typedef struct {
     unsigned short kind; /* 1 kopieren, 2 mischen (Quelle mit ihrem Alpha in Byte 3 ueber das Ziel), 3 senkrecht und
-                          * 4 waagerecht skalieren (w, h Vielfache von 8, alles muss in die Flaechen passen) */
+                          * 4 waagerecht skalieren (w, h Vielfache von 8, alles muss in die Flaechen passen),
+                          * 5 anzeigen: Rechteck der Quelle (Bildschirmbild) an dieselbe Stelle auf den Monitor */
     unsigned short dst, src;
     unsigned short pad;
     int dx, dy, sx, sy, w, h;
