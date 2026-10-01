@@ -101,6 +101,78 @@ static void draw_logo(Surface *s, int x, int y, int size)
     gfx_disc(s, x + size * 0.5f, y + size * 0.5f, size * 0.18f, 0xFFFFFF, 235);
 }
 
+/* ---------- Netzwerk: Zustand (einmal je Sekunde geholt), Symbol und Menue ---------- */
+
+static NetInfo net;
+static int     net_ok, net_idx, net_x = -1; /* Karte vorhanden, ihre Nummer; linke Kante des Symbols */
+static u64     net_rx_rate, net_tx_rate;
+
+static int net_has_ip(void) { return net.ip[0] || net.ip[1] || net.ip[2] || net.ip[3]; }
+
+static int net_state(void) /* -1 keine Karte, 0 kein Kabel, 1 ohne Adresse, 2 verbunden */
+{
+    return !net_ok ? -1 : !net.link ? 0 : net_has_ip() ? 2 : 1;
+}
+
+void net_tick(void)
+{
+    static s64 last_us;
+    if (last_us && now_us - last_us < 1000000)
+        return;
+    s64 dt = last_us ? now_us - last_us : 0;
+    last_us = now_us;
+    int old = net_state();
+    u64 prx = net.rx_bytes, ptx = net.tx_bytes;
+    NetInfo ni, pick;
+    int found = 0;
+    for (u64 i = 0; i < 4 && sys_netinfo(i, &ni) == 0; i++) /* die erste Karte mit Verbindung, sonst die erste */
+        if (!found || (ni.link && !pick.link)) {
+            pick = ni;
+            net_idx = (int)i;
+            found = 1;
+        }
+    int same = found && net_ok && strcmp(pick.name, net.name) == 0;
+    net_ok = found;
+    if (found)
+        net = pick;
+    net_rx_rate = same && dt > 0 && net.rx_bytes >= prx ? (net.rx_bytes - prx) * 1000000 / (u64)dt : 0;
+    net_tx_rate = same && dt > 0 && net.tx_bytes >= ptx ? (net.tx_bytes - ptx) * 1000000 / (u64)dt : 0;
+    if (net_state() != old)
+        damage_menubar();
+    if (menu_open == 3)
+        damage_menu();
+}
+
+void net_dhcp(void)
+{
+    if (net_ok) {
+        sys_net_dhcp((u64)net_idx);
+        net.dhcp = 1;
+        memset(net.ip, 0, 4);
+        damage_menubar();
+    }
+}
+
+/* Kabel-Netzwerk: oben ein Kasten, darunter zwei, mit Leitungen verbunden. Ohne Verbindung blass und durchgestrichen,
+ * ohne Adresse blass */
+static void draw_net_icon(Surface *s, int x)
+{
+    int st = net_state();
+    if (st < 0)
+        return;
+    float k = (float)U(1), cx = x + 8 * k, cy = MENUBAR_H * 0.5f;
+    int a = st == 2 ? 255 : 110;
+    gfx_round_rect(s, (int)(cx - 3 * k), (int)(cy - 6.5f * k), (int)(6 * k), (int)(4.5f * k), 1, C_TEXT, a);
+    gfx_round_rect(s, (int)(cx - 8 * k), (int)(cy + 2 * k), (int)(6 * k), (int)(4.5f * k), 1, C_TEXT, a);
+    gfx_round_rect(s, (int)(cx + 2 * k), (int)(cy + 2 * k), (int)(6 * k), (int)(4.5f * k), 1, C_TEXT, a);
+    gfx_capsule(s, cx, cy - 2 * k, cx, cy - 0.5f * k, 1.3f * k, C_TEXT, a);
+    gfx_capsule(s, cx - 5 * k, cy - 0.5f * k, cx + 5 * k, cy - 0.5f * k, 1.3f * k, C_TEXT, a);
+    gfx_capsule(s, cx - 5 * k, cy - 0.5f * k, cx - 5 * k, cy + 2 * k, 1.3f * k, C_TEXT, a);
+    gfx_capsule(s, cx + 5 * k, cy - 0.5f * k, cx + 5 * k, cy + 2 * k, 1.3f * k, C_TEXT, a);
+    if (st == 0)
+        gfx_capsule(s, cx - 8 * k, cy - 7 * k, cx + 8 * k, cy + 7 * k, 1.6f * k, C_TEXT, 220);
+}
+
 void draw_menubar(void)
 {
     Surface *s = &gfx_screen;
@@ -130,6 +202,10 @@ void draw_menubar(void)
     int tw = text_width(font_ui, FS, t), x = W - U(14) - tw;
     text_draw(s, font_ui, FS, x, ty, t, C_TEXT);
     s64 vol = sys_audio(4, (u64)-1, 0);
+    net_x = vol >= 0 ? x - U(68) : x - U(36);
+    if (menu_open == 3)
+        gfx_round_rect(s, net_x - U(6), U(3), U(28), MENUBAR_H - U(6), U(5), 0x000000, 36);
+    draw_net_icon(s, net_x);
     if (vol >= 0) { /* Lautsprecher: Kasten, Trichter, Schallwellen je nach Lautstaerke */
         float sx = (float)(x - U(36)), sy = MENUBAR_H * 0.5f, k = (float)U(1);
         gfx_round_rect(s, (int)sx, (int)(sy - 2.5f * k), (int)(3.5f * k), (int)(5 * k), 1, C_TEXT, 255);
@@ -153,6 +229,8 @@ int menubar_hit(int x, int y)
         return 1;
     if (x >= appname_x() - U(8) && x < appname_x() + text_width(font_bold, FS, app_name(focused())) + U(8))
         return 2;
+    if (net_ok && net_x >= 0 && x >= net_x - U(6) && x < net_x + U(22))
+        return 3;
     return 0;
 }
 
@@ -176,8 +254,73 @@ static const MenuItem app_menu[] = {
     {"Fenster schlie\xC3\x9F" "en", A_WIN_CLOSE, "Alt+W"}, {"Programm beenden", A_APP_QUIT, "Alt+Q"},
 };
 
+static char nm_status[40], nm_model[40], nm_ip[24], nm_gw[20], nm_dns[20], nm_speed[32], nm_rx[40], nm_tx[40];
+static MenuItem net_menu[] = {
+    {"Ethernet", A_INFO, nm_status},   {"Karte", A_INFO, nm_model},      {"IP-Adresse", A_INFO, nm_ip},
+    {"Gateway", A_INFO, nm_gw},        {"DNS-Server", A_INFO, nm_dns},   {"Verbindung", A_INFO, nm_speed},
+    {"Empfangen", A_INFO, nm_rx},      {"Gesendet", A_INFO, nm_tx},      {"", A_SEP, 0},
+    {"Adresse neu anfragen (DHCP)", A_NET_DHCP, 0},
+};
+
+static void bytes_str(char *out, int max, u64 b)
+{
+    if (b < 1024)
+        snprintf(out, max, "%llu B", b);
+    else if (b < 1024 * 1024)
+        snprintf(out, max, "%llu.%llu KB", b / 1024, b % 1024 * 10 / 1024);
+    else if (b < 1024ULL * 1024 * 1024)
+        snprintf(out, max, "%llu.%llu MB", b / (1024 * 1024), b % (1024 * 1024) * 10 / (1024 * 1024));
+    else
+        snprintf(out, max, "%llu.%llu GB", b >> 30, (b & ((1ULL << 30) - 1)) * 10 >> 30);
+}
+
+static void ip_str(char *out, int max, const unsigned char *ip)
+{
+    if (ip[0] || ip[1] || ip[2] || ip[3])
+        snprintf(out, max, "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+    else
+        snprintf(out, max, "\xE2\x80\x93"); /* Gedankenstrich */
+}
+
+static void net_menu_texts(void)
+{
+    int st = net_state();
+    snprintf(nm_status, sizeof(nm_status), "%s",
+             st == 2 ? "Verbunden" : st == 0 ? "Kein Kabel" : net.dhcp == 1 ? "Sucht Adresse \xE2\x80\xA6" :
+             net.dhcp == 3 ? "Keine Adresse (DHCP)" : "Ohne Adresse");
+    snprintf(nm_model, sizeof(nm_model), "%.30s (%s)", net.model, net.name);
+    if (net_has_ip()) {
+        int bits = 0;
+        for (int i = 0; i < 4; i++)
+            for (int b = 7; b >= 0; b--)
+                bits += net.mask[i] >> b & 1;
+        snprintf(nm_ip, sizeof(nm_ip), "%u.%u.%u.%u/%d", net.ip[0], net.ip[1], net.ip[2], net.ip[3], bits);
+    } else {
+        ip_str(nm_ip, sizeof(nm_ip), net.ip);
+    }
+    ip_str(nm_gw, sizeof(nm_gw), net.gateway);
+    ip_str(nm_dns, sizeof(nm_dns), net.dns);
+    if (net.link)
+        snprintf(nm_speed, sizeof(nm_speed), "%u Mbit/s, %s%s", net.mbps, net.full_duplex ? "Vollduplex" : "Halbduplex",
+                 net.dhcp == 2 ? ", DHCP" : net.dhcp == 0 && net_has_ip() ? ", fest" : "");
+    else
+        snprintf(nm_speed, sizeof(nm_speed), "getrennt");
+    char a[16], r[16];
+    bytes_str(a, sizeof(a), net.rx_bytes);
+    bytes_str(r, sizeof(r), net_rx_rate);
+    snprintf(nm_rx, sizeof(nm_rx), "%s  (%s/s)", a, r);
+    bytes_str(a, sizeof(a), net.tx_bytes);
+    bytes_str(r, sizeof(r), net_tx_rate);
+    snprintf(nm_tx, sizeof(nm_tx), "%s  (%s/s)", a, r);
+}
+
 static const MenuItem *menu_items(int *n)
 {
+    if (menu_open == 3) {
+        net_menu_texts();
+        *n = (int)(sizeof(net_menu) / sizeof(net_menu[0]));
+        return net_menu;
+    }
     if (menu_open == 1) {
         *n = (int)(sizeof(logo_menu) / sizeof(logo_menu[0]));
         return logo_menu;
@@ -193,6 +336,12 @@ static void menu_box(int *x, int *y, int *w, int *h)
     *x = menu_open == 1 ? logo_x() - U(6) : appname_x() - U(8);
     *y = MENUBAR_H + U(2);
     *w = U(250);
+    if (menu_open == 3) { /* rechts an der Leiste: unter dem Symbol, rechtsbuendig */
+        *w = U(340);
+        *x = net_x + U(22) - *w;
+        if (*x + *w > W - U(6))
+            *x = W - U(6) - *w;
+    }
     *h = U(10);
     for (int i = 0; i < n; i++)
         *h += m[i].action == A_SEP ? U(11) : U(24);
@@ -226,6 +375,13 @@ void draw_menu(void)
             gfx_blend_fill(s, x + U(10), iy + U(5), w - U(20), 1, 0x000000, 30);
             continue;
         }
+        if (m[i].action == A_INFO) { /* Name grau links, Wert rechts */
+            int ty = iy + (U(24) - text_height(font_ui, FS)) / 2;
+            text_draw(s, font_ui, FS, x + U(14), ty, m[i].label, 0x8E8E93);
+            text_draw(s, i == 0 ? font_bold : font_ui, FS, x + w - U(14) - text_width(i == 0 ? font_bold : font_ui, FS, m[i].keys),
+                      ty, m[i].keys, C_TEXT);
+            continue;
+        }
         int hover = i == menu_hover;
         if (hover)
             gfx_round_rect(s, x + U(5), iy, w - U(10), U(24), U(5), C_ACCENT, 255);
@@ -257,10 +413,19 @@ int menu_hit(int px, int py)
         return -1;
     for (int i = 0; i < n; i++) {
         int iy = menu_item_y(i);
-        if (m[i].action != A_SEP && py >= iy && py < iy + U(24))
+        if (m[i].action != A_SEP && m[i].action != A_INFO && py >= iy && py < iy + U(24))
             return i;
     }
     return -1;
+}
+
+int menu_inside(int px, int py)
+{
+    if (!menu_open)
+        return 0;
+    int x, y, w, h;
+    menu_box(&x, &y, &w, &h);
+    return px >= x && px < x + w && py >= y && py < y + h;
 }
 
 int menu_action(int i)

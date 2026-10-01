@@ -98,7 +98,7 @@ auf echter Hardware (bisher i5-8400T, UHD 630, 3440x1440 ueber HDMI).
 ## Desktop
 
 `desktop` startet die grafische Oberflaeche im Stil von macOS (hell): oben die Menueleiste (Logo-Menue mit den
-Programmen und "Zur Konsole", Menue des aktiven Programms, Lautstaerke, Datum und Uhrzeit), unten das Dock (Punkt =
+Programmen und "Zur Konsole", Menue des aktiven Programms, Netzwerk, Lautstaerke, Datum und Uhrzeit), unten das Dock (Punkt =
 laeuft, rechts die minimierten Fenster). Fenster haben runde Ecken, weiche Schatten und die drei Knoepfe
 (schliessen, minimieren, zoomen; Doppelklick auf die Titelleiste zoomt). Menueleiste und Dock sind Milchglas ueber
 einem berechneten Farbverlauf. Ab 1300 Pixel Hoehe wird alles um 25 % groesser.
@@ -109,6 +109,9 @@ andocken, Alt+Pfeil hoch/runter maximieren bzw. zurueck. Fenster, die man an den
 die Haelfte an, am oberen Rand fuellen sie den Bildschirm (mit Vorschau); weggezogen bekommen sie ihre alte Groesse.
 Im Logo-Menue: Neu starten und Ausschalten mit Rueckfrage - alle Programme werden gebeten, sich zu beenden; bleibt eins
 offen (z.B. Malen mit ungespeichertem Bild), fragt der Desktop, ob trotzdem.
+Das Netzwerk-Symbol zeigt den Zustand (kraeftig: verbunden, blass: ohne Adresse, durchgestrichen: kein Kabel); ein
+Klick oeffnet Karte, Adresse, Gateway, DNS, Geschwindigkeit und die Datenmengen mit aktueller Rate (jede Sekunde neu)
+sowie "Adresse neu anfragen (DHCP)".
 Alt-Kombinationen kommen als zwei Bytes (`KEY_ALT`/`KEY_ALT_SHIFT`, dann die Taste) und nur bei Grafikprogrammen an
 (`KEY_MOD_ALT` in `Event.key`); die Konsole verwirft sie.
 

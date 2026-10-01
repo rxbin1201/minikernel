@@ -67,6 +67,7 @@ void do_action(int a)
     case A_NEXT_WIN: cycle_windows(1); break;
     case A_RESTART:
     case A_POWEROFF: dialog_open(a); break;
+    case A_NET_DHCP: net_dhcp(); break;
     }
 }
 
@@ -117,6 +118,8 @@ static void mouse_down(Event *e)
             do_action(menu_action(i));
             return;
         }
+        if (menu_inside(e->x, e->y)) /* Infozeile oder Trennstrich: Menue bleibt offen */
+            return;
         int m = menubar_hit(e->x, e->y), was = menu_open;
         close_menu();
         if (m && m != was) { /* anderes Menue der Leiste: gleich oeffnen */
@@ -340,6 +343,7 @@ void _start(int argc, char **argv)
             damage_menubar();
         }
         power_tick();
+        net_tick();
         anim_tick();
         dock_tick(now_us - prev_us);
         draw_all(); /* direkt nach dem Bildwechsel: was sich geaendert hat, steht bis zum naechsten Bild */
