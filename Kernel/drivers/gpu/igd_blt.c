@@ -58,6 +58,8 @@
 #define MI_FLUSH_DW_POSTSYNC  ((0x26u << 23) | 2)  /* MI_FLUSH_DW mit Schreibbefehl: 4 Dwords */
 #define MI_FLUSH_DW_STOREDW   (1u << 14)
 #define MI_FLUSH_DW_USE_GTT   (1u << 2)
+#define MI_INVALIDATE_TLB     (1u << 18)               /* MI_FLUSH_DW: Adress-Cache der Engine verwerfen (braucht Post-Sync) */
+#define HWS_SCRATCH           0x200                     /* Statusseite: Ziel des Post-Sync beim TLB-Verwerfen */
 #define XY_COLOR_BLT          ((2u << 29) | (0x50u << 22) | (3u << 20) | 5) /* 7 Dwords, alle 4 Bytes schreiben */
 #define XY_SRC_COPY_BLT       ((2u << 29) | (0x53u << 22) | (3u << 20) | 8) /* 10 Dwords */
 #define BLT_DEPTH_32          (3u << 24)
@@ -283,6 +285,8 @@ static int bench(const char *label)
 #define SMALL_PX    16384   /* kleinere Ausschnitte kopiert die CPU (der Auftrag kostet mehr als das Kopieren) */
 
 static int       blt_on;
+static int       part_wait;                     /* "bltwait": auch Teil-Updates abwarten (zur Fehlersuche) */
+static int       tlb_stale;                     /* GGTT-Fenster geaendert: vor dem naechsten Auftrag TLB verwerfen */
 static uint32_t  pte_wb, pte_uc;                /* PAT-Bits im GGTT-Eintrag: Programmbilder bzw. Bildpuffer */
 static uint32_t  win_base;                      /* GGTT-Index des Fensters */
 static uint64_t *win_phys;                      /* eingeblendete Seiten */
@@ -402,6 +406,7 @@ static int window_map(uint64_t va, uint64_t bytes)
     }
     igd_ggtt_flush();
     bs.remaps++;
+    tlb_stale = 1; /* der Blitter hat die alten Eintraege vielleicht noch in seinem TLB */
     win_va = first;
     win_n = n;
     int ok = (va & ~0xFFFULL) + (uint64_t)need * 4096 <= first + (uint64_t)n * 4096;
@@ -426,13 +431,20 @@ int igd_blt_copy_user(uint32_t dst, const uint32_t *src, uint32_t pitch, int x, 
     uint64_t off = va - win_va, page_off = off & ~0xFFFULL, in = off & 0xFFF;
     uint32_t sgtt = (win_base << 12) + (uint32_t)page_off, spitch = pitch * 4;
     int sx = (int)((in % spitch) / 4), sy = (int)(in / spitch);
-    if (!reserve(10 + 6)) {
+    if (!reserve(4 + 10 + 6)) {
         blt_fail("Ring laeuft nicht leer");
         return 0;
     }
+    if (tlb_stale) { /* wie i915 nach GGTT-Aenderungen: Flush mit TLB-Verwerfen (und Post-Sync in die Statusseite) */
+        emit(MI_FLUSH_DW_POSTSYNC | MI_FLUSH_DW_STOREDW | MI_INVALIDATE_TLB);
+        emit((hws_gtt + HWS_SCRATCH) | MI_FLUSH_DW_USE_GTT);
+        emit(0);
+        emit(0);
+        tlb_stale = 0;
+    }
     emit_copy(dst, igd_scr_stride, x, y, sgtt, spitch, sx, sy, w, h);
     uint32_t n = kick();
-    if (!wait) {
+    if (!wait && !part_wait) {
         bs.part_n++;
         bs.part_px += (uint64_t)w * (uint64_t)h;
         bs.part_us += time_us() - t0;
@@ -451,6 +463,12 @@ int igd_blt_copy_user(uint32_t dst, const uint32_t *src, uint32_t pitch, int x, 
         thread_yield();
     }
     uint64_t d = time_us() - t0;
+    if (!wait) { /* Teil-Update mit "bltwait" */
+        bs.part_n++;
+        bs.part_px += (uint64_t)w * (uint64_t)h;
+        bs.part_us += d;
+        return 1;
+    }
     bs.full_n++;
     bs.full_us += d;
     if (d > bs.full_max_us)
@@ -553,6 +571,7 @@ int igd_blt_init(void)
     ring_gtt = base << 12;
     hws_gtt = (base + 4) << 12;
     win_base = base + 7;
+    tlb_stale = 1;
     seqno = last_n = 0;
 
     forcewake_get();
@@ -593,7 +612,9 @@ int igd_blt_init(void)
         restore_pat();
         return -1;
     }
-    kprintf("igdblt: Blitter uebernimmt die Bild-Updates (Selbsttest ok, %lu us; GPU-Takt bis %u MHz)\n",
+    part_wait = cmdline_has("bltwait");
+    kprintf("igdblt: Blitter uebernimmt die Bild-Updates%s (Selbsttest ok, %lu us; GPU-Takt bis %u MHz)\n",
+            part_wait ? " (bltwait: auch Teil-Updates abgewartet)" : "",
             (unsigned long)us, rp0 * 50);
     return 0;
 }
