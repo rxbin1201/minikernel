@@ -4,6 +4,8 @@
 /* Grafik fuer Programme: Das Programm uebernimmt mit gfx_open() den ganzen Bildschirm (die Konsole pausiert und kommt
  * bei gfx_close() bzw. beim Programmende unveraendert zurueck). Gezeichnet wird in gfx_screen (Speicher des Programms);
  * gfx_present() zeigt ein Rechteck davon an. Den Mauszeiger zeichnet die Bibliothek selbst darueber.
+ * Unter dem Desktop gestartet, bekommt das Programm stattdessen ein Fenster (gfx_screen ist dann dessen Inhalt; siehe
+ * winproto.h); gfx_open_window() legt dessen Groesse und Titel fest. Ohne Desktop ist beides der ganze Bildschirm.
  * Farben: 0x00RRGGBB (RGB(r, g, b)). Text: 8x16-Schrift des Kernels, UTF-8. */
 
 #include "libc.h"
@@ -25,7 +27,9 @@ typedef struct {
 extern Surface gfx_screen; /* hierhin zeichnet das Programm */
 extern Clip    gfx_clip;   /* aktuelles Clip-Rechteck (gfx_set_clip) */
 
-enum { EV_NONE, EV_KEY, EV_DOWN, EV_UP, EV_MOVE, EV_WHEEL };
+/* Nur im Fenster: EV_CLOSE Fenster soll zu (Schliessen-Knopf, Desktop beendet); EV_FOCUS key = 1 aktiv, 0 nicht mehr;
+ * EV_RESIZE neue Groesse (x, y = Breite, Hoehe; gfx_screen hat sie schon): alles neu zeichnen */
+enum { EV_NONE, EV_KEY, EV_DOWN, EV_UP, EV_MOVE, EV_WHEEL, EV_CLOSE, EV_FOCUS, EV_RESIZE };
 
 typedef struct {
     int type;
@@ -99,6 +103,21 @@ int gfx_wait(Event *e, int timeout_ms);
  * Anzeige. Ohne Bildwechsel-Interrupt (z.B. in QEMU) 10 ms. Ergebnis: 1 = echter Bildwechsel, 0 = Ersatz */
 int gfx_vsync(void);
 int gfx_open(void);
+/* Wie gfx_open, unter dem Desktop aber ein Fenster mit w x h Pixeln Inhalt (0 = etwa 60 % des Bildschirms) */
+int gfx_open_window(int w, int h, const char *title);
+#define GFX_RESIZABLE 1 /* Fenster darf seine Groesse aendern (das Programm verarbeitet EV_RESIZE) */
+int gfx_open_window_ex(int w, int h, const char *title, int flags);
+/* Unter dem Desktop: Datei oder Ordner mit dem passenden Programm oeffnen lassen. 0 = gesendet */
+int gfx_desktop_open(const char *path);
+void gfx_set_title(const char *title);
+int gfx_windowed(void);  /* 1 = Programm laeuft in einem Fenster des Desktops */
+/* 1 = unter dem Desktop gestartet (geht schon vor gfx_open: z.B. um die Fenstergroesse nach gfx_ui_scale zu waehlen) */
+int gfx_desktop(void);
+/* Massstab der Oberflaeche in Prozent (100, ab 1300 Pixel Bildschirmhoehe 125); unter dem Desktop schon vor gfx_open,
+ * sonst erst danach richtig */
+int gfx_ui_scale(void);
+/* Groesse des ganzen Bildschirms (im Fenster: die des Desktops) */
+void gfx_display_size(int *w, int *h);
 void gfx_close(void);
 /* Bildschirm voruebergehend abgeben (z.B. um ein anderes Grafikprogramm zu starten) und wieder uebernehmen */
 void gfx_suspend(void);

@@ -3,7 +3,8 @@
 /* paint [datei.bmp]: Malprogramm mit Maus.
  *   Werkzeuge: Stift, Linie, Rechteck, Ellipse (je umrandet oder gefuellt), Fuellen, Radierer; 4 Pinselgroessen,
  *   16 Farben (rechte Maustaste auf eine Farbe: Hintergrundfarbe fuer den Radierer).
- *   Strg+S speichern (BMP, Standard /disk/BILD.BMP), Strg+Z rueckgaengig, Esc beenden. */
+ *   Strg+S speichern (BMP, Standard /disk/BILD.BMP), Strg+Z rueckgaengig, Esc beenden.
+ *   Unter dem Desktop im eigenen Fenster (Schliessen-Knopf wie Esc), sonst im Vollbild. */
 
 #define BAR 52    /* Werkzeugleiste oben */
 #define STATUS 18 /* Statuszeile unten */
@@ -202,7 +203,7 @@ void _start(int argc, char **argv)
 {
     if (argc > 1)
         snprintf(path, sizeof(path), "%s", argv[1]);
-    if (gfx_open() != 0)
+    if (gfx_open_window(0, 0, "Malen") != 0)
         sys_exit(1);
     sys_tty_fg(0); /* Strg+C beendet das Programm nicht aus Versehen */
     W = gfx_screen.w;
@@ -238,11 +239,16 @@ void _start(int argc, char **argv)
         if (!gfx_wait(&e, -1))
             continue;
         int cx = e.x, cy = e.y - BAR; /* Leinwand-Koordinaten */
+        if (e.type == EV_CLOSE) { /* Schliessen-Knopf des Fensters: wie Esc */
+            e.type = EV_KEY;
+            e.key = 0x1B;
+        }
         if (e.type == EV_KEY) {
             if (e.key == 0x1B) {
                 if (modified && !quit_armed) {
                     quit_armed = 1;
-                    snprintf(msg, sizeof(msg), "Nicht gespeichert! Esc nochmal = beenden, Strg+S = speichern");
+                    snprintf(msg, sizeof(msg), gfx_windowed() ? "Nicht gespeichert! Nochmal schliessen = beenden, Strg+S = speichern"
+                                                     : "Nicht gespeichert! Esc nochmal = beenden, Strg+S = speichern");
                     draw_bar();
                     present_bars();
                     continue;

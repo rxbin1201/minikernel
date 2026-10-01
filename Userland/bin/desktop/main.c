@@ -13,36 +13,15 @@ Win     *drag_win;
 int      mouse_x, mouse_y;
 s64      now_us;
 
-static int drag_dx, drag_dy;
-static s64 last_click_tick;
-static int last_click_x, last_click_y;
-static int quit;
+static int  drag_dx, drag_dy;
+static s64  last_click_tick;
+static int  last_click_x, last_click_y;
+static int  quit;
+static Win *app_grab; /* Fenster, in dessen Inhalt die Maustaste gedrueckt wurde: bekommt alles bis zum Loslassen */
 
 /* ======================================================================================================================
  * Eingaben
  * ==================================================================================================================== */
-
-/* Startet ein Vollbild-Programm und kommt danach zurueck */
-static void run_fullscreen(const char *path, const char *cmdline)
-{
-    gfx_suspend();
-    s64 pid = sys_fork();
-    if (pid == 0) {
-        for (int fd = 3; fd < 64; fd++)
-            sys_close(fd);
-        sys_setpgid(0, 0);
-        sys_exec(path, cmdline);
-        sys_exit(127);
-    }
-    if (pid > 0) {
-        int code;
-        sys_wait((int)pid, &code);
-    }
-    gfx_resume();
-    while (sys_getchar() >= 0) /* Tasten, die fuer das Programm gedacht waren, nicht weiterreichen */
-        ;
-    damage_all();
-}
 
 static void close_menu(void)
 {
@@ -59,20 +38,17 @@ void do_action(int a)
     close_menu();
     Win *f = focused();
     switch (a) {
-    case A_TERM: open_terminal(); break;
-    case A_FILES: open_files("/"); break;
-    case A_CALC: open_calc(); break;
-    case A_CLOCK: open_clock(); break;
-    case A_ABOUT: open_about(); break;
-    case A_PAINT: run_fullscreen("/bin/paint", "paint"); break;
-    case A_SNAKE: run_fullscreen("/bin/snake", "snake"); break;
-    case A_TETRIS: run_fullscreen("/bin/tetris", "tetris"); break;
+    case A_TERM: launch_app("/bin/term", "term", A_TERM, "Terminal"); break;
+    case A_FILES: launch_app("/bin/files", "files /", A_FILES, "Dateien"); break;
+    case A_CALC: launch_app("/bin/calc", "calc", A_CALC, "Rechner"); break;
+    case A_CLOCK: launch_app("/bin/clock", "clock", A_CLOCK, "Uhr"); break;
+    case A_ABOUT: launch_app("/bin/about", "about", A_ABOUT, "Info"); break;
+    case A_PAINT: launch_app("/bin/paint", "paint", A_PAINT, "Malen"); break;
+    case A_SNAKE: launch_app("/bin/snake", "snake", A_SNAKE, "Snake"); break;
+    case A_TETRIS: launch_app("/bin/tetris", "tetris", A_TETRIS, "Tetris"); break;
     case A_QUIT: quit = 1; break;
-    case A_WIN_NEW:
-        if (!f || f->kind == W_TERM) open_terminal();
-        else if (f->kind == W_FILES) open_files("/");
-        else if (f->kind == W_CALC) open_calc();
-        else if (f->kind == W_CLOCK) open_clock();
+    case A_WIN_NEW: /* noch eins vom aktiven Programm (Text- und Bildansicht brauchen eine Datei: dann ein Terminal) */
+        do_action(f && f->app > A_NONE && f->app < A_QUIT ? f->app : A_TERM);
         break;
     case A_WIN_MIN: if (f) minimize(f); break;
     case A_WIN_ZOOM: if (f) zoom_win(f); break;
@@ -90,25 +66,9 @@ static Win *window_at(int x, int y)
     return 0;
 }
 
-static void content_click(Win *w, int px, int py, int dbl)
+static int resize_corner(const Win *w, int x, int y)
 {
-    int x, y, cw, ch;
-    content_rect(w, &x, &y, &cw, &ch);
-    if (w->kind == W_FILES) {
-        int i = w->scroll + (py - y - U(28)) / ROW_H; /* unter der Kopfzeile */
-        if (py - y < U(28))
-            i = -1;
-        if (i >= 0 && i < w->nent) {
-            w->sel = i;
-            if (dbl)
-                files_open_entry(w, i);
-        }
-    } else if (w->kind == W_CALC) {
-        int b = calc_btn_at(w, px, py);
-        if (b >= 0)
-            calc_key(w, calc_keys[b]);
-    }
-    win_dirty_all(w);
+    return (w->flags & WPF_RESIZABLE) && x >= w->x + w->w - U(16) && y >= w->y + w->h - U(16);
 }
 
 static void mouse_down(Event *e)
@@ -148,14 +108,16 @@ static void mouse_down(Event *e)
         return;
     if (w != focused())
         raise_win(w);
-    if (e->button != 1)
-        return;
-    int dbl = sys_ticks() - last_click_tick < 40 && e->x - last_click_x < 5 && last_click_x - e->x < 5 &&
-              e->y - last_click_y < 5 && last_click_y - e->y < 5;
-    last_click_tick = dbl ? 0 : sys_ticks();
-    last_click_x = e->x;
-    last_click_y = e->y;
+    int dbl = e->button == 1 && sys_ticks() - last_click_tick < 40 && e->x - last_click_x < 5 &&
+              last_click_x - e->x < 5 && e->y - last_click_y < 5 && last_click_y - e->y < 5;
+    if (e->button == 1) {
+        last_click_tick = dbl ? 0 : sys_ticks();
+        last_click_x = e->x;
+        last_click_y = e->y;
+    }
     if (e->y < w->y + TITLE_H) {
+        if (e->button != 1)
+            return;
         int b = title_button_at(w, e->x, e->y);
         if (b == 1) {
             close_win(w);
@@ -171,14 +133,15 @@ static void mouse_down(Event *e)
         }
         return;
     }
-    if (e->x >= w->x + w->w - U(16) && e->y >= w->y + w->h - U(16)) {
+    if (e->button == 1 && resize_corner(w, e->x, e->y)) {
         drag_mode = 2;
         drag_win = w;
         drag_dx = w->x + w->w - e->x;
         drag_dy = w->y + w->h - e->y;
         return;
     }
-    content_click(w, e->x, e->y, dbl);
+    app_input(w, EV_DOWN, 0, e->x, e->y, e->button, 0); /* Inhalt gehoert dem Programm */
+    app_grab = w;
 }
 
 /* Symbole in den drei Knoepfen, wenn die Maus darueber steht (auch nach Klicks, die Fenster bewegen) */
@@ -202,6 +165,9 @@ static void mouse_move(Event *e)
     if (!drag_mode) {
         dock_hover_at(e->x, e->y);
         update_button_hover(e->x, e->y);
+        Win *a = app_grab ? app_grab : window_at(e->x, e->y);
+        if (a && (app_grab || e->y >= a->y + TITLE_H))
+            app_input(a, EV_MOVE, 0, e->x, e->y, 0, 0);
         return;
     }
     Win *w = drag_win;
@@ -214,13 +180,11 @@ static void mouse_move(Event *e)
         if (w->y > H - TITLE_H) w->y = H - TITLE_H;
         if (w->x > W - U(60)) w->x = W - U(60);
         if (w->x + w->w < U(60)) w->x = U(60) - w->w;
-    } else {
+    } else { /* Groesse: das Programm erfaehrt sie nach dem Bild (apps_frame) und zeichnet neu */
         int nw = e->x + drag_dx - w->x, nh = e->y + drag_dy - w->y;
         w->w = nw < U(200) ? U(200) : nw;
         w->h = nh < U(140) ? U(140) : nh;
         w->zoomed = 0;
-        if (w->kind == W_TERM)
-            term_alloc(w);
         win_dirty_all(w);
     }
     damage_win(w); /* neue Stelle */
@@ -233,65 +197,15 @@ static void key(int k)
         return;
     }
     Win *w = focused();
-    if (!w)
-        return;
-    if (w->kind == W_TERM) {
-        term_key(w, k);
-    } else if (w->kind == W_CALC) {
-        char s[2] = {(char)k, 0};
-        if (k == '\b' || k == 0x7F)
-            calc_key(w, "\xE2\x86\x90");
-        else if (k == 'c' || k == 'C' || k == 0x1B)
-            calc_key(w, "C");
-        else if (k == ',')
-            calc_key(w, ".");
-        else
-            calc_key(w, s);
-    } else if (w->kind == W_FILES) {
-        if (k == KEY_DOWN && w->sel + 1 < w->nent) w->sel++;
-        else if (k == KEY_UP && w->sel > 0) w->sel--;
-        else if (k == '\n') files_open_entry(w, w->sel);
-        else if (k == '\b' || k == 0x7F) files_open_entry(w, 0 < w->nent && strcmp(w->ents[0].name, "..") == 0 ? 0 : -1);
-        int x, y, cw, ch;
-        content_rect(w, &x, &y, &cw, &ch);
-        int vis = (ch - U(28)) / ROW_H;
-        if (w->sel < w->scroll) w->scroll = w->sel;
-        if (w->sel >= w->scroll + vis) w->scroll = w->sel - vis + 1;
-        win_dirty_all(w);
-    } else if (w->kind == W_TEXT) {
-        int x, y, cw, ch;
-        content_rect(w, &x, &y, &cw, &ch);
-        int vis = (ch - U(16)) / CELL_H;
-        if (k == KEY_DOWN) w->top++;
-        else if (k == KEY_UP) w->top--;
-        else if (k == KEY_PGDN || k == ' ') w->top += vis;
-        else if (k == KEY_PGUP) w->top -= vis;
-        else if (k == KEY_HOME) w->top = 0;
-        else if (k == KEY_END) w->top = w->nlines;
-        if (w->top > w->nlines - vis) w->top = w->nlines - vis;
-        if (w->top < 0) w->top = 0;
-        win_dirty_all(w);
-    }
+    if (w)
+        app_input(w, EV_KEY, k, 0, 0, 0, 0);
 }
 
 static void wheel(Event *e)
 {
     Win *w = window_at(e->x, e->y);
-    if (!w)
-        return;
-    int x, y, cw, ch;
-    content_rect(w, &x, &y, &cw, &ch);
-    if (w->kind == W_FILES) {
-        w->scroll -= e->wheel * 3;
-        if (w->scroll > w->nent - (ch - U(28)) / ROW_H) w->scroll = w->nent - (ch - U(28)) / ROW_H;
-        if (w->scroll < 0) w->scroll = 0;
-    } else if (w->kind == W_TEXT) {
-        int vis = (ch - U(16)) / CELL_H;
-        w->top -= e->wheel * 3;
-        if (w->top > w->nlines - vis) w->top = w->nlines - vis;
-        if (w->top < 0) w->top = 0;
-    }
-    win_dirty_all(w);
+    if (w)
+        app_input(w, EV_WHEEL, 0, e->x, e->y, 0, e->wheel);
 }
 
 void _start(int argc, char **argv)
@@ -304,13 +218,13 @@ void _start(int argc, char **argv)
     W = gfx_screen.w;
     H = gfx_screen.h;
     now_us = sys_time_us();
-    ui_init();
+    desk_init();
     make_background();
-    open_terminal();
+    do_action(A_TERM);
     damage_all();
     draw_all();
 
-    s64 last_sec = -1, last_min = -1;
+    s64 last_min = -1;
     Win *last_focus = focused();
     while (!quit) {
         s64 prev_us = now_us;
@@ -321,53 +235,49 @@ void _start(int argc, char **argv)
             n++;
             if (e.type == EV_KEY) key(e.key);
             else if (e.type == EV_DOWN) { mouse_down(&e); update_button_hover(e.x, e.y); }
-            else if (e.type == EV_UP) drag_mode = 0;
+            else if (e.type == EV_UP) {
+                drag_mode = 0;
+                if (app_grab && app_grab->used)
+                    app_input(app_grab, EV_UP, 0, e.x, e.y, e.button, 0);
+                app_grab = 0;
+            }
             else if (e.type == EV_MOVE) mouse_move(&e);
             else if (e.type == EV_WHEEL) wheel(&e);
         }
-        for (int i = 0; i < MAXW; i++) {
-            Win *w = &wins[i];
-            if (w->used && w->kind == W_TERM) {
-                term_poll(w);
-                if (w->exited)
-                    close_win(w);
-                else
-                    term_flush(w);
-            }
-        }
+        apps_poll();
+        if (app_grab && !app_grab->used)
+            app_grab = 0;
         Win *f = focused();
-        if (f != last_focus) { /* Titelleiste, Terminal-Cursor und Schatten (aktiv kraeftiger) beider Fenster */
+        if (f != last_focus) { /* Titelleiste und Schatten (aktiv kraeftiger) beider Fenster; die Programme erfahren es */
             for (int i = 0; i < nord; i++)
                 if (order[i] == last_focus) {
-                    win_dirty_all(last_focus);
+                    win_dirty(last_focus, 0, 0, last_focus->w, TITLE_H);
                     damage_win(last_focus);
+                    app_focus(last_focus, 0);
                 }
             if (f) {
-                win_dirty_all(f);
+                win_dirty(f, 0, 0, f->w, TITLE_H);
                 damage_win(f);
+                app_focus(f, 1);
             }
             damage_menubar();
             last_focus = f;
         }
         s64 now = sys_time();
-        if (now != last_sec) { /* Uhren jede Sekunde */
-            last_sec = now;
-            for (int i = 0; i < nord; i++)
-                if (order[i]->kind == W_CLOCK || order[i]->kind == W_ABOUT)
-                    win_dirty_all(order[i]);
-            if (now / 60 != last_min) { /* Uhrzeit in der Menueleiste */
-                last_min = now / 60;
-                damage_menubar();
-            }
+        if (now / 60 != last_min) { /* Uhrzeit in der Menueleiste */
+            last_min = now / 60;
+            damage_menubar();
         }
         anim_tick();
         dock_tick(now_us - prev_us);
         draw_all(); /* direkt nach dem Bildwechsel: was sich geaendert hat, steht bis zum naechsten Bild */
         gfx_vsync();
+        apps_frame();
     }
     for (int i = 0; i < MAXW; i++)
         if (wins[i].used)
             close_win_now(&wins[i]);
+    apps_quit();
     gfx_close();
     sys_exit(0);
 }

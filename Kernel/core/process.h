@@ -78,6 +78,9 @@ const char *process_cwd(const Process *p);
 int64_t process_brk(Process *p, uint64_t addr);            /* addr 0 = abfragen; liefert neues Programmende */
 int64_t process_mmap(Process *p, uint64_t len);            /* anonym, RW, genullt; Adresse oder negativer Fehler */
 int     process_munmap(Process *p, uint64_t addr, uint64_t len);
+/* Geteilter Speicher (SYS_SHM): 0 anlegen (bytes, u32 *nummer) -> Adresse, 1 einblenden (nummer) -> Adresse,
+ * 2 ausblenden (adresse), 3 Groesse (nummer) -> Bytes */
+int64_t process_shm(Process *p, uint64_t op, uint64_t a, uint64_t b);
 
 /* Datei-Deskriptoren */
 struct FdObj *process_fd_get(Process *p, int fd);

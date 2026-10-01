@@ -44,7 +44,7 @@
 #define SYS_VIDEOINFO 41 /* (index, VideoInfo*) -> 0 oder ERR_NOENT am Ende: verfuegbare Grafikmodi */
 #define SYS_GFX       47 /* (op, arg): 0 = Bildschirm uebernehmen -> (Breite << 32) | Hoehe, 1 = GfxBlit* kopieren, 2 = freigeben, 3 = Hardware-Mauszeiger (arg = x | y << 16 | sichtbar << 32; ERR_NOSYS ohne) */
 #define SYS_FONT      48 /* (zeichen, out[16]) -> 0: 8x16-Glyph (Bit 7 = links) */
-#define SYS_FDAVAIL   49 /* (fd) -> wartende Bytes einer Pipe, 0 = noch nichts, -1 = Ende */
+#define SYS_FDAVAIL   49 /* (fd) -> wartende Bytes einer Pipe, 0 = noch nichts, -1 = Ende; Schreibende: freier Platz, -1 = kein Leser */
 #define SYS_STATFS    46 /* (pfad, u64 out[2]) -> 0: Groesse und freier Platz in Bytes */
 #define SYS_MOUSEMODE 44 /* (1 = Programm wertet die Maus aus, 0 = Konsole) */
 #define SYS_CLIPBOARD 45 /* (0, buf, max) -> Laenge der Zwischenablage (kopiert hoechstens max Bytes); (1, text, len) -> 0: setzen */
@@ -72,6 +72,8 @@
                             6 Lautstaerke der eigenen Stimme. Bis zu 8 Programme gleichzeitig (Mischer).
                             ERR_NOSYS kein Geraet, ERR_AGAIN belegt, ERR_INVAL Format geht nicht */
 #define SYS_SETMODE   63 /* (breite, hoehe, hz100; 0 = egal) -> 0; breite 0 = Modus der Firmware. ERR_NOSYS ohne Treiber, ERR_NOENT unbekannt, ERR_AGAIN Grafikprogramm laeuft, ERR_IO */
+#define SYS_SHM       65 /* (op, a, b): geteilter Speicher fuer Fenster-Programme, 0 anlegen (bytes, u32 *nummer) -> Adresse,
+                            1 einblenden (nummer) -> Adresse, 2 ausblenden (adresse), 3 Groesse (nummer) -> Bytes */
 #define SYS_KLOG      61 /* (u64 *pos, buf, max) -> Bytes aus dem Kernel-Log ab *pos (wird weitergezaehlt), 0 = Ende */
 
 /* Argument fuer SYS_SENDTO/SYS_RECVFROM (gleiches Layout in Userland/user.h) */

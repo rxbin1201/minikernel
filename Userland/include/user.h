@@ -70,6 +70,7 @@ typedef long long          s64;
 #define SYS_GPU       62
 #define SYS_SETMODE   63
 #define SYS_AUDIO     64
+#define SYS_SHM       65
 #define ERR_NOENT     (-2)
 #define ERR_IO        (-5)
 #define ERR_EXIST     (-17)
@@ -254,10 +255,15 @@ static inline s64 sys_wait_nohang(int pid, int *code)         { return syscall3(
 static inline s64 sys_videoinfo(u64 index, VideoInfo *vi)  { return syscall3(SYS_VIDEOINFO, index, (u64)vi, 0); }
 static inline s64 sys_audio(u64 op, u64 a, u64 b)          { return syscall3(SYS_AUDIO, op, a, b); } /* siehe play.c */
 static inline s64 sys_setmode(u64 w, u64 h, u64 hz100)     { return syscall3(SYS_SETMODE, w, h, hz100); } /* sofort umschalten (Intel-Treiber) */
+/* Geteilter Speicher: anlegen -> Adresse (und Nummer), einblenden per Nummer, ausblenden, Groesse */
+static inline s64 sys_shm_create(u64 bytes, unsigned *id)  { return syscall3(SYS_SHM, 0, bytes, (u64)id); }
+static inline s64 sys_shm_map(unsigned id)                 { return syscall3(SYS_SHM, 1, id, 0); }
+static inline s64 sys_shm_unmap(void *addr)                { return syscall3(SYS_SHM, 2, (u64)addr, 0); }
+static inline s64 sys_shm_size(unsigned id)                { return syscall3(SYS_SHM, 3, id, 0); }
 static inline s64 sys_keymap(const char *set, char out[16]) { return syscall3(SYS_KEYMAP, (u64)set, (u64)out, 0); } /* set = 0: nur abfragen */
 static inline s64 sys_gfx(int op, const void *arg)          { return syscall3(SYS_GFX, op, (u64)arg, 0); } /* 0 = uebernehmen, 1 = GfxBlit, 2 = freigeben */
 static inline s64 sys_font(unsigned cp, unsigned char out[16]) { return syscall3(SYS_FONT, cp, (u64)out, 0); }
-static inline s64 sys_fdavail(int fd)                         { return syscall3(SYS_FDAVAIL, fd, 0, 0); } /* Pipe: Bytes, 0 = nichts, -1 = Ende */
+static inline s64 sys_fdavail(int fd)                         { return syscall3(SYS_FDAVAIL, fd, 0, 0); } /* Pipe: Bytes, 0 = nichts, -1 = Ende; Schreibende: freier Platz */
 static inline s64 sys_statfs(const char *path, u64 out[2])  { return syscall3(SYS_STATFS, (u64)path, (u64)out, 0); } /* Groesse, frei (Bytes) */
 static inline s64 sys_mousemode(int app)                    { return syscall3(SYS_MOUSEMODE, app, 0, 0); } /* 1 = Programm wertet die Maus aus */
 static inline s64 sys_clipboard_get(char *buf, u64 max)      { return syscall3(SYS_CLIPBOARD, 0, (u64)buf, max); } /* Laenge */

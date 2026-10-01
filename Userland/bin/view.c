@@ -2,7 +2,8 @@
 
 /* view bild.bmp: Bildbetrachter (BMP, 24/32 Bit).
  *   Leertaste: einpassen / Originalgroesse, + - zoomen, Pfeile verschieben, Bild hoch/runter: vorheriges/naechstes Bild
- *   im selben Ordner, Mausrad zoomt, Ziehen mit der Maus verschiebt, Esc oder q beendet. */
+ *   im selben Ordner, Mausrad zoomt, Ziehen mit der Maus verschiebt, Esc oder q beendet.
+ *   Unter dem Desktop im Fenster (Groesse passend zum Bild, aenderbar), sonst im Vollbild. */
 
 static char   dir[256], files[64][128];
 static int    nfiles, cur;
@@ -104,10 +105,21 @@ void _start(int argc, char **argv)
         sys_exit(2);
     }
     load_list(argv[1]);
-    if (gfx_open() != 0)
+    open_current();
+    int ww = 0, wh = 0;
+    if (gfx_desktop()) { /* Fenster so gross wie das Bild, hoechstens 80 % des Bildschirms */
+        int sw, sh;
+        gfx_display_size(&sw, &sh);
+        ww = img.px ? img.w : 480;
+        wh = (img.px ? img.h : 200) + 20;
+        if (ww > sw * 4 / 5) ww = sw * 4 / 5;
+        if (wh > sh * 4 / 5) wh = sh * 4 / 5;
+        if (ww < 420) ww = 420;
+        if (wh < 160) wh = 160;
+    }
+    if (gfx_open_window_ex(ww, wh, files[cur], GFX_RESIZABLE) != 0)
         sys_exit(1);
     sys_tty_fg(0);
-    open_current();
     draw();
     int dragging = 0, lx = 0, ly = 0;
     for (;;) {
@@ -115,6 +127,12 @@ void _start(int argc, char **argv)
         if (!gfx_wait(&e, -1))
             continue;
         int redraw = 1;
+        if (e.type == EV_CLOSE)
+            break;
+        if (e.type == EV_RESIZE) {
+            draw();
+            continue;
+        }
         if (e.type == EV_KEY) {
             int k = e.key;
             if (k == 0x1B || k == 'q')
@@ -142,9 +160,11 @@ void _start(int argc, char **argv)
             } else if (k == KEY_PGDN || k == 'n') {
                 cur = (cur + 1) % nfiles;
                 open_current();
+                gfx_set_title(files[cur]);
             } else if (k == KEY_PGUP || k == 'p') {
                 cur = (cur + nfiles - 1) % nfiles;
                 open_current();
+                gfx_set_title(files[cur]);
             } else {
                 redraw = 0;
             }

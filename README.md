@@ -94,6 +94,21 @@ Animationen (nach der Uhr, nicht nach Bildern): Fenster blenden beim Oeffnen und
 beim Minimieren an ihren Platz im Dock und von dort zurueck, Zoomen gleitet auf die neue Groesse. Das Dock
 vergroessert die Symbole unter der Maus (bis 60 %, Nachbarn abgestuft).
 
+Jedes Fenster gehoert einem eigenen Prozess; der Desktop zeichnet nur Rahmen, Menueleiste und Dock. Programme:
+`term` (Terminal mit Shell), `files` (Dateien; Doppelklick oeffnet Ordner hier, Bilder in `view`, alles andere in
+`textview`), `textview`, `view`, `calc`, `clock`, `about`, `paint`, `snake`, `tetris`. Ohne Desktop gestartet, laufen
+sie im Vollbild. Stuerzt ein Programm ab, verschwindet nur sein Fenster.
+
+- Fensterprotokoll (`Userland/include/winproto.h`): der Desktop startet das Programm mit zwei Pipes (Deskriptor 3
+  und 4, Nachrichten zu 64 Byte: Tasten, Maus, Fokus, Schliessen, Bildtakt bzw. Fenster anlegen, geaenderter
+  Bereich, Titel, Datei oeffnen). Den Inhalt zeichnet das Programm in geteilten Speicher, den der Desktop mitliest.
+  Der Desktop wartet nie auf ein Programm (schreibt nur, wenn die Pipe Platz hat); wer auf den Schliessen-Knopf
+  nicht reagiert, wird beim dritten Klick beendet.
+- Die Grafikbibliothek erledigt das selbst: unter dem Desktop liefert `gfx_open()` ein Fenster statt des
+  Bildschirms, `gfx_open_window_ex(w, h, titel, GFX_RESIZABLE)` waehlt Groesse und Titel, neue Ereignisse sind
+  `EV_CLOSE`, `EV_FOCUS` und `EV_RESIZE`. Gemeinsames Aussehen (Masse, Farben, Programmsymbole): `ui.h`
+- Geteilter Speicher: `SYS_SHM` (anlegen, per Nummer einblenden, ausblenden); die Seiten tragen ein eigenes
+  PTE-Bit, damit `fork` sie nicht kopiert und `munmap`/Programmende sie nicht doppelt freigeben (Test: `shmtest`)
 - Schriften: Inter und JetBrains Mono (SIL Open Font License, verkleinert in `/share/fonts`), gerastert mit
   stb_truetype (gemeinfrei, `Userland/include/stb_truetype.h`); `ttf.h` fuer Programme
 - Zeichnen mit Kantenglaettung und Transparenz (`Userland/lib/draw.c`): abgerundete Rechtecke, Kreise, Linien,
@@ -199,7 +214,8 @@ Kernel/
   tests/              Selbsttests, je Gruppe eine Datei
 
 Userland/
-  include/            Syscalls (user.h), libc, malloc, gfx (Grafik), util (Helfer fuer Werkzeuge)
+  include/            Syscalls (user.h), libc, malloc, gfx (Grafik), ui (Aussehen), winproto (Fensterprotokoll),
+                      util (Helfer fuer Werkzeuge)
   lib/                libuser.a
   bin/                je Programm eine Datei (NAME.c) oder ein Ordner (sh/, desktop/) -> /bin/NAME
 

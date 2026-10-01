@@ -1,19 +1,26 @@
 #include "gfx.h"
 #include "sound.h"
+#include "ttf.h"
 
 /* tetris: Pfeil links/rechts bewegen, Pfeil hoch drehen, Pfeil runter schneller, Leertaste fallen lassen,
- * p Pause, Esc beenden. Punkte fuer volle Reihen; alle 10 Reihen wird es schneller. Mit Soundkarte: Effekte. */
+ * p Pause, Esc beenden. Punkte fuer volle Reihen; alle 10 Reihen wird es schneller. Mit Soundkarte: Effekte.
+ * Unter dem Desktop im eigenen Fenster (verliert es den Fokus, pausiert das Spiel), sonst im Vollbild. */
 
 #define COLS 10
 #define ROWS 20
 
 static int board[ROWS][COLS];
-static int cell, ox, oy;
+static int cell, ox, oy, ui, side; /* side: Breite der Spalte rechts mit Punkten und naechstem Stein */
 static int piece, rot, px, py, next_piece, score, lines, level, over, paused;
 static u64 rng = 0x9E3779B97F4A7C15ULL;
 
-static const u32 colors[8] = {0, RGB(0, 220, 230), RGB(240, 220, 0), RGB(170, 60, 230), RGB(40, 200, 60),
-                              RGB(230, 50, 50), RGB(40, 90, 240), RGB(250, 150, 20)};
+static const u32 colors[8] = {0, 0x22D3EE, 0xFACC15, 0xA855F7, 0x4ADE80, 0xF87171, 0x60A5FA, 0xFB923C};
+
+#define C_BG    0x0F172A
+#define C_BOARD 0x0B1222
+#define C_GRID  0x131D33
+#define C_TEXT  0xE5E7EB
+#define C_TEXT2 0x94A3B8
 
 /* 7 Steine, je 4 Drehungen als 4x4-Bitmuster (Bit 15 = oben links) */
 static const unsigned short shapes[7][4] = {
@@ -75,59 +82,111 @@ static void reset(void)
     spawn();
 }
 
-static void block(int x, int y, u32 c)
+/* Stein: abgerundet, oben heller (Glanz), feiner heller Rand */
+static void block(int x, int y, int size, u32 c)
 {
-    gfx_fill(&gfx_screen, x + 1, y + 1, cell - 2, cell - 2, c);
-    gfx_fill(&gfx_screen, x + 1, y + 1, cell - 2, 3, (c | 0x404040) & 0xFFFFFF); /* Glanzkante */
+    int in = size / 14 + 1, r = size / 5;
+    gfx_round_rect_grad(&gfx_screen, x + in, y + in, size - 2 * in, size - 2 * in, r, gfx_mix(c, 0xFFFFFF, 70), c, 255);
+    gfx_round_frame(&gfx_screen, x + in, y + in, size - 2 * in, size - 2 * in, r, 0xFFFFFF, 45);
+}
+
+static int S(int v) { return v * ui / 100; }
+
+static void panel(Surface *s, int x, int y, int w, int h)
+{
+    gfx_round_rect(s, x, y, w, h, S(12), 0x16213A, 255);
+    gfx_round_frame(s, x, y, w, h, S(12), 0xFFFFFF, 18);
+}
+
+static void stat(Surface *s, int x, int y, const char *label, int value)
+{
+    char t[32];
+    snprintf(t, sizeof(t), "%d", value);
+    text_draw(s, font_ui, S(13), x, y, label, C_TEXT2);
+    text_draw(s, font_bold, S(22), x, y + S(17), t, C_TEXT);
 }
 
 static void draw(void)
 {
     Surface *s = &gfx_screen;
-    gfx_fill(s, 0, 0, s->w, s->h, RGB(18, 18, 30));
-    gfx_fill(s, ox - 4, oy - 4, COLS * cell + 8, ROWS * cell + 8, RGB(90, 90, 120));
-    gfx_fill(s, ox, oy, COLS * cell, ROWS * cell, RGB(8, 8, 16));
+    gfx_fill(s, 0, 0, s->w, s->h, C_BG);
+    int bw = COLS * cell, bh = ROWS * cell;
+    gfx_round_rect(s, ox - S(6), oy - S(6), bw + S(12), bh + S(12), S(14), 0x1E293B, 255);
+    gfx_fill(s, ox, oy, bw, bh, C_BOARD);
+    for (int x = 1; x < COLS; x++) /* feines Raster */
+        gfx_fill(s, ox + x * cell, oy, 1, bh, C_GRID);
+    for (int y = 1; y < ROWS; y++)
+        gfx_fill(s, ox, oy + y * cell, bw, 1, C_GRID);
     for (int y = 0; y < ROWS; y++)
         for (int x = 0; x < COLS; x++)
             if (board[y][x])
-                block(ox + x * cell, oy + y * cell, colors[board[y][x]]);
+                block(ox + x * cell, oy + y * cell, cell, colors[board[y][x]]);
     if (!over) {
         int gy = py; /* Schatten: wo der Stein landen wuerde */
         while (fits(piece, rot, px, gy + 1))
             gy++;
         for (int y = 0; y < 4; y++)
             for (int x = 0; x < 4; x++)
-                if (filled(piece, rot, x, y) && gy + y >= 0)
-                    gfx_rect(s, ox + (px + x) * cell + 2, oy + (gy + y) * cell + 2, cell - 4, cell - 4, RGB(90, 90, 110));
+                if (filled(piece, rot, x, y) && gy + y >= 0) {
+                    int bx = ox + (px + x) * cell, by = oy + (gy + y) * cell, in = cell / 14 + 1;
+                    gfx_round_rect(s, bx + in, by + in, cell - 2 * in, cell - 2 * in, cell / 5, colors[piece + 1], 40);
+                    gfx_round_frame(s, bx + in, by + in, cell - 2 * in, cell - 2 * in, cell / 5, colors[piece + 1], 110);
+                }
         for (int y = 0; y < 4; y++)
             for (int x = 0; x < 4; x++)
                 if (filled(piece, rot, x, y) && py + y >= 0)
-                    block(ox + (px + x) * cell, oy + (py + y) * cell, colors[piece + 1]);
+                    block(ox + (px + x) * cell, oy + (py + y) * cell, cell, colors[piece + 1]);
     }
-    int ix = ox + COLS * cell + 30;
-    char t[64];
-    gfx_text_scaled(s, ix, oy, "TETRIS", RGB(255, 220, 80), GFX_TRANSPARENT, 2);
-    snprintf(t, sizeof(t), "Punkte: %d", score);
-    gfx_text(s, ix, oy + 50, t, RGB(230, 230, 230), GFX_TRANSPARENT);
-    snprintf(t, sizeof(t), "Reihen: %d", lines);
-    gfx_text(s, ix, oy + 70, t, RGB(230, 230, 230), GFX_TRANSPARENT);
-    snprintf(t, sizeof(t), "Level:  %d", level + 1);
-    gfx_text(s, ix, oy + 90, t, RGB(230, 230, 230), GFX_TRANSPARENT);
-    gfx_text(s, ix, oy + 130, "N\xC3\xA4" "chster:", RGB(180, 180, 200), GFX_TRANSPARENT);
-    for (int y = 0; y < 4; y++)
-        for (int x = 0; x < 4; x++)
-            if (filled(next_piece, 0, x, y))
-                block(ix + x * cell, oy + 150 + y * cell, colors[next_piece + 1]);
-    gfx_text(s, ix, oy + 250, "\xE2\x86\x90 \xE2\x86\x92  bewegen", RGB(150, 150, 170), GFX_TRANSPARENT);
-    gfx_text(s, ix, oy + 268, "\xE2\x86\x91     drehen", RGB(150, 150, 170), GFX_TRANSPARENT);
-    gfx_text(s, ix, oy + 286, "\xE2\x86\x93     schneller", RGB(150, 150, 170), GFX_TRANSPARENT);
-    gfx_text(s, ix, oy + 304, "Leer  fallen lassen", RGB(150, 150, 170), GFX_TRANSPARENT);
-    gfx_text(s, ix, oy + 322, "p     Pause, Esc Ende", RGB(150, 150, 170), GFX_TRANSPARENT);
+
+    /* rechte Spalte */
+    int ix = ox + bw + S(26), iw = side;
+    text_draw(s, font_bold, S(26), ix, oy - S(4), "Tetris", C_TEXT);
+    int y = oy + S(44);
+    panel(s, ix, y, iw, S(186));
+    stat(s, ix + S(16), y + S(14), "Punkte", score);
+    stat(s, ix + S(16), y + S(70), "Reihen", lines);
+    stat(s, ix + S(16), y + S(126), "Level", level + 1);
+    y += S(202);
+    int nc = cell * 3 / 4; /* naechster Stein etwas kleiner, mittig im Kasten */
+    panel(s, ix, y, iw, S(30) + nc * 3);
+    text_draw(s, font_ui, S(13), ix + S(16), y + S(10), "N\xC3\xA4" "chster", C_TEXT2);
+    int minx = 4, maxx = -1, miny = 4, maxy = -1;
+    for (int yy = 0; yy < 4; yy++)
+        for (int xx = 0; xx < 4; xx++)
+            if (filled(next_piece, 0, xx, yy)) {
+                if (xx < minx) minx = xx;
+                if (xx > maxx) maxx = xx;
+                if (yy < miny) miny = yy;
+                if (yy > maxy) maxy = yy;
+            }
+    int pw = (maxx - minx + 1) * nc, ph = (maxy - miny + 1) * nc;
+    int nx0 = ix + (iw - pw) / 2, ny0 = y + S(28) + (nc * 3 - ph) / 2;
+    for (int yy = 0; yy < 4; yy++)
+        for (int xx = 0; xx < 4; xx++)
+            if (filled(next_piece, 0, xx, yy))
+                block(nx0 + (xx - minx) * nc, ny0 + (yy - miny) * nc, nc, colors[next_piece + 1]);
+    y += S(46) + nc * 3;
+    static const char *const help[] = {"\xE2\x86\x90 \xE2\x86\x92   bewegen", "\xE2\x86\x91        drehen",
+                                       "\xE2\x86\x93        schneller", "Leertaste  fallen",
+                                       "P   Pause  \xC2\xB7  Esc   Ende"};
+    for (int i = 0; i < 5 && y + S(20) <= oy + bh; i++, y += S(20))
+        text_draw(s, font_ui, S(13), ix + S(4), y, help[i], 0x64748B);
+
     if (over || paused) {
-        const char *m = over ? "Game Over - Leertaste" : "Pause";
-        int w = gfx_text_width(m) * 2;
-        gfx_fill(s, ox + (COLS * cell - w) / 2 - 8, oy + ROWS * cell / 2 - 20, w + 16, 40, RGB(0, 0, 0));
-        gfx_text_scaled(s, ox + (COLS * cell - w) / 2, oy + ROWS * cell / 2 - 16, m, RGB(255, 220, 80), GFX_TRANSPARENT, 2);
+        const char *m = over ? "Game Over" : "Pause";
+        const char *m2 = over ? "Leertaste: neues Spiel" : "P: weiter";
+        int big = S(28), small = S(14);
+        int pw2 = text_width(font_ui, small, m2) + S(48);
+        if (pw2 < text_width(font_bold, big, m) + S(48))
+            pw2 = text_width(font_bold, big, m) + S(48);
+        int ph2 = text_height(font_bold, big) + text_height(font_ui, small) + S(34);
+        int px2 = ox + (bw - pw2) / 2, py2 = oy + (bh - ph2) / 2;
+        gfx_shadow(s, px2, py2 + 4, pw2, ph2, S(14), S(18), 90);
+        gfx_round_rect(s, px2, py2, pw2, ph2, S(14), 0x020617, 215);
+        text_draw(s, font_bold, big, px2 + (pw2 - text_width(font_bold, big, m)) / 2, py2 + S(12), m,
+                  over ? 0xFCA5A5 : C_TEXT);
+        text_draw(s, font_ui, small, px2 + (pw2 - text_width(font_ui, small, m2)) / 2,
+                  py2 + S(16) + text_height(font_bold, big), m2, C_TEXT2);
     }
     gfx_present_all();
 }
@@ -170,18 +229,30 @@ void _start(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    if (gfx_open() != 0)
-        sys_exit(1);
+    /* Fenster: Feld mit 30 Pixel grossen Steinen, rechts die Spalte; Vollbild: so gross, wie die Hoehe zulaesst */
+    if (gfx_desktop()) {
+        ui = gfx_ui_scale();
+        cell = S(30);
+        side = S(170);
+        if (gfx_open_window(S(28) + COLS * cell + S(26) + side + S(28), ROWS * cell + S(56), "Tetris") != 0)
+            sys_exit(1);
+    } else {
+        if (gfx_open() != 0)
+            sys_exit(1);
+        ui = gfx_ui_scale();
+        cell = (gfx_screen.h - S(80)) / ROWS;
+        if (cell > S(40))
+            cell = S(40);
+        side = S(170);
+    }
+    fonts_init();
     sys_tty_fg(0);
     gfx_show_cursor(0);
     snd_open();
     rng ^= (u64)sys_ticks() * 2654435761ULL + (u64)sys_time();
-    cell = (gfx_screen.h - 60) / ROWS;
-    if (cell > 36)
-        cell = 36;
-    ox = (gfx_screen.w - COLS * cell) / 2 - 90;
-    if (ox < 10)
-        ox = 10;
+    ox = (gfx_screen.w - (COLS * cell + S(26) + side)) / 2;
+    if (ox < S(20))
+        ox = S(20);
     oy = (gfx_screen.h - ROWS * cell) / 2;
     reset();
     draw();
@@ -190,6 +261,14 @@ void _start(int argc, char **argv)
         Event e;
         int changed = 0;
         while (gfx_poll(&e)) {
+            if (e.type == EV_CLOSE) {
+                gfx_close();
+                sys_exit(0);
+            }
+            if (e.type == EV_FOCUS && !e.key && !over && !paused) { /* Fenster nicht mehr vorn: anhalten */
+                paused = 1;
+                changed = 1;
+            }
             if (e.type != EV_KEY)
                 continue;
             int k = e.key;

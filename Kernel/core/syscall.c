@@ -377,6 +377,7 @@ static void syscall_do(SyscallFrame *f)
     case SYS_FORK:     ret = process_fork(f); break;
     case SYS_EXEC:     ret = sys_exec(f->rdi, f->rsi); break;
     case SYS_PIPE:     ret = sys_pipe(f->rdi); break;
+    case SYS_SHM:      ret = process_shm(process_current(), f->rdi, f->rsi, f->rdx); break;
     case SYS_DUP:      ret = process_fd_dup(process_current(), (int)f->rdi); break;
     case SYS_DUP2:     ret = process_fd_dup2(process_current(), (int)f->rdi, (int)f->rsi); break;
     case SYS_LSEEK:    ret = process_fd_seek(process_current(), (int)f->rdi, (int64_t)f->rsi, (int)f->rdx); break;

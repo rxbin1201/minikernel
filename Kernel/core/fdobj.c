@@ -182,6 +182,12 @@ int64_t fdobj_available(FdObj *o)
 {
     if (o->kind == FD_UDP)
         return udp_pending(o->udp);
+    if (o->kind == FD_PIPE_W) { /* Schreibende: freier Platz (so viel geht ohne Warten hinein), -1 = kein Leser mehr */
+        uint64_t f = irq_save();
+        int64_t r = o->pipe->readers == 0 ? -1 : (int64_t)(PIPE_SIZE - o->pipe->count);
+        irq_restore(f);
+        return r;
+    }
     if (o->kind != FD_PIPE_R)
         return o->kind == FD_FILE ? 1 : 0;
     uint64_t f = irq_save();

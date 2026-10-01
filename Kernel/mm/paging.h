@@ -9,6 +9,8 @@
 #define PAGE_USER    (1ULL << 2)
 #define PAGE_NOCACHE ((1ULL << 3) | (1ULL << 4)) /* PWT | PCD */
 #define PAGE_NX      (1ULL << 63)                /* wird ignoriert, wenn die CPU kein NX kann */
+#define PAGE_SHARED  (1ULL << 9)  /* frei verwendbares PTE-Bit: Frame gehoert einem Shared-Memory-Objekt (shm.c);
+                                   * as_destroy gibt ihn nicht frei, as_clone (fork) uebernimmt die Seite nicht */
 
 /* User-Bereich: ein eigener Top-Level-Slot (PML4-Index 255, 127,5 - 128 TiB), pro Prozess privat. Er liegt weit oberhalb
  * aller realen physischen Adressen (auch hoher PCI-BARs, die die Firmware bei 64-Bit-Fenstern gern weit oben vergibt).

@@ -1,27 +1,19 @@
-/* Desktop: Masse, Hintergrundbild, Menueleiste, Dock, Menues und die gezeichneten Programmsymbole */
+/* Desktop: Masse, Hintergrundbild, Menueleiste, Dock und Menues (Programmsymbole: ui.c) */
 
 #include "desktop.h"
 
-int ui_pct = 100;
-int MENUBAR_H, TITLE_H, DOCK_H, ROW_H, RADIUS, SHADOW, FS, FS_SMALL, FS_MONO, CELL_W, CELL_H;
+int MENUBAR_H, TITLE_H, DOCK_H, RADIUS, SHADOW;
 int menu_open, menu_hover = -1, dock_hover = -1;
 
 static int ICON, DOCK_PAD, DOCK_GAP;
 
-void ui_init(void)
+void desk_init(void)
 {
-    ui_pct = H >= 1300 ? 125 : 100;
-    fonts_init();
+    ui_setup(H >= 1300 ? 125 : 100);
     MENUBAR_H = U(26);
     TITLE_H = U(30);
-    ROW_H = U(24);
     RADIUS = U(10);
     SHADOW = U(28);
-    FS = U(13);
-    FS_SMALL = U(11);
-    FS_MONO = U(13);
-    CELL_W = text_advance(font_mono, FS_MONO, 'M');
-    CELL_H = text_height(font_mono, FS_MONO) + U(1);
     ICON = U(52);
     DOCK_PAD = U(7);
     DOCK_GAP = U(8);
@@ -32,25 +24,13 @@ void ui_init(void)
  * Hintergrund: weicher Farbverlauf mit Wellen (berechnet), dazu eine weichgezeichnete Kopie fuer das Milchglas
  * ==================================================================================================================== */
 
-static float fsin(float x) /* sin ohne Bibliothek: auf [-pi/2, pi/2] falten (dort ist das Polynom genau), dann Taylor */
-{
-    const float pi = 3.14159265f, tau = 6.2831853f;
-    x -= tau * (float)(int)(x / tau);
-    if (x > pi) x -= tau;
-    if (x < -pi) x += tau;
-    if (x > pi / 2) x = pi - x;
-    if (x < -pi / 2) x = -pi - x;
-    float x2 = x * x;
-    return x * (1 - x2 / 6 * (1 - x2 / 20 * (1 - x2 / 42 * (1 - x2 / 72))));
-}
-
 /* Bogen um (cx, cy) mit Radius r von Winkel a0 bis a1 (Bogenmass, 0 = rechts, gegen den Uhrzeigersinn nach oben) */
 static void arc(Surface *s, float cx, float cy, float r, float a0, float a1, float w, u32 c, int alpha)
 {
     const int n = 6;
     for (int i = 0; i < n; i++) {
         float t0 = a0 + (a1 - a0) * i / n, t1 = a0 + (a1 - a0) * (i + 1) / n;
-        gfx_capsule(s, cx + fsin(t0 + 1.5707963f) * r, cy - fsin(t0) * r, cx + fsin(t1 + 1.5707963f) * r, cy - fsin(t1) * r, w,
+        gfx_capsule(s, cx + ui_sin(t0 + 1.5707963f) * r, cy - ui_sin(t0) * r, cx + ui_sin(t1 + 1.5707963f) * r, cy - ui_sin(t1) * r, w,
                     c, alpha);
     }
 }
@@ -77,7 +57,7 @@ void make_background(void)
         float v = (float)y / (float)H;
         for (int x = 0; x < W; x++) {
             float u = (float)x / (float)W;
-            float wave = 0.10f * fsin(6.2831853f * (u * 1.1f + 0.15f)) + 0.06f * fsin(6.2831853f * (u * 2.3f + v * 0.7f));
+            float wave = 0.10f * ui_sin(6.2831853f * (u * 1.1f + 0.15f)) + 0.06f * ui_sin(6.2831853f * (u * 2.3f + v * 0.7f));
             float t = v * 0.85f + u * 0.30f + wave - 0.08f;
             u32 c = palette(t);
             float hx = u - 0.78f, hy = v - 0.18f; /* heller Schein oben rechts */
@@ -98,135 +78,14 @@ void make_background(void)
     gfx_blur(&bg_blur, U(18));
 }
 
-/* ======================================================================================================================
- * Programmsymbole (gezeichnet, in jeder Groesse)
- * ==================================================================================================================== */
-
-#define ICON_TEXT  100
-#define ICON_IMAGE 101
-
-void draw_app_icon(Surface *s, int kind, int x, int y, int size)
-{
-    float S = (float)size;
-    int r = size * 225 / 1000;
-    gfx_shadow(s, x, y + size / 40, size, size, r, size / 12, 45);
-    switch (kind) {
-    case A_FILES: {
-        gfx_round_rect_grad(s, x, y, size, size, r, 0x6FC3FF, 0x1C74E9, 255);
-        int fx = x + size * 18 / 100, fy = y + size * 30 / 100, fw = size * 64 / 100, fh = size * 46 / 100;
-        gfx_round_rect(s, fx, fy - size / 12, fw * 42 / 100, size / 6, size / 24, 0xDDEBFF, 255);
-        gfx_round_rect(s, fx, fy, fw, fh, size / 16, 0xFFFFFF, 245);
-        gfx_blend_fill(s, fx, fy + fh / 4, fw, 1, 0x1C74E9, 40);
-        break;
-    }
-    case A_TERM:
-        gfx_round_rect_grad(s, x, y, size, size, r, 0x3A3A3C, 0x161618, 255);
-        gfx_round_frame(s, x, y, size, size, r, 0x6E6E73, 120);
-        text_draw(s, font_mono, size * 30 / 100, x + size * 14 / 100, y + size * 12 / 100, ">_", 0x4ADE80);
-        break;
-    case A_CALC: {
-        gfx_round_rect_grad(s, x, y, size, size, r, 0x5A5A5F, 0x2C2C2E, 255);
-        float cs = S * 0.19f, gap = S * 0.045f, ox = x + (S - 3 * cs - 2 * gap) / 2, oy = y + S * 0.20f;
-        for (int i = 0; i < 9; i++) {
-            int col = i % 3, row = i / 3;
-            u32 c = col == 2 ? 0xFF9F0A : row == 0 ? 0xA5A5A5 : 0x8E8E93;
-            gfx_disc(s, ox + col * (cs + gap) + cs / 2, oy + row * (cs + gap) + cs / 2, cs / 2, c, 255);
-        }
-        break;
-    }
-    case A_CLOCK: {
-        gfx_round_rect_grad(s, x, y, size, size, r, 0xFFFFFF, 0xE5E5EA, 255);
-        float cx = x + S / 2, cy = y + S / 2, R = S * 0.38f;
-        gfx_disc(s, cx, cy, R, 0x1C1C1E, 255);
-        gfx_disc(s, cx, cy, R - S * 0.03f, 0xFFFFFF, 255);
-        for (int i = 0; i < 12; i++) {
-            float a = 6.2831853f * i / 12, sx = fsin(a), cy2 = fsin(a + 1.5707963f);
-            gfx_capsule(s, cx + sx * R * 0.78f, cy - cy2 * R * 0.78f, cx + sx * R * 0.86f, cy - cy2 * R * 0.86f, S * 0.02f,
-                        0x3A3A3C, 255);
-        }
-        gfx_capsule(s, cx, cy, cx + R * 0.35f, cy - R * 0.30f, S * 0.045f, 0x1C1C1E, 255);
-        gfx_capsule(s, cx, cy, cx - R * 0.05f, cy - R * 0.70f, S * 0.035f, 0x1C1C1E, 255);
-        gfx_capsule(s, cx, cy, cx - R * 0.55f, cy + R * 0.45f, S * 0.015f, 0xFF3B30, 255);
-        gfx_disc(s, cx, cy, S * 0.035f, 0xFF3B30, 255);
-        break;
-    }
-    case A_PAINT:
-        gfx_round_rect_grad(s, x, y, size, size, r, 0xFFFFFF, 0xECECF0, 255);
-        gfx_disc(s, x + S * 0.38f, y + S * 0.40f, S * 0.20f, 0xFF3B30, 230);
-        gfx_disc(s, x + S * 0.62f, y + S * 0.40f, S * 0.20f, 0xFFCC00, 210);
-        gfx_disc(s, x + S * 0.50f, y + S * 0.62f, S * 0.20f, 0x0A84FF, 200);
-        gfx_capsule(s, x + S * 0.22f, y + S * 0.85f, x + S * 0.80f, y + S * 0.20f, S * 0.05f, 0x8E5A2B, 255);
-        break;
-    case A_SNAKE:
-        gfx_round_rect_grad(s, x, y, size, size, r, 0x4ADE80, 0x16A34A, 255);
-        gfx_capsule(s, x + S * 0.22f, y + S * 0.70f, x + S * 0.50f, y + S * 0.70f, S * 0.12f, 0xFFFFFF, 255);
-        gfx_capsule(s, x + S * 0.50f, y + S * 0.70f, x + S * 0.50f, y + S * 0.38f, S * 0.12f, 0xFFFFFF, 255);
-        gfx_capsule(s, x + S * 0.50f, y + S * 0.38f, x + S * 0.76f, y + S * 0.38f, S * 0.12f, 0xFFFFFF, 255);
-        gfx_disc(s, x + S * 0.78f, y + S * 0.36f, S * 0.02f, 0x14532D, 255);
-        gfx_disc(s, x + S * 0.24f, y + S * 0.28f, S * 0.06f, 0xFF3B30, 255);
-        break;
-    case A_TETRIS: {
-        gfx_round_rect_grad(s, x, y, size, size, r, 0x3B3B64, 0x1B1B33, 255);
-        static const int blk[4][2] = {{0, 2}, {1, 2}, {2, 2}, {1, 1}};
-        static const int blk2[4][2] = {{2, 1}, {3, 1}, {3, 0}, {3, 2}};
-        float b = S * 0.17f, ox = x + S * 0.16f, oy = y + S * 0.22f;
-        for (int i = 0; i < 4; i++) {
-            gfx_round_rect(s, (int)(ox + blk[i][0] * b), (int)(oy + blk[i][1] * b), (int)b - 1, (int)b - 1, size / 30,
-                           0xA855F7, 255);
-            gfx_round_rect(s, (int)(ox + blk2[i][0] * b), (int)(oy + blk2[i][1] * b), (int)b - 1, (int)b - 1, size / 30,
-                           0x22D3EE, 255);
-        }
-        break;
-    }
-    case A_ABOUT:
-        gfx_round_rect_grad(s, x, y, size, size, r, 0x8E8EF0, 0x5856D6, 255);
-        gfx_disc(s, x + S / 2, y + S * 0.28f, S * 0.07f, 0xFFFFFF, 255);
-        gfx_capsule(s, x + S / 2, y + S * 0.45f, x + S / 2, y + S * 0.76f, S * 0.12f, 0xFFFFFF, 255);
-        break;
-    case ICON_TEXT:
-        gfx_round_rect_grad(s, x + size / 8, y, size * 3 / 4, size, size / 12, 0xFFFFFF, 0xF2F2F5, 255);
-        gfx_round_frame(s, x + size / 8, y, size * 3 / 4, size, size / 12, 0xC7C7CC, 255);
-        for (int i = 0; i < 6; i++)
-            gfx_fill(s, x + size / 4, y + size / 4 + i * size / 10, size / 2 - (i % 3) * size / 12, size / 40 + 1, 0xA1A1A6);
-        break;
-    case ICON_IMAGE:
-        gfx_round_rect_grad(s, x, y, size, size, r, 0x7DD3FC, 0x38BDF8, 255);
-        gfx_disc(s, x + S * 0.70f, y + S * 0.30f, S * 0.10f, 0xFDE047, 255);
-        gfx_disc(s, x + S * 0.30f, y + S * 1.05f, S * 0.45f, 0x22C55E, 255);
-        gfx_disc(s, x + S * 0.80f, y + S * 1.10f, S * 0.45f, 0x16A34A, 255);
-        gfx_round_frame(s, x, y, size, size, r, 0xFFFFFF, 90);
-        break;
-    default:
-        gfx_round_rect_grad(s, x, y, size, size, r, 0xC7C7CC, 0x8E8E93, 255);
-    }
-}
-
 static int icon_of_win(const Win *w)
 {
-    switch (w->kind) {
-    case W_TERM: return A_TERM;
-    case W_FILES: return A_FILES;
-    case W_CALC: return A_CALC;
-    case W_CLOCK: return A_CLOCK;
-    case W_ABOUT: return A_ABOUT;
-    case W_IMAGE: return ICON_IMAGE;
-    default: return ICON_TEXT;
-    }
+    return w->app ? w->app : ICON_TEXT;
 }
 
 const char *app_name(const Win *w)
 {
-    if (!w)
-        return "Schreibtisch";
-    switch (w->kind) {
-    case W_TERM: return "Terminal";
-    case W_FILES: return "Dateien";
-    case W_TEXT: return "Textansicht";
-    case W_IMAGE: return "Bildansicht";
-    case W_CALC: return "Rechner";
-    case W_CLOCK: return "Uhr";
-    default: return "Info";
-    }
+    return w ? w->name : "Schreibtisch";
 }
 
 /* ======================================================================================================================
@@ -408,13 +267,17 @@ int menu_action(int i)
 
 static const struct {
     int         action;
-    int         kind; /* Fensterart fuer den Punkt "laeuft", -1 = Vollbildprogramm */
     const char *name;
 } dock_apps[] = {
-    {A_FILES, W_FILES, "Dateien"}, {A_TERM, W_TERM, "Terminal"}, {A_CALC, W_CALC, "Rechner"}, {A_CLOCK, W_CLOCK, "Uhr"},
-    {A_PAINT, -1, "Malen"},        {A_SNAKE, -1, "Snake"},       {A_TETRIS, -1, "Tetris"},
+    {A_FILES, "Dateien"}, {A_TERM, "Terminal"}, {A_CALC, "Rechner"}, {A_CLOCK, "Uhr"},
+    {A_PAINT, "Malen"},   {A_SNAKE, "Snake"},   {A_TETRIS, "Tetris"},
 };
 #define NAPPS ((int)(sizeof(dock_apps) / sizeof(dock_apps[0])))
+
+static int win_of_app(const Win *w, int i) /* gehoert das Fenster zu Dock-Programm i? */
+{
+    return w->app == dock_apps[i].action;
+}
 
 static Win *minimized_win(int k) /* k-tes minimierte Fenster */
 {
@@ -458,7 +321,7 @@ static void dock_layout(DockLayout *L)
         float c = bx0 + DOCK_PAD + i * (ICON + DOCK_GAP) + (i >= NAPPS ? sep : 0) + ICON * 0.5f;
         float d = dock_mx < 0 ? 9 : (dock_mx - c) / (ICON * 2.3f);
         d = d < 0 ? -d : d;
-        float f = d < 1 ? (1 + fsin(3.14159265f * d + 1.5707963f)) * 0.5f : 0; /* (1 + cos(pi d)) / 2 */
+        float f = d < 1 ? (1 + ui_sin(3.14159265f * d + 1.5707963f)) * 0.5f : 0; /* (1 + cos(pi d)) / 2 */
         L->sz[i] = (int)(ICON * (1 + MAG_MAX * dock_mag * f) + 0.5f);
         total += L->sz[i];
     }
@@ -505,16 +368,16 @@ void draw_dock(void)
     for (int i = 0; i < L.n; i++) {
         int ix = L.x[i], sz = L.sz[i], iy = L.y + L.h - DOCK_PAD - sz;
         if (i < NAPPS) {
-            draw_app_icon(s, dock_apps[i].action, ix, iy, sz);
+            ui_app_icon(s, dock_apps[i].action, ix, iy, sz);
             int running = 0;
             for (int k = 0; k < MAXW; k++)
-                running |= wins[k].used && wins[k].kind == dock_apps[i].kind;
+                running |= wins[k].used && win_of_app(&wins[k], i);
             if (running)
                 gfx_disc(s, ix + sz * 0.5f, L.y + L.h - U(4), U(2) * 1.1f, 0x1D1D1F, 200);
         } else {
             Win *mw = minimized_win(i - NAPPS);
             if (mw && mw->anim != ANIM_MIN) /* noch auf dem Weg ins Dock: Platz frei lassen */
-                draw_app_icon(s, icon_of_win(mw), ix, iy, sz);
+                ui_app_icon(s, icon_of_win(mw), ix, iy, sz);
         }
     }
     if (L.nm)
@@ -596,23 +459,19 @@ void dock_click(int i)
             raise_win(w);
         return;
     }
-    int kind = dock_apps[i].kind;
-    if (kind < 0) {
-        do_action(dock_apps[i].action);
-        return;
-    }
+    int act = dock_apps[i].action;
     /* Programm hat Fenster: das oberste nach vorn; ist es schon vorn, ein neues */
     Win *top = 0;
     for (int k = nord - 1; k >= 0 && !top; k--)
-        if (order[k]->kind == kind && !order[k]->minimized)
+        if (win_of_app(order[k], i) && !order[k]->minimized)
             top = order[k];
     if (top && top != focused()) {
         raise_win(top);
         return;
     }
-    if (!top)
+    if (!top) /* nur minimiert: zurueckholen (Terminal und Dateien: lieber ein neues) */
         for (int k = 0; k < MAXW && !top; k++)
-            if (wins[k].used && wins[k].kind == kind && kind != W_TERM && kind != W_FILES)
+            if (wins[k].used && win_of_app(&wins[k], i) && act != A_TERM && act != A_FILES)
                 top = &wins[k];
     if (top && top != focused())
         raise_win(top);

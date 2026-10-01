@@ -35,7 +35,8 @@ void   fdobj_unref(FdObj *o);                          /* Zaehler senken; bei 0 
 int64_t fdobj_read(FdObj *o, void *buf, uint64_t len);
 int64_t fdobj_write(FdObj *o, const void *buf, uint64_t len);
 int64_t fdobj_seek(FdObj *o, int64_t offset, int whence); /* nur Dateien; sonst ERR_SPIPE */
-/* Pipe-Leseende: Zahl der wartenden Bytes, 0 = noch nichts, -1 = Ende (kein Schreiber mehr). Dateien: 1, Konsole: 0 */
+/* Pipe-Leseende: Zahl der wartenden Bytes, 0 = noch nichts, -1 = Ende (kein Schreiber mehr). Pipe-Schreibende: freier
+ * Platz, -1 = kein Leser mehr. Dateien: 1, Konsole: 0 */
 int64_t fdobj_available(FdObj *o);
 
 #endif

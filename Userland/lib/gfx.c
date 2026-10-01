@@ -1,6 +1,7 @@
 /* Grafikbibliothek, siehe gfx.h */
 
 #include "gfx.h"
+#include "winproto.h"
 
 Surface        gfx_screen; /* hierhin zeichnet das Programm */
 static u32    *gfx_front;       /* gfx_screen plus Mauszeiger: das, was auf dem Bildschirm steht */
@@ -8,6 +9,16 @@ Clip           gfx_clip;
 static Clip    gfx_base = {0, 0, 1 << 30, 1 << 30}; /* aeussere Grenze: jedes gfx_set_clip wird darauf beschraenkt */
 static int     gfx_cur_x, gfx_cur_y, gfx_cur_visible = 1;
 static int     gfx_hw_cursor; /* der Kernel zeigt den Zeiger als eigene Ebene (Intel-Grafik): nichts einzeichnen */
+
+/* Fenster unter dem Desktop (winproto.h) */
+static int      gfx_win;                    /* 1: gfx_screen ist der Inhalt eines Desktop-Fensters */
+static int      gfx_win_dead;               /* Desktop ist weg */
+static int      gfx_win_frame;              /* WP_FRAME ist angekommen */
+static int      gfx_dx0, gfx_dy0, gfx_dx1, gfx_dy1; /* geaendert, aber noch nicht gemeldet (leer: dx0 >= dx1) */
+static int      gfx_scr_w, gfx_scr_h, gfx_ui = 100;
+static unsigned gfx_shm_id;
+static int      gfx_conn = -1;              /* gfx_desktop(): -1 = noch nicht nachgesehen */
+static int      gfx_buf_new;                /* nach WP_RESIZE: neuer Puffer, mit dem naechsten Bild melden */
 
 /* ---------- Speicher ---------- */
 
@@ -402,8 +413,14 @@ void gfx_compose(int x, int y, int w, int h)
     }
 }
 
+static void gfx_win_damage(int x, int y, int w, int h);
+
 void gfx_present(int x, int y, int w, int h)
 {
+    if (gfx_win) {
+        gfx_win_damage(x, y, w, h);
+        return;
+    }
     if (gfx_hw_cursor) { /* Zeiger ist eine eigene Ebene: direkt aus gfx_screen, ohne Zwischenkopie */
         gfx_blit_from(gfx_screen.px, x, y, w, h);
         return;
@@ -419,7 +436,7 @@ void gfx_present_all(void)
 
 void gfx_move_cursor(int x, int y)
 {
-    if (x == gfx_cur_x && y == gfx_cur_y)
+    if (gfx_win || (x == gfx_cur_x && y == gfx_cur_y)) /* im Fenster gehoert der Zeiger dem Desktop */
         return;
     int ox = gfx_cur_x, oy = gfx_cur_y;
     gfx_cur_x = x;
@@ -434,6 +451,8 @@ void gfx_move_cursor(int x, int y)
 
 void gfx_show_cursor(int visible)
 {
+    if (gfx_win)
+        return;
     gfx_cur_visible = visible;
     if (gfx_hw_cursor) {
         gfx_hw_cursor_set();
@@ -504,11 +523,235 @@ static void gfx_collect(void)
     gfx_mprev = m;
 }
 
+/* ---------- Fenster unter dem Desktop ---------- */
+
+static void wp_send(WpMsg *m)
+{
+    if (!gfx_win_dead && write_all(WP_FD_OUT, m, sizeof(*m)) != 0)
+        gfx_win_dead = 1;
+}
+
+/* Eine ganze Nachricht lesen, wenn eine da ist */
+static int wp_recv(WpMsg *m)
+{
+    s64 n = sys_fdavail(WP_FD_IN);
+    if (n < 0) {
+        gfx_win_dead = 1;
+        return 0;
+    }
+    if (n < (s64)sizeof(*m))
+        return 0;
+    u64 got = 0;
+    while (got < sizeof(*m)) {
+        s64 r = sys_read(WP_FD_IN, (char *)m + got, sizeof(*m) - got);
+        if (r <= 0) {
+            gfx_win_dead = 1;
+            return 0;
+        }
+        got += (u64)r;
+    }
+    return 1;
+}
+
+static void gfx_win_damage(int x, int y, int w, int h)
+{
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > gfx_screen.w) w = gfx_screen.w - x;
+    if (y + h > gfx_screen.h) h = gfx_screen.h - y;
+    if (w <= 0 || h <= 0)
+        return;
+    if (gfx_dx0 >= gfx_dx1) {
+        gfx_dx0 = x; gfx_dy0 = y; gfx_dx1 = x + w; gfx_dy1 = y + h;
+        return;
+    }
+    if (x < gfx_dx0) gfx_dx0 = x;
+    if (y < gfx_dy0) gfx_dy0 = y;
+    if (x + w > gfx_dx1) gfx_dx1 = x + w;
+    if (y + h > gfx_dy1) gfx_dy1 = y + h;
+}
+
+/* Geaenderten Bereich melden (gesammelt bis zum naechsten gfx_poll/gfx_vsync: eine Nachricht statt vieler) */
+static void gfx_win_flush(void)
+{
+    if (gfx_buf_new) { /* neuer Puffer ist gezeichnet: erst melden, dann ganz anzeigen lassen */
+        if (gfx_dx0 >= gfx_dx1)
+            return; /* noch nichts gezeichnet: der Desktop zeigt so lange den alten */
+        WpMsg b = {WP_BUFFER, gfx_screen.w, gfx_screen.h, (int)gfx_shm_id, 0, 0, 0, 0, {0}};
+        wp_send(&b);
+        gfx_buf_new = 0;
+        gfx_dx0 = gfx_dy0 = 0;
+        gfx_dx1 = gfx_screen.w;
+        gfx_dy1 = gfx_screen.h;
+    }
+    if (gfx_dx0 >= gfx_dx1)
+        return;
+    WpMsg m = {WP_DAMAGE, gfx_dx0, gfx_dy0, gfx_dx1 - gfx_dx0, gfx_dy1 - gfx_dy0, 0, 0, 0, {0}};
+    wp_send(&m);
+    gfx_dx0 = gfx_dx1 = 0;
+}
+
+/* Neue Groesse: neuen geteilten Puffer anlegen (alter Inhalt oben links uebernommen), das Programm zeichnet neu */
+static void gfx_win_resize(int w, int h)
+{
+    if (w < 16 || h < 16 || w > 16384 || h > 16384 || (w == gfx_screen.w && h == gfx_screen.h))
+        return;
+    unsigned id;
+    s64 a = sys_shm_create((u64)w * (u64)h * 4, &id);
+    if (a < 0)
+        return;
+    u32 *np = (u32 *)a, *op = gfx_screen.px;
+    int cw = w < gfx_screen.w ? w : gfx_screen.w, chh = h < gfx_screen.h ? h : gfx_screen.h;
+    for (int y = 0; y < chh; y++)
+        memcpy(np + (u64)y * (u64)w, op + (u64)y * (u64)gfx_screen.w, (u64)cw * 4);
+    sys_shm_unmap(op); /* der Desktop haelt den alten Puffer, bis WP_BUFFER kommt */
+    gfx_screen.px = np;
+    gfx_screen.w = w;
+    gfx_screen.h = h;
+    gfx_shm_id = id;
+    gfx_buf_new = 1;
+    gfx_dx0 = gfx_dx1 = 0;
+    gfx_reset_base_clip();
+    gfx_no_clip();
+    Event e = {EV_RESIZE, 0, w, h, 0, 0};
+    gfx_push(e);
+}
+
+static void gfx_win_collect(void)
+{
+    WpMsg m;
+    while (wp_recv(&m)) {
+        if (m.type == WP_INPUT) {
+            Event e = {m.a, m.b, m.c, m.d, m.e, m.f};
+            gfx_push(e);
+        } else if (m.type == WP_FOCUS) {
+            Event e = {EV_FOCUS, m.a, 0, 0, 0, 0};
+            gfx_push(e);
+        } else if (m.type == WP_CLOSE) {
+            Event e = {EV_CLOSE, 0, 0, 0, 0, 0};
+            gfx_push(e);
+        } else if (m.type == WP_FRAME) {
+            gfx_win_frame = 1;
+        } else if (m.type == WP_RESIZE) {
+            gfx_win_resize(m.a, m.b);
+        }
+    }
+    static int reported;
+    if (gfx_win_dead && !reported) { /* Desktop beendet: das Programm soll auch gehen */
+        reported = 1;
+        Event e = {EV_CLOSE, 0, 0, 0, 0, 0};
+        gfx_push(e);
+    }
+}
+
+/* Laeuft das Programm unter dem Desktop? Dann liegt dessen Begruessung schon in Deskriptor 3. Andere Deskriptoren
+ * (Datei: 1 Byte "verfuegbar", Konsole: 0, nicht offen: Fehler) kommen nicht auf 64 Byte. */
+static int gfx_win_connect(void)
+{
+    if (sys_fdavail(WP_FD_IN) < (s64)sizeof(WpMsg))
+        return 0;
+    WpMsg m;
+    if (!wp_recv(&m) || m.type != WP_HELLO || m.d != WP_MAGIC) {
+        gfx_win_dead = 0;
+        return 0;
+    }
+    gfx_scr_w = m.a;
+    gfx_scr_h = m.b;
+    gfx_ui = m.c > 0 ? m.c : 100;
+    return 1;
+}
+
+static int gfx_win_open(int w, int h, const char *title, int flags)
+{
+    if (w <= 0 || h <= 0) {
+        w = gfx_scr_w * 3 / 5;
+        h = gfx_scr_h * 3 / 5;
+    }
+    if (w > gfx_scr_w - 40) w = gfx_scr_w - 40;
+    if (h > gfx_scr_h - 160) h = gfx_scr_h - 160;
+    if (w < 64) w = 64;
+    if (h < 32) h = 32;
+    s64 a = sys_shm_create((u64)w * (u64)h * 4, &gfx_shm_id);
+    if (a < 0) {
+        fprintf(2, "Grafik: kein Speicher fuer ein Fenster %dx%d\n", w, h);
+        return -1;
+    }
+    gfx_screen.px = (u32 *)a;
+    gfx_screen.w = w;
+    gfx_screen.h = h;
+    gfx_no_clip();
+    gfx_qh = gfx_qt = 0;
+    gfx_dx0 = gfx_dx1 = 0;
+    gfx_win = 1;
+    WpMsg m = {WP_CREATE, w, h, (int)gfx_shm_id, flags & GFX_RESIZABLE ? WPF_RESIZABLE : 0, 0, 0, 0, {0}};
+    snprintf(m.text, sizeof(m.text), "%s", title ? title : "");
+    wp_send(&m);
+    return 0;
+}
+
+void gfx_set_title(const char *title)
+{
+    if (!gfx_win)
+        return;
+    WpMsg m = {WP_TITLE, 0, 0, 0, 0, 0, 0, 0, {0}};
+    snprintf(m.text, sizeof(m.text), "%s", title);
+    wp_send(&m);
+}
+
+int gfx_desktop_open(const char *path)
+{
+    if (!gfx_win || gfx_win_dead)
+        return -1;
+    int n = (int)strlen(path);
+    if (n >= WP_PATH_MAX)
+        return -1;
+    for (int off = 0; off == 0 || off < n; off += 32) {
+        int c = n - off < 32 ? n - off : 32;
+        WpMsg m = {WP_OPEN, off, off + c >= n, c, 0, 0, 0, 0, {0}};
+        memcpy(m.text, path + off, (size_t)c);
+        wp_send(&m);
+        if (c < 32)
+            break;
+    }
+    return 0;
+}
+
+int gfx_windowed(void)
+{
+    return gfx_win;
+}
+
+int gfx_desktop(void)
+{
+    if (gfx_conn < 0)
+        gfx_conn = gfx_win_connect();
+    return gfx_conn;
+}
+
+void gfx_display_size(int *w, int *h)
+{
+    int d = gfx_desktop();
+    *w = d ? gfx_scr_w : gfx_screen.w;
+    *h = d ? gfx_scr_h : gfx_screen.h;
+}
+
+int gfx_ui_scale(void)
+{
+    if (gfx_desktop())
+        return gfx_ui;
+    return gfx_screen.h >= 1300 ? 125 : 100;
+}
+
 /* Naechstes Ereignis; 0 = keins (nicht blockierend) */
 int gfx_poll(Event *e)
 {
-    if (gfx_qt == gfx_qh)
+    if (gfx_win) {
+        gfx_win_flush();
+        if (gfx_qt == gfx_qh)
+            gfx_win_collect();
+    } else if (gfx_qt == gfx_qh) {
         gfx_collect();
+    }
     if (gfx_qt == gfx_qh)
         return 0;
     *e = gfx_q[gfx_qt];
@@ -533,6 +776,21 @@ int gfx_wait(Event *e, int timeout_ms)
 
 int gfx_open(void)
 {
+    return gfx_open_window(0, 0, 0);
+}
+
+int gfx_open_window(int ww, int wh, const char *title)
+{
+    return gfx_open_window_ex(ww, wh, title, 0);
+}
+
+int gfx_open_window_ex(int ww, int wh, const char *title, int flags)
+{
+    if (gfx_desktop()) {
+        if (gfx_win_dead)
+            return -1;
+        return gfx_win_open(ww, wh, title, flags);
+    }
     s64 r = sys_gfx(0, 0);
     if (r < 0) {
         fprintf(2, "Grafik: Bildschirm nicht verfuegbar (%s)\n", r == -11 ? "wird schon benutzt" : "keine Konsole");
@@ -559,6 +817,16 @@ int gfx_open(void)
 
 void gfx_close(void)
 {
+    if (gfx_win) { /* Pipes zu: der Desktop schliesst das Fenster */
+        gfx_win_flush();
+        sys_close(WP_FD_IN);
+        sys_close(WP_FD_OUT);
+        sys_shm_unmap(gfx_screen.px);
+        gfx_screen.px = 0;
+        gfx_win = 0;
+        gfx_win_dead = 1; /* die Pipes sind zu: kein zweites Fenster */
+        return;
+    }
     sys_gfx(2, 0);
     gfx_free(gfx_front, (u64)gfx_screen.w * (u64)gfx_screen.h * 4);
     surface_free(&gfx_screen);
@@ -568,11 +836,15 @@ void gfx_close(void)
 /* Bildschirm voruebergehend abgeben (z.B. um ein anderes Grafikprogramm zu starten) und wieder uebernehmen */
 void gfx_suspend(void)
 {
+    if (gfx_win)
+        return;
     sys_gfx(2, 0);
 }
 
 int gfx_resume(void)
 {
+    if (gfx_win)
+        return 0;
     if (sys_gfx(0, 0) < 0)
         return -1;
     sys_mouse(&gfx_mprev);
@@ -683,6 +955,20 @@ int bmp_save(const char *path, const Surface *s, int x, int y, int w, int h)
 
 int gfx_vsync(void)
 {
+    if (gfx_win) { /* im Fenster: im Takt des Desktops (er meldet sich nach seinem naechsten Bild) */
+        gfx_win_flush();
+        gfx_win_frame = 0;
+        WpMsg m = {WP_WANT_FRAME, 0, 0, 0, 0, 0, 0, 0, {0}};
+        wp_send(&m);
+        s64 t0 = sys_time_us();
+        while (!gfx_win_dead && sys_time_us() - t0 < 50000) {
+            gfx_win_collect();
+            if (gfx_win_frame)
+                return 1;
+            sys_sleep_ms(1);
+        }
+        return 0;
+    }
     if (sys_gfx(4, 0) >= 0)
         return 1;
     sys_sleep_ms(10);

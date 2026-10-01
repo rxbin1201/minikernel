@@ -15,6 +15,7 @@
 #include "drivers/mouse.h"
 #include "console/console.h"
 #include "drivers/sound/hda.h"
+#include "arch/x86_64/spinlock.h"
 
 #define MAX_PROC          64
 #define MAX_FD            32
@@ -22,6 +23,7 @@
 #define MAX_ARGS          16
 #define ARGS_BYTES        512
 #define PAGE              4096ULL
+#define MAX_SHM_MAPS      16
 
 extern void enter_user(uint64_t rip, uint64_t rsp, uint64_t arg1, uint64_t arg2) __attribute__((noreturn));
 extern void enter_user_regs(const SyscallFrame *r) __attribute__((noreturn));
@@ -42,9 +44,11 @@ struct Process {
     volatile int killed;
     int          exit_code;
     int          faulted;
+    struct { uint64_t addr; struct Shm *obj; } shm[MAX_SHM_MAPS]; /* eingeblendeter geteilter Speicher */
 };
 
 static Process procs[MAX_PROC];
+static void shm_release_all(Process *p);
 static uint32_t next_pid = 1;
 
 /* ---------- User-Speicher ---------- */
@@ -72,10 +76,11 @@ static int map_user_page(AddressSpace *as, uint64_t va, uint64_t flags)
 /* Gibt die Seite bei va frei (falls gemappt). */
 static void unmap_user_page(AddressSpace *as, uint64_t va)
 {
-    uint64_t phys;
-    if (as_translate(as, va, &phys, 0)) {
+    uint64_t phys, flags;
+    if (as_translate(as, va, &phys, &flags)) {
         as_unmap(as, va);
-        pmm_free_frame(phys & ~(PAGE - 1));
+        if (!(flags & PAGE_SHARED)) /* geteilte Frames gehoeren dem Shared-Memory-Objekt */
+            pmm_free_frame(phys & ~(PAGE - 1));
     }
 }
 
@@ -473,6 +478,7 @@ int process_exec(const char *path, const char *cmdline)
     set_name(p, path);
     thread_set_as(thread_current(), new_as); /* beim naechsten Threadwechsel gilt der neue Adressraum */
     as_switch(new_as);
+    shm_release_all(p); /* geteilter Speicher gehoerte zum alten Programm */
     as_destroy(old_as);
     sched_fpu_reset();
     to_user(p->entry, p->user_rsp, (uint64_t)p->argc, p->argv);
@@ -533,6 +539,7 @@ const char *process_name(const Process *p)   { return p ? p->name : "?"; }
 static void finish_process(Process *p, int code, int faulted)
 {
     close_all_fds(p);
+    shm_release_all(p); /* die Seiten bleiben bis as_destroy eingeblendet, werden aber nicht mehr benutzt */
     mouse_owner_exit(p->pid);
     console_gfx_release(p->pid); /* hatte das Programm den Bildschirm, bekommt ihn die Konsole zurueck */
     hda_close(p->pid);           /* spielte es Ton: sofort aus */
@@ -763,6 +770,167 @@ int process_munmap(Process *p, uint64_t addr, uint64_t len)
     for (uint64_t a = addr; a < addr + size; a += PAGE)
         unmap_user_page(p->as, a);
     return 0;
+}
+
+/* ---------- Geteilter Speicher (SYS_SHM) ----------
+ * Ein Objekt besteht aus einzelnen Frames, die in mehrere Adressraeume eingeblendet werden koennen (PTE-Bit
+ * PAGE_SHARED: as_destroy und munmap geben sie nicht frei, fork vererbt sie nicht). Gezaehlt werden die Einblendungen;
+ * mit der letzten verschwindet das Objekt. Wer die Nummer kennt, kann es einblenden (der Desktop bekommt sie von
+ * seinen Fenster-Programmen). */
+
+#define MAX_SHM       64
+#define SHM_MAX_BYTES (64ULL << 20)
+
+typedef struct Shm {
+    uint32_t  id; /* 0 = frei */
+    int       refs;
+    uint64_t  npages;
+    uint64_t *frames;
+} Shm;
+
+static Shm      shms[MAX_SHM];
+static uint32_t shm_next_id = 1;
+static Spinlock shm_lock = SPINLOCK_INIT("shm");
+
+static void shm_free_frames(uint64_t *frames, uint64_t npages)
+{
+    for (uint64_t i = 0; i < npages; i++)
+        pmm_free_frame(frames[i]);
+    kfree(frames);
+}
+
+static void shm_unref(Shm *s)
+{
+    uint64_t fl = spin_lock(&shm_lock);
+    uint64_t *frames = 0, n = 0;
+    if (--s->refs == 0) {
+        frames = s->frames;
+        n = s->npages;
+        s->frames = 0;
+        s->id = 0;
+    }
+    spin_unlock(&shm_lock, fl);
+    if (frames)
+        shm_free_frames(frames, n);
+}
+
+/* Blendet das Objekt (mit schon gezaehlter Referenz) ein; bei Fehler wird die Referenz abgegeben */
+static int64_t shm_map(Process *p, Shm *s)
+{
+    int slot = -1;
+    for (int i = 0; i < MAX_SHM_MAPS && slot < 0; i++)
+        if (!p->shm[i].obj)
+            slot = i;
+    uint64_t size = s->npages * PAGE, base = p->mmap_next;
+    if (slot < 0 || size > USER_MMAP_LIMIT - base) {
+        shm_unref(s);
+        return ERR_NOMEM;
+    }
+    for (uint64_t i = 0; i < s->npages; i++) {
+        if (as_map(p->as, base + i * PAGE, s->frames[i], PAGE_WRITE | PAGE_NX | PAGE_USER | PAGE_SHARED) != 0) {
+            for (uint64_t k = 0; k < i; k++)
+                as_unmap(p->as, base + k * PAGE);
+            shm_unref(s);
+            return ERR_NOMEM;
+        }
+    }
+    p->mmap_next = base + size + PAGE;
+    p->shm[slot].addr = base;
+    p->shm[slot].obj = s;
+    return (int64_t)base;
+}
+
+static Shm *shm_find_ref(uint32_t id)
+{
+    Shm *r = 0;
+    uint64_t fl = spin_lock(&shm_lock);
+    for (int i = 0; i < MAX_SHM && id; i++)
+        if (shms[i].id == id) {
+            r = &shms[i];
+            r->refs++;
+            break;
+        }
+    spin_unlock(&shm_lock, fl);
+    return r;
+}
+
+static void shm_release_all(Process *p)
+{
+    for (int i = 0; i < MAX_SHM_MAPS; i++)
+        if (p->shm[i].obj) {
+            Shm *s = p->shm[i].obj;
+            p->shm[i].obj = 0;
+            shm_unref(s);
+        }
+}
+
+int64_t process_shm(Process *p, uint64_t op, uint64_t a, uint64_t b)
+{
+    if (op == 0) { /* anlegen (Bytes, u32 *nummer) -> Adresse */
+        if (a == 0 || a > SHM_MAX_BYTES || !process_user_range_ok(p, b, sizeof(uint32_t), 1))
+            return ERR_INVAL;
+        uint64_t n = (a + PAGE - 1) / PAGE;
+        uint64_t *frames = kmalloc(n * sizeof(uint64_t));
+        if (!frames)
+            return ERR_NOMEM;
+        for (uint64_t i = 0; i < n; i++) {
+            frames[i] = pmm_alloc_frame();
+            if (!frames[i]) {
+                shm_free_frames(frames, i);
+                return ERR_NOMEM;
+            }
+            memset((void *)frames[i], 0, PAGE);
+        }
+        Shm *s = 0;
+        uint64_t fl = spin_lock(&shm_lock);
+        for (int i = 0; i < MAX_SHM && !s; i++)
+            if (!shms[i].id && !shms[i].frames)
+                s = &shms[i];
+        if (s) {
+            s->id = shm_next_id++;
+            if (!shm_next_id)
+                shm_next_id = 1;
+            s->refs = 1;
+            s->npages = n;
+            s->frames = frames;
+        }
+        spin_unlock(&shm_lock, fl);
+        if (!s) {
+            shm_free_frames(frames, n);
+            return ERR_NOMEM;
+        }
+        uint32_t id = s->id;
+        int64_t addr = shm_map(p, s);
+        if (addr >= 0)
+            *(uint32_t *)b = id;
+        return addr;
+    }
+    if (op == 1) { /* einblenden (nummer) -> Adresse */
+        Shm *s = shm_find_ref((uint32_t)a);
+        return s ? shm_map(p, s) : ERR_NOENT;
+    }
+    if (op == 2) { /* ausblenden (adresse) */
+        for (int i = 0; i < MAX_SHM_MAPS; i++) {
+            Shm *s = p->shm[i].obj;
+            if (s && p->shm[i].addr == a) {
+                for (uint64_t k = 0; k < s->npages; k++)
+                    as_unmap(p->as, a + k * PAGE);
+                p->shm[i].obj = 0;
+                shm_unref(s);
+                return 0;
+            }
+        }
+        return ERR_INVAL;
+    }
+    if (op == 3) { /* Groesse (nummer) -> Bytes */
+        Shm *s = shm_find_ref((uint32_t)a);
+        if (!s)
+            return ERR_NOENT;
+        int64_t bytes = (int64_t)(s->npages * PAGE);
+        shm_unref(s);
+        return bytes;
+    }
+    return ERR_INVAL;
 }
 
 /* ---------- Datei-Deskriptoren ---------- */

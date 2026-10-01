@@ -20,7 +20,7 @@
 #define ADDR_MASK_4K 0x000FFFFFFFFFF000ULL
 #define ADDR_MASK_2M 0x000FFFFFFFE00000ULL
 /* Flag-Bits, die wir beim Aufteilen/Aendern von Eintraegen erhalten */
-#define FLAG_MASK    (PTE_WRITE | PTE_USER | PTE_PWT | PTE_PCD | PTE_NX)
+#define FLAG_MASK    (PTE_WRITE | PTE_USER | PTE_PWT | PTE_PCD | PTE_NX | PAGE_SHARED)
 
 #define SIZE_4K     4096ULL
 #define SIZE_2M     (2ULL * 1024 * 1024)
@@ -302,7 +302,7 @@ void as_destroy(AddressSpace *as)
                     continue;
                 uint64_t *pt = (uint64_t *)(t2[j] & ADDR_MASK_4K);
                 for (unsigned k = 0; k < 512; k++)
-                    if (pt[k] & PTE_PRESENT)
+                    if ((pt[k] & PTE_PRESENT) && !(pt[k] & PAGE_SHARED)) /* geteilte Frames gibt shm.c frei */
                         pmm_free_frame(pt[k] & ADDR_MASK_4K);
                 table_free(pt);
             }
@@ -333,7 +333,7 @@ AddressSpace *as_clone(AddressSpace *src)
                 continue;
             uint64_t *pt = (uint64_t *)(t2[j] & ADDR_MASK_4K);
             for (unsigned k = 0; k < 512; k++) {
-                if (!(pt[k] & PTE_PRESENT))
+                if (!(pt[k] & PTE_PRESENT) || (pt[k] & PAGE_SHARED)) /* geteilter Speicher wird nicht vererbt */
                     continue;
                 uint64_t va = (USER_BASE & ~((1ULL << 39) - 1)) | ((uint64_t)i << 30) | ((uint64_t)j << 21) | ((uint64_t)k << 12);
                 uint64_t frame = pmm_alloc_frame();

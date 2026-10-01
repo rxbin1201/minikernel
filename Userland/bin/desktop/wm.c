@@ -157,14 +157,13 @@ void content_rect(const Win *w, int *x, int *y, int *cw, int *ch)
     *ch = w->h - TITLE_H;
 }
 
-Win *new_window(int kind, const char *title, int w, int h)
+Win *new_window(const char *title, int w, int h)
 {
     for (int i = 0; i < MAXW; i++) {
         if (!wins[i].used) {
             Win *n = &wins[i];
             memset(n, 0, sizeof(*n));
             n->used = 1;
-            n->kind = kind;
             snprintf(n->title, sizeof(n->title), "%s", title);
             int area = dock_top() - MENUBAR_H;
             if (w > W - U(40)) w = W - U(40);
@@ -180,7 +179,6 @@ Win *new_window(int kind, const char *title, int w, int h)
             if (n->x + w > W) n->x = W - w;
             if (n->y + h > dock_top()) n->y = dock_top() - h;
             if (n->y < MENUBAR_H) n->y = MENUBAR_H;
-            n->tr0 = 1;
             order[nord++] = n;
             win_dirty_all(n);
             int from[4], to[4];
@@ -240,6 +238,8 @@ void minimize(Win *w)
 
 void zoom_win(Win *w)
 {
+    if (!(w->flags & WPF_RESIZABLE)) /* feste Groesse: das Programm zeichnet genau so viel */
+        return;
     damage_win(w);
     int from[4];
     set4(from, w->x, w->y, w->w, w->h);
@@ -254,9 +254,7 @@ void zoom_win(Win *w)
         w->h = dock_top() - w->y - U(2);
         w->zoomed = 1;
     }
-    if (w->kind == W_TERM)
-        term_alloc(w);
-    win_dirty_all(w);
+    win_dirty_all(w); /* die neue Groesse erfaehrt das Programm nach dem Bild (apps_frame) */
     int to[4];
     set4(to, w->x, w->y, w->w, w->h);
     anim_start(w, ANIM_ZOOM, from, to, 220);
@@ -275,6 +273,10 @@ void close_win(Win *w)
 {
     if (w->anim == ANIM_CLOSE)
         return;
+    if (!w->app_done) { /* erst das Programm fragen; das Fenster geht, wenn es sich beendet */
+        app_request_close(w);
+        return;
+    }
     if (w->minimized || !w->buf.px) {
         close_win_now(w);
         return;
@@ -293,26 +295,7 @@ void close_win(Win *w)
 
 void close_win_now(Win *w)
 {
-    if (w->kind == W_TERM) {
-        if (w->to_child >= 0)
-            sys_close(w->to_child);
-        if (w->from_child >= 0)
-            sys_close(w->from_child);
-        if (w->pid > 0) {
-            sys_kill(w->pid);
-            int code;
-            sys_wait(w->pid, &code);
-        }
-        u_free(w->cells);
-    }
-    if (w->kind == W_FILES)
-        u_free(w->ents);
-    if (w->kind == W_TEXT) {
-        u_free(w->text);
-        u_free(w->lines);
-    }
-    if (w->kind == W_IMAGE && w->img.px)
-        surface_free(&w->img);
+    app_free(w);
     damage_win(w);
     damage_dock();
     damage_menubar();
@@ -410,15 +393,7 @@ static void draw_window(Win *w)
     int x, y, cw, ch;
     content_rect(w, &x, &y, &cw, &ch);
     gfx_set_clip(x, y, cw, ch);
-    switch (w->kind) {
-    case W_TERM:  draw_terminal(w, x, y, cw, ch); break;
-    case W_FILES: draw_files(w, x, y, cw, ch); break;
-    case W_TEXT:  draw_text(w, x, y, cw, ch); break;
-    case W_IMAGE: draw_image(w, x, y, cw, ch); break;
-    case W_CALC:  draw_calc(w, x, y, cw, ch); break;
-    case W_CLOCK: draw_clock(w, x, y, cw, ch); break;
-    case W_ABOUT: draw_about(w, x, y, cw, ch); break;
-    }
+    draw_app(w, x, y, cw, ch);
     gfx_no_clip();
 }
 
