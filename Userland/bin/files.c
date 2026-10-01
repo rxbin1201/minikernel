@@ -5,7 +5,7 @@
 /* files [ordner]: Dateien verwalten (Fenster mit aenderbarer Groesse).
  *   Links die Seitenleiste: Schnellzugriff (Ordner der Platte), die Orte (Platte /disk, System /, angesteckte
  *   Datentraeger) mit aufklappbaren Unterordnern, unten der belegte Speicher. Rechts Tabs (Strg+T, Strg+W,
- *   Strg+Tab), die Menuezeile (Datei, Bearbeiten, Ansicht), Zurueck/Vor/Hoch, die Pfadleiste (jeder Teil anklickbar)
+ *   Strg+Tab) mit den Fensterknoepfen, Zurueck/Vor/Hoch, die Pfadleiste (jeder Teil anklickbar)
  *   und die Suche (Strg+F: filtert den Ordner; im Schnellzugriff sucht sie auf der ganzen Platte).
  *   Ohne Ordner beginnt es im Schnellzugriff: grosse Ordner der Platte und die zuletzt geaenderten Dateien.
  *   Doppelklick oder Enter oeffnet: Ordner hier, Dateien im passenden Programm (der Desktop
@@ -790,7 +790,7 @@ static void action(int a)
 }
 
 /* ---------------------------------------------------------------------------------------------------------------------
- * Aussehen: links die Seitenleiste (Baum, Speicher), rechts Tabs, Menuezeile, Navigation und der Inhalt
+ * Aussehen: links die Seitenleiste (Baum, Speicher), rechts Tabs (mit den Fensterknoepfen), Navigation und der Inhalt
  * (Schnellzugriff oder Ordnerliste), unten die Statuszeile
  * ------------------------------------------------------------------------------------------------------------------- */
 
@@ -802,10 +802,9 @@ static void action(int a)
 
 static int side_w(void) { int w = U(220); return w > gfx_screen.w / 3 ? gfx_screen.w / 3 : w; }
 static int tabs_h(void) { return U(38); }
-static int mrow_h(void) { return U(30); }
 static int nav_h(void) { return U(46); }
-static int nav_y(void) { return tabs_h() + mrow_h(); }
-static int tb_h(void) { return tabs_h() + mrow_h() + nav_h(); } /* ganzer Kopfbereich */
+static int nav_y(void) { return tabs_h(); }
+static int tb_h(void) { return tabs_h() + nav_h(); } /* ganzer Kopfbereich */
 static int head_h(void) { return U(26); }
 static int foot_h(void) { return U(24); }
 static int list_y(void) { return tb_h() + head_h(); }
@@ -816,7 +815,7 @@ static int col_size(void) { return gfx_screen.w - U(92); }
 static int show_date(void) { return col_date() > side_w() + U(200); }
 
 /* Klickbare Flaechen: beim Zeichnen gesammelt, beim naechsten Ereignis abgefragt */
-enum { H_NONE, H_TAB, H_TABX, H_TABNEW, H_MENU, H_BACK, H_FWD, H_UP, H_CRUMB, H_REFRESH, H_SEARCH, H_SIDE, H_SIDECHEV,
+enum { H_NONE, H_TAB, H_TABX, H_TABNEW, H_BACK, H_FWD, H_UP, H_CRUMB, H_REFRESH, H_SEARCH, H_SIDE, H_SIDECHEV,
        H_TILE, H_RECENT, H_COL, H_DRAG, H_WMIN, H_WMAX, H_WCLOSE };
 typedef struct {
     int kind, idx, x, y, w, h;
@@ -1303,10 +1302,8 @@ static void tab_close(int i)
     tab_restore(tabs[cur_tab]);
 }
 
-/* ---------- Menues (Kontextmenue und die Menuezeile teilen sich die Darstellung) ---------- */
+/* ---------- Kontextmenue ---------- */
 
-static const char *const mrow_label[3] = {"Datei", "Bearbeiten", "Ansicht"};
-static int dropdown; /* offenes Menue der Menuezeile + 1 */
 
 static void menu_size(int *w, int *h)
 {
@@ -1495,25 +1492,25 @@ static void draw_tabs(Surface *s, int W)
             gfx_fill(s, x0, 0, wb, th, i == 2 ? 0xE81123 : 0xD8DDE8);
         u32 c = hv && i == 2 ? 0xFFFFFF : C_TEXT;
         if (i == 0) {
-            gfx_capsule(s, cx - 5 * k, cy, cx + 5 * k, cy, 1.1f * k, c, 255);
+            gfx_capsule(s, cx - 5 * k, cy, cx + 5 * k, cy, 1.7f * k, c, 255);
         } else if (i == 1) {
             if (gfx_window_zoomed()) { /* zwei Fenster: wiederherstellen */
-                gfx_capsule(s, cx - 2.5f * k, cy - 5 * k, cx + 5 * k, cy - 5 * k, 1.1f * k, c, 255);
-                gfx_capsule(s, cx + 5 * k, cy - 5 * k, cx + 5 * k, cy + 2.5f * k, 1.1f * k, c, 255);
+                gfx_capsule(s, cx - 2.5f * k, cy - 5 * k, cx + 5 * k, cy - 5 * k, 1.7f * k, c, 255);
+                gfx_capsule(s, cx + 5 * k, cy - 5 * k, cx + 5 * k, cy + 2.5f * k, 1.7f * k, c, 255);
                 gfx_fill(s, (int)(cx - 5 * k), (int)(cy - 2.5f * k), (int)(7.5f * k), (int)(7.5f * k), hv ? 0xD8DDE8 : C_STRIP);
-                gfx_capsule(s, cx - 5 * k, cy - 2.5f * k, cx + 2.5f * k, cy - 2.5f * k, 1.1f * k, c, 255);
-                gfx_capsule(s, cx + 2.5f * k, cy - 2.5f * k, cx + 2.5f * k, cy + 5 * k, 1.1f * k, c, 255);
-                gfx_capsule(s, cx + 2.5f * k, cy + 5 * k, cx - 5 * k, cy + 5 * k, 1.1f * k, c, 255);
-                gfx_capsule(s, cx - 5 * k, cy + 5 * k, cx - 5 * k, cy - 2.5f * k, 1.1f * k, c, 255);
+                gfx_capsule(s, cx - 5 * k, cy - 2.5f * k, cx + 2.5f * k, cy - 2.5f * k, 1.7f * k, c, 255);
+                gfx_capsule(s, cx + 2.5f * k, cy - 2.5f * k, cx + 2.5f * k, cy + 5 * k, 1.7f * k, c, 255);
+                gfx_capsule(s, cx + 2.5f * k, cy + 5 * k, cx - 5 * k, cy + 5 * k, 1.7f * k, c, 255);
+                gfx_capsule(s, cx - 5 * k, cy + 5 * k, cx - 5 * k, cy - 2.5f * k, 1.7f * k, c, 255);
             } else {
-                gfx_capsule(s, cx - 5 * k, cy - 5 * k, cx + 5 * k, cy - 5 * k, 1.1f * k, c, 255);
-                gfx_capsule(s, cx + 5 * k, cy - 5 * k, cx + 5 * k, cy + 5 * k, 1.1f * k, c, 255);
-                gfx_capsule(s, cx + 5 * k, cy + 5 * k, cx - 5 * k, cy + 5 * k, 1.1f * k, c, 255);
-                gfx_capsule(s, cx - 5 * k, cy + 5 * k, cx - 5 * k, cy - 5 * k, 1.1f * k, c, 255);
+                gfx_capsule(s, cx - 5 * k, cy - 5 * k, cx + 5 * k, cy - 5 * k, 1.7f * k, c, 255);
+                gfx_capsule(s, cx + 5 * k, cy - 5 * k, cx + 5 * k, cy + 5 * k, 1.7f * k, c, 255);
+                gfx_capsule(s, cx + 5 * k, cy + 5 * k, cx - 5 * k, cy + 5 * k, 1.7f * k, c, 255);
+                gfx_capsule(s, cx - 5 * k, cy + 5 * k, cx - 5 * k, cy - 5 * k, 1.7f * k, c, 255);
             }
         } else {
-            gfx_capsule(s, cx - 5 * k, cy - 5 * k, cx + 5 * k, cy + 5 * k, 1.2f * k, c, 255);
-            gfx_capsule(s, cx - 5 * k, cy + 5 * k, cx + 5 * k, cy - 5 * k, 1.2f * k, c, 255);
+            gfx_capsule(s, cx - 5 * k, cy - 5 * k, cx + 5 * k, cy + 5 * k, 1.8f * k, c, 255);
+            gfx_capsule(s, cx - 5 * k, cy + 5 * k, cx + 5 * k, cy - 5 * k, 1.8f * k, c, 255);
         }
         hit_add(kinds[i], 0, x0, 0, wb, th);
     }
@@ -1607,21 +1604,8 @@ static void draw_crumbs(Surface *s, int x, int y, int w, int h)
 
 static void draw_nav(Surface *s, int W)
 {
-    int sw = side_w(), y = tabs_h();
+    int sw = side_w(), y = nav_y();
     float k = (float)U(1);
-    /* Menuezeile */
-    gfx_fill(s, sw, y, W - sw, mrow_h(), C_WINDOW);
-    int x = sw + U(14);
-    for (int i = 0; i < 3; i++) {
-        int w = text_width(font_ui, FS, mrow_label[i]) + U(20);
-        if (dropdown == i + 1 || hovered(H_MENU, i))
-            gfx_round_rect(s, x, y + U(3), w, mrow_h() - U(6), U(6), dropdown == i + 1 ? 0xDFE5F2 : 0xEEF1F7, 255);
-        text_draw(s, font_ui, FS, x + U(10), y + (mrow_h() - text_height(font_ui, FS)) / 2, mrow_label[i], C_TEXT);
-        hit_add(H_MENU, i, x, y, w, mrow_h());
-        x += w + U(6);
-    }
-    /* Navigation */
-    y = nav_y();
     int h = nav_h();
     gfx_fill(s, sw, y, W - sw, h, C_WINDOW);
     gfx_fill(s, sw, y + h - 1, W - sw, 1, 0xE6E8EE);
@@ -1868,7 +1852,7 @@ static void draw(void)
         text_draw(s, font_ui, FS, lx + U(30), lyy + (lh2 - text_height(font_ui, FS)) / 2, lab, C_TEXT);
     }
 
-    /* Kontextmenue bzw. Menue der Menuezeile */
+    /* Kontextmenue */
     if (nmenu) {
         int mw, mh;
         float k = (float)U(1);
@@ -1956,7 +1940,6 @@ static void open_menu(int x, int y, int on_item)
 {
     nmenu = 0;
     menu_hover = -1;
-    dropdown = 0;
     int can_paste = can_paste_now();
     if (on_item) {
         add_item("\xC3\x96" "ffnen", "Enter", M_OPEN, 1);
@@ -1972,50 +1955,18 @@ static void open_menu(int x, int y, int on_item)
     } else {
         add_item("Neuer Ordner", "Strg+N", M_NEWFOLDER, 1);
         add_item("Neue Textdatei", 0, M_NEWFILE, 1);
-        add_item(0, 0, 0, 0);
         add_item("Einf\xC3\xBCgen", "Strg+V", M_PASTE, can_paste);
+        add_item(0, 0, 0, 0);
+        add_item("Nach Name sortieren", 0, M_SORT_NAME, 1);
+        menu[nmenu - 1].checked = sort_mode == 0;
+        add_item("Nach Datum sortieren", 0, M_SORT_DATE, 1);
+        menu[nmenu - 1].checked = sort_mode == 1;
+        add_item("Nach Gr\xC3\xB6\xC3\x9F" "e sortieren", 0, M_SORT_SIZE, 1);
+        menu[nmenu - 1].checked = sort_mode == 2;
+        add_item(0, 0, 0, 0);
+        add_item("Aktualisieren", "Strg+R", M_REFRESH, 1);
     }
     place_menu(x, y);
-}
-
-/* Menues der Menuezeile */
-static void open_dropdown(int i, int x)
-{
-    nmenu = 0;
-    menu_hover = -1;
-    int real = dir[0] != 0, n = nsel();
-    if (i == 0) {
-        add_item("Neuer Tab", "Strg+T", M_NEWTAB, ntabs < MAXTABS);
-        add_item("Neuer Ordner", "Strg+N", M_NEWFOLDER, real);
-        add_item("Neue Textdatei", 0, M_NEWFILE, real);
-        add_item(0, 0, 0, 0);
-        add_item("\xC3\x96" "ffnen", "Enter", M_OPEN, n > 0);
-        add_item(0, 0, 0, 0);
-        add_item("Tab schlie\xC3\x9F" "en", "Strg+W", M_CLOSETAB, ntabs > 1);
-    } else if (i == 1) {
-        add_item("Ausschneiden", "Strg+X", M_CUT, n > 0);
-        add_item("Kopieren", "Strg+C", M_COPY, n > 0);
-        add_item("Einf\xC3\xBCgen", "Strg+V", M_PASTE, can_paste_now());
-        add_item("Duplizieren", "Strg+D", M_DUP, n > 0);
-        add_item(0, 0, 0, 0);
-        add_item("Umbenennen \xE2\x80\xA6", 0, M_RENAME, n == 1);
-        add_item("L\xC3\xB6schen \xE2\x80\xA6", "Entf", M_DELETE, n > 0);
-        add_item(0, 0, 0, 0);
-        add_item("Alles ausw\xC3\xA4hlen", "Strg+A", M_SELALL, real && nent > 0);
-    } else {
-        add_item("Schnellzugriff", 0, M_HOME, 1);
-        menu[nmenu - 1].checked = !dir[0];
-        add_item("Aktualisieren", "Strg+R", M_REFRESH, 1);
-        add_item(0, 0, 0, 0);
-        add_item("Nach Name sortieren", 0, M_SORT_NAME, real);
-        menu[nmenu - 1].checked = sort_mode == 0;
-        add_item("Nach Datum sortieren", 0, M_SORT_DATE, real);
-        menu[nmenu - 1].checked = sort_mode == 1;
-        add_item("Nach Gr\xC3\xB6\xC3\x9F" "e sortieren", 0, M_SORT_SIZE, real);
-        menu[nmenu - 1].checked = sort_mode == 2;
-    }
-    dropdown = i + 1;
-    place_menu(x, tabs_h() + mrow_h() - U(2));
 }
 
 static int menu_at(int px, int py)
@@ -2218,7 +2169,6 @@ static void click(Event *e, s64 *last_click, int *last_i)
         case H_TAB: tab_switch(h->idx); return;
         case H_TABX: tab_close(h->idx); return;
         case H_TABNEW: action(M_NEWTAB); return;
-        case H_MENU: open_dropdown(h->idx, h->x); return;
         case H_BACK: go_back(); return;
         case H_FWD: go_forward(); return;
         case H_UP: if (dir[0]) go_up(); return;
@@ -2365,19 +2315,11 @@ void _start(int argc, char **argv)
                 } else if (e.type == EV_DOWN) {
                     int h = menu_at(e.x, e.y);
                     int act = h >= 0 && menu[h].enabled ? menu[h].action : 0;
-                    int was = dropdown;
                     nmenu = 0;
-                    dropdown = 0;
-                    if (act) {
+                    if (act)
                         action(act);
-                    } else if (h == -2) { /* daneben: anderes Menue der Menuezeile gleich oeffnen */
-                        const Hit *hh = hit_at(e.x, e.y);
-                        if (hh && hh->kind == H_MENU && hh->idx + 1 != was)
-                            open_dropdown(hh->idx, hh->x);
-                    }
                 } else if (e.type == EV_KEY && e.key == 0x1B) {
                     nmenu = 0;
-                    dropdown = 0;
                 }
             } else if (e.type == EV_KEY) {
                 key(e.key);

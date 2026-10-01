@@ -138,11 +138,12 @@ Desktop gestartet, laufen sie im Vollbild.
 
 Dateien (`files [ordner]`): links die Seitenleiste mit Schnellzugriff (Ordner der Platte), den Orten (Platte
 `/disk`, System `/`, angesteckte Datentraeger; aufklappbar) und unten dem belegten Speicher. Rechts Tabs (+, Strg+T,
-Strg+W, Strg+Tab), die Menuezeile Datei/Bearbeiten/Ansicht, Zurueck/Vor/Hoch, die Pfadleiste (jeder Teil anklickbar,
+Strg+W, Strg+Tab) und rechts die Fensterknoepfe (das Fenster hat keine Titelleiste), darunter Zurueck/Vor/Hoch, die Pfadleiste (jeder Teil anklickbar,
 dazu Aktualisieren) und die Suche (Strg+F; filtert den Ordner, im Schnellzugriff sucht sie auf der ganzen Platte).
 Ohne Ordner beginnt es im Schnellzugriff: grosse Ordner der Platte (mit Zeichen fuer Musik, Bilder, Downloads,
 Dokumente) und die zuletzt geaenderten Dateien. In einem Ordner die Liste mit Name, Geaendert, Groesse (Klick auf die
-Spalte sortiert), unten der freie Platz.
+Spalte sortiert; Rechtsklick auf freie Flaeche: Neuer Ordner, Neue Textdatei, Einfuegen, Sortieren, Aktualisieren),
+unten der freie Platz.
 Auswahl mit Klick, Strg+Klick, Shift+Klick, Pfeilen (mit Shift) und Strg+A; Strg+C/X/V kopieren, ausschneiden,
 einfuegen (ueber die Zwischenablage, auch zwischen zwei Fenstern), Strg+D duplizieren, Strg+N neuer Ordner, Entf
 loeschen (mit Rueckfrage, Ordner samt Inhalt). Rechtsklick oeffnet ein Kontextmenue (auch "Neue Textdatei"). Ziehen
