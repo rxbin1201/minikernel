@@ -117,12 +117,13 @@ Milchglas ueber einem berechneten Farbverlauf:
 - **System:** Netzwerk, Lautstaerke (Klick: stumm/zurueck, Mausrad: lauter/leiser) und ^ (Ueber MiniKernel, Neu
   starten, Ausschalten, Zur Konsole)
 
-Menues oeffnen sich nach oben ueber ihrem Knopf, Esc schliesst sie. Programme koennen ihr Fenster ohne Titelleiste
-oeffnen (`GFX_FRAMELESS`, z.B. Dateien): sie zeichnen dann selbst Knoepfe wie bei Windows (Minimieren, Maximieren,
-Schliessen) und bitten den Desktop mit `gfx_window_cmd` ums Verschieben (Ziehen an einer freien Flaeche, Doppelklick
-maximiert), Minimieren, Maximieren und Schliessen. Fenster haben runde Ecken, weiche Schatten und die
-drei Knoepfe (schliessen, minimieren, zoomen; Doppelklick auf die Titelleiste zoomt). Ab 1300 Pixel Hoehe wird alles um
-25 % groesser.
+Menues oeffnen sich nach oben ueber ihrem Knopf, Esc schliesst sie. Fenster haben runde Ecken, weiche Schatten und
+eine helle Titelleiste mit dem Titel links und rechts Minimieren, Maximieren/Wiederherstellen, Schliessen (wie bei
+Windows; Ziehen an der Leiste verschiebt, Doppelklick maximiert). Die Leiste zeichnet die Grafikbibliothek im Fenster
+selbst (`gfx.c`), die Programme merken davon nichts: ihr `gfx_screen` beginnt darunter. Programme mit eigener
+Kopfleiste oeffnen ihr Fenster mit `GFX_FRAMELESS` (z.B. Dateien mit seinen Tabs): sie zeichnen die Knoepfe dann selbst
+und bitten den Desktop mit `gfx_window_cmd` ums Verschieben, Minimieren, Maximieren und Schliessen. Ab 1300 Pixel Hoehe
+wird alles um 25 % groesser.
 
 Tastenkuerzel (linke Alt-Taste): Alt+Tab naechstes Fenster (mit Shift zurueck), Alt+W Fenster schliessen, Alt+Q
 Programm beenden, Alt+M minimieren, Alt+N neues Fenster, Alt+F zoomen, Alt+Pfeil links/rechts an die Bildschirmhaelfte

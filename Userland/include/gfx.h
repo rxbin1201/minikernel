@@ -116,7 +116,8 @@ int gfx_open(void);
 /* Wie gfx_open, unter dem Desktop aber ein Fenster mit w x h Pixeln Inhalt (0 = etwa 60 % des Bildschirms) */
 int gfx_open_window(int w, int h, const char *title);
 #define GFX_RESIZABLE 1 /* Fenster darf seine Groesse aendern (das Programm verarbeitet EV_RESIZE) */
-#define GFX_FRAMELESS 2 /* ohne Titelleiste des Desktops: das Programm zeichnet eigene Knoepfe (gfx_window_cmd) */
+#define GFX_FRAMELESS 2 /* ohne Titelleiste: das Programm zeichnet eine eigene Kopfleiste mit Knoepfen (gfx_window_cmd).
+                         * Sonst zeichnet die Bibliothek oben im Fenster Titel und Knoepfe, gfx_screen beginnt darunter */
 int gfx_open_window_ex(int w, int h, const char *title, int flags);
 /* Rahmenloses Fenster: den Desktop bitten (GFX_WIN_MOVE: bei gedrueckter Maustaste mit der Maus verschieben) */
 #define GFX_WIN_MOVE     1
