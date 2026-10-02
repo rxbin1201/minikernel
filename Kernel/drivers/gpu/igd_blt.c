@@ -403,6 +403,12 @@ static uint32_t kick(void)
  * fuer den Selbsttest des Zusammensetzens. 0 = ok, -1 = Blitter aus oder Fehler */
 int igd_blt_copy_gtt(uint32_t dst, uint32_t dpitch, uint32_t src, uint32_t spitch, int w, int h)
 {
+    return igd_blt_copy_gtt_xy(dst, dpitch, 0, 0, src, spitch, w, h);
+}
+
+/* Dasselbe mit Zielposition (dx, dy) in der Zielflaeche */
+int igd_blt_copy_gtt_xy(uint32_t dst, uint32_t dpitch, int dx, int dy, uint32_t src, uint32_t spitch, int w, int h)
+{
     if (!blt_on)
         return -1;
     if (!reserve(4 + 10 + 6)) {
@@ -413,7 +419,7 @@ int igd_blt_copy_gtt(uint32_t dst, uint32_t dpitch, uint32_t src, uint32_t spitc
     emit((hws_gtt + HWS_SCRATCH) | MI_FLUSH_DW_USE_GTT);
     emit(0);
     emit(0);
-    emit_copy(dst, dpitch, 0, 0, src, spitch, 0, 0, w, h);
+    emit_copy(dst, dpitch, dx, dy, src, spitch, 0, 0, w, h);
     uint32_t n = kick();
     if (wait_seqno(n, 200))
         return 0;

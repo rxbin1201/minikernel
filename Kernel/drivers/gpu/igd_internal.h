@@ -39,6 +39,7 @@ int  igd_blt_sync(void);          /* warten, bis alles kopiert ist (vor Schreibe
 /* 1 = in Auftrag gegeben (wait = 1: ganzes Bild, kehrt erst zurueck, wenn es fertig ist), 0 = die CPU muss kopieren */
 int  igd_blt_copy_user(uint32_t dst, const uint32_t *src, uint32_t pitch, int x, int y, int w, int h, int wait);
 int  igd_blt_copy_gtt(uint32_t dst, uint32_t dpitch, uint32_t src, uint32_t spitch, int w, int h); /* 0 = kopiert */
+int  igd_blt_copy_gtt_xy(uint32_t dst, uint32_t dpitch, int dx, int dy, uint32_t src, uint32_t spitch, int w, int h);
 void igd_blt_report(void);        /* igdtest info */
 
 /* Render-Engine fuer das Zusammensetzen (igd_rcs.c, benutzt von igd_comp.c). Flaechen als Bytes: w = Breite in Bytes,

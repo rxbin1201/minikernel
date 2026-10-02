@@ -2024,10 +2024,10 @@ static int test_3d(void)
     int rc = core_setup();
     if (rc)
         return rc;
-    /* Testflaeche 256 x 256, Tiefenpuffer dazu, Tiefenpuffer 512 x 512 fuer den sichtbaren Wuerfel */
+    /* Testflaeche 256 x 256, Tiefenpuffer dazu; fuer den sichtbaren Wuerfel Tiefenpuffer und Bild 512 x 512 */
     enum { TW = 256, TH = 256, TPAGES = TW * TH * 4 / 4096, DW = 512, DPAGES = DW * DW * 4 / 4096,
-           ALLP = 2 * TPAGES + DPAGES };
-    uint32_t base = core_base + 0x40, dbase = base + TPAGES, abase = base + 2 * TPAGES;
+           ALLP = 2 * TPAGES + 2 * DPAGES };
+    uint32_t base = core_base + 0x40, dbase = base + TPAGES, abase = base + 2 * TPAGES, cbase = abase + DPAGES;
     static uint64_t saved[ALLP];
     if ((rc = igd_ggtt_claim(base, ALLP, saved)) != 0)
         return rc;
@@ -2179,14 +2179,19 @@ static int test_3d(void)
         goto out_ring;
     }
 
-    /* 4. Sichtbar (nur an der Konsole): sich drehender Wuerfel 512 x 512 in der Mitte des Bildspeichers, 240 Bilder */
+    /* 4. Sichtbar (nur an der Konsole): sich drehender Wuerfel 512 x 512 in der Mitte des Bildspeichers, 240 Bilder.
+     *    Gezeichnet wird in ein eigenes Bild, das der Blitter nach dem Bildwechsel fertig auf den Bildschirm kopiert -
+     *    direkt im sichtbaren Bild sah man sonst manchmal den Hintergrund ohne Wuerfel (grauer Streifen) */
     if (!console_gfx_active() && igd_flip_ready && igd_scr_w >= DW + 64 && igd_scr_h >= DW + 64 && !(igd_scr_stride & 63)) {
         uint32_t x0 = ((igd_scr_w - DW) / 2) & ~15u, y0 = (igd_scr_h - DW) / 2;
-        uint32_t rt = igd_surf_a + y0 * igd_scr_stride + x0 * 4; /* Ausschnitt des Bildspeichers als Render-Target */
+        int via_blt = igd_blt_on();
+        uint32_t rt = via_blt ? cbase << 12 : igd_surf_a + y0 * igd_scr_stride + x0 * 4; /* sonst direkt (Ausschnitt) */
+        uint32_t rpitch = via_blt ? DW * 4 : igd_scr_stride;
         load_kernel(K3_PSCOL, (const uint32_t (*)[4])kbuf, asm_ps_color(kbuf, F_0_2, F_0_2, F_0_2, F_1_0));
         const uint32_t bg[3][4] = {{f32(DW), f32(DW), 0, 0}, {0, f32(DW), 0, 0}, {0, 0, 0, 0}};
-        Draw3d clear = {rt, DW, DW, igd_scr_stride, L3_XYUV, PRIM_RECTLIST, 3, K3_PSCOL, &bg[0][0], 0, 0};
-        Draw3d cube = {rt, DW, DW, igd_scr_stride, L3_XYZRGBA, PRIM_TRILIST, 36, K3_PSINT, &cv[0][0], abase << 12, DW * 4};
+        Draw3d clear = {rt, DW, DW, rpitch, L3_XYUV, PRIM_RECTLIST, 3, K3_PSCOL, &bg[0][0], 0, 0};
+        Draw3d cube = {rt, DW, DW, rpitch, L3_XYZRGBA, PRIM_TRILIST, 36, K3_PSINT, &cv[0][0], abase << 12, DW * 4};
+        int vbl = igd_vblank_ok();
         uint64_t t0 = time_us();
         for (int f = 0; f < 240 && rc == 0; f++) {
             for (uint32_t i = 0; i < DW * DW; i++)
@@ -2195,10 +2200,16 @@ static int test_3d(void)
             cube_tris(cv, f, f / 2 + 6, 420, DW / 2, DW / 2, &front);
             if (draw_3d("4. Hintergrund", &clear, 0, 0) != 0 || draw_3d("4. Wuerfel", &cube, 0, 0) != 0)
                 rc = -38;
-            thread_sleep_ms(10);
+            if (!vbl || !igd_wait_vblank(30))
+                thread_sleep_ms(10);
+            if (rc == 0 && via_blt &&
+                igd_blt_copy_gtt_xy(igd_surf_a, igd_scr_stride, (int)x0, (int)y0, rt, DW * 4, DW, DW) != 0)
+                rc = -39;
         }
         if (rc == 0)
-            kprintf("igd3d: 4. drehender Wuerfel: 240 Bilder in %lu ms\n", (unsigned long)((time_us() - t0) / 1000));
+            kprintf("igd3d: 4. drehender Wuerfel: 240 Bilder in %lu ms (%s, %s)\n",
+                    (unsigned long)((time_us() - t0) / 1000), via_blt ? "eigenes Bild, Blitter kopiert" : "direkt",
+                    vbl ? "nach dem Bildwechsel" : "ohne Bildwechsel-Interrupt");
         thread_sleep_ms(1000);
         console_repaint();
     } else {
