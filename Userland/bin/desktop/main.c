@@ -385,8 +385,12 @@ void _start(int argc, char **argv)
         net_tick();
         anim_tick();
         draw_all(); /* direkt nach dem Bildwechsel: was sich geaendert hat, steht bis zum naechsten Bild */
-        gfx_vsync();
+        /* Programme, die auf ein Bild warten (gfx_vsync), schon jetzt weiterzeichnen lassen - sonst kaeme ihr naechstes
+         * Bild erst nach dem uebernaechsten Bildwechsel an (die Runde liest Nachrichten gleich nach dem Warten) und sie
+         * liefen nur mit dem halben Takt. Vorher die GPU abwarten: sie liest dann nicht mehr aus ihren Puffern. */
+        gpu_wait();
         apps_frame();
+        gfx_vsync();
     }
     for (int i = 0; i < MAXW; i++)
         if (wins[i].used)

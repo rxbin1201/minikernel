@@ -63,6 +63,7 @@ void _start(int argc, char **argv)
     const float light[4] = {0.5f, 0.7f, 1, 0};
     s64 t0 = sys_time_us(), sec = t0;
     int frames = 0;
+    s64 draw_us = 0; /* Zeichnen (bis die GPU bzw. CPU fertig ist) je Sekunde */
     for (;;) {
         Event e;
         while (gfx_poll(&e))
@@ -72,6 +73,7 @@ void _start(int argc, char **argv)
             }
         float a = (float)(sys_time_us() - t0) * 60e-6f; /* 60 Grad pro Sekunde */
 
+        s64 d0 = sys_time_us();
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glMatrixMode(GL_MODELVIEW);
         glLoadIdentity();
@@ -93,16 +95,20 @@ void _start(int argc, char **argv)
             cube();
             glPopMatrix();
         }
+        glFinish();
+        draw_us += sys_time_us() - d0;
         gl_swap();
 
         frames++;
         s64 now = sys_time_us();
         if (now - sec >= 1000000) {
             char title[64];
-            snprintf(title, sizeof(title), "GL-Demo - %d Bilder/s (%s)", (int)((s64)frames * 1000000 / (now - sec)),
-                     gl_gpu() ? "GPU" : "CPU");
+            int us = frames ? (int)(draw_us / frames) : 0;
+            snprintf(title, sizeof(title), "GL-Demo - %d Bilder/s (%s, %d,%d ms je Bild)",
+                     (int)((s64)frames * 1000000 / (now - sec)), gl_gpu() ? "GPU" : "CPU", us / 1000, us % 1000 / 100);
             gfx_set_title(title);
             frames = 0;
+            draw_us = 0;
             sec = now;
         }
     }
