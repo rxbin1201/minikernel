@@ -6,6 +6,7 @@
 
 #define VECTOR_TIMER    0x40
 #define VECTOR_KEYBOARD 0x41
+#define VECTOR_WAKE     0x42 /* weckt eine CPU im Leerlauf: ein Thread ist bereit (sched.c) */
 #define VECTOR_XHCI     0x50 /* 0x50-0x53: xHCI-Controller (MSI-X/MSI) */
 #define VECTOR_IGD      0x58 /* Intel-Grafik: Bildwechsel (MSI) */
 #define VECTOR_NET      0x59 /* 0x59-0x5C: Netzwerkkarten (MSI) */
@@ -31,6 +32,7 @@ uint32_t apic_id(void);
 void apic_ap_init(void);
 void apic_send_init(uint32_t apic_id);
 void apic_send_startup(uint32_t apic_id, uint64_t page);
+void apic_send_wake(uint32_t apic_id);     /* IPI VECTOR_WAKE */
 
 uint64_t apic_ticks(void);                 /* Ticks seit apic_init (je 1/APIC_TIMER_HZ s) */
 uint64_t apic_timer_ticks_per_ms(void);    /* Ergebnis der Kalibrierung */

@@ -229,6 +229,13 @@ void apic_send_startup(uint32_t apic_id, uint64_t page)
     send_ipi(apic_id, 0x00004600 | (uint32_t)(page >> 12)); /* STARTUP: die CPU beginnt bei page (unter 1 MiB) */
 }
 
+void apic_send_wake(uint32_t apic_id)
+{
+    uint64_t f = irq_save(); /* ICR-Hoch und -Tief gehoeren zusammen */
+    send_ipi(apic_id, VECTOR_WAKE); /* Fixed, physisch, Flanke */
+    irq_restore(f);
+}
+
 void apic_eoi(void)
 {
     if (lapic || x2apic)

@@ -5,6 +5,8 @@
 #include "core/process.h"
 #include "lib/string.h"
 #include "core/tty.h"
+#include "core/sched.h"
+#include "arch/x86_64/apic.h"
 
 #define PIPE_SIZE 4096
 
@@ -12,6 +14,7 @@ typedef struct Pipe {
     uint8_t  buf[PIPE_SIZE];
     uint32_t head, tail, count;
     int      readers, writers; /* Anzahl der FdObj (nicht der Deskriptoren) an den beiden Enden */
+    Event    data;             /* neue Daten oder kein Schreiber mehr: weckt einen wartenden Leser sofort */
 } Pipe;
 
 /* ---------- Anlegen / Zaehlen ---------- */
@@ -102,6 +105,8 @@ void fdobj_unref(FdObj *o)
         else
             p->writers--;
         int dead = p->readers == 0 && p->writers == 0;
+        if (!dead && o->kind == FD_PIPE_W)
+            event_signal(&p->data); /* der Leser erfaehrt das Ende ohne Verzoegerung */
         irq_restore(f);
         if (dead)
             kfree(p);
@@ -110,6 +115,17 @@ void fdobj_unref(FdObj *o)
 }
 
 /* ---------- Pipe ---------- */
+
+/* Auf Daten warten, hoechstens ms (in kurzen Stuecken, damit Ctrl-C/kill durchkommt). Frueher in Timer-Ticks: ein
+ * Leser wachte bis zu 10 ms nach den Daten auf - zu spaet fuer Fensterprogramme, die im Takt des Desktops zeichnen. */
+static int pipe_wait(Pipe *p, uint64_t ms)
+{
+    Process *pr = process_current();
+    if (pr && process_killed(pr))
+        return ERR_INTR;
+    event_wait(&p->data, ms > 10 ? 10 : ms);
+    return pr && process_killed(pr) ? ERR_INTR : 0;
+}
 
 static int64_t pipe_read(Pipe *p, uint8_t *out, uint64_t len)
 {
@@ -129,7 +145,7 @@ static int64_t pipe_read(Pipe *p, uint8_t *out, uint64_t len)
         irq_restore(f);
         if (eof)
             return 0;
-        if (process_wait_tick() != 0)
+        if (pipe_wait(p, 10) != 0)
             return ERR_INTR;
     }
 }
@@ -150,6 +166,7 @@ static int64_t pipe_write(Pipe *p, const uint8_t *in, uint64_t len)
         }
         int full = done < len;
         irq_restore(f);
+        event_signal(&p->data);
         if (full && process_wait_tick() != 0)
             return done ? (int64_t)done : ERR_INTR;
     }
@@ -209,6 +226,22 @@ int64_t fdobj_available(FdObj *o)
     uint64_t f = irq_save();
     int64_t r = o->pipe->count ? (int64_t)o->pipe->count : (o->pipe->writers == 0 ? -1 : 0);
     irq_restore(f);
+    return r;
+}
+
+int64_t fdobj_wait(FdObj *o, uint64_t ms)
+{
+    int64_t r = fdobj_available(o);
+    if (o->kind != FD_PIPE_R || r != 0 || !ms)
+        return r;
+    uint64_t end = time_ms() + ms;
+    while ((r = fdobj_available(o)) == 0) {
+        uint64_t now = time_ms();
+        if (now >= end)
+            break;
+        if (pipe_wait(o->pipe, end - now) != 0)
+            return ERR_INTR;
+    }
     return r;
 }
 

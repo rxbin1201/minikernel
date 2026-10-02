@@ -996,7 +996,10 @@ int gfx_wait(Event *e, int timeout_ms)
             return 1;
         if (timeout_ms >= 0 && (sys_ticks() - start) * 10 >= timeout_ms)
             return 0;
-        sys_sleep_ms(10);
+        if (gfx_win && !gfx_win_dead)
+            sys_fdwait(gfx_fd_in, 10); /* Eingaben kommen ueber die Pipe des Desktops: sofort weiter */
+        else
+            sys_sleep_ms(10);
     }
 }
 
@@ -1193,7 +1196,7 @@ int gfx_vsync(void)
             gfx_win_collect();
             if (gfx_win_frame)
                 return 1;
-            sys_sleep_ms(1);
+            sys_fdwait(gfx_fd_in, 10); /* wacht auf, sobald der Desktop schreibt (sys_sleep_ms schlaeft ganze 10-ms-Ticks) */
         }
         return 0;
     }
