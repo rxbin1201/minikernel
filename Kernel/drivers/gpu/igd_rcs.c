@@ -1383,8 +1383,9 @@ out:
  *    des Rasterizers).
  *  - Mit Vertex-Shader (SIMD8): der Wuerfel steht unveraendert im Vertex-Buffer (Ecke, Farbe, Normale); der Shader
  *    rechnet Ecke mal 4x4-Matrix (Drehung, Verschiebung, Perspektive - durch w teilt danach die Hardware) und die
- *    Helligkeit aus der gedrehten Normale. Die CPU rechnet je Bild nur die Matrix. Auf dem Test-PC hingen die
- *    VS-Threads zuerst; igdtest 3d probiert dafuer der Reihe nach Korrekturen aus dem Linux-Treiber (vs_wa_*).
+ *    Helligkeit aus der gedrehten Normale. Die CPU rechnet je Bild nur die Matrix. (Die VS-Threads hingen lange: das
+ *    NoMask-Bit lag an der Stelle von Gen7, siehe EU_NOMASK. Haengt der VS doch, probiert igdtest 3d der Reihe nach
+ *    Korrekturen aus dem Linux-Treiber, vs_wa_*, und schreibt eine Marke.)
  * Clipper durchlassen, Rasterizer ohne Culling und ohne Viewport-Umrechnung. Die Statistikzaehler der Pipeline zeigen,
  * wie weit die GPU gekommen ist. Gleitkommawerte stehen als Bitmuster da (der Kernel rechnet ohne FPU). */
 
@@ -1425,7 +1426,10 @@ out:
 #define K3_VS     0x800
 #define F_0_35    0x3EB33333u
 #define F_0_65    0x3F266666u
-#define EU_NOMASK (1u << 9)                    /* Befehl fuer alle Kanaele, unabhaengig von der Ausfuehrungsmaske */
+/* Befehl fuer alle Kanaele, unabhaengig von der Ausfuehrungsmaske: ab Gen8 Bit 34 (zweites Dword, Bit 2). Bit 9 im
+ * ersten Dword ist dort "NoDDClr" - damit gibt der Befehl sein Zielregister nie frei, und wer es liest (der send),
+ * wartet ewig: daran hingen alle frueheren Versuche mit dem Vertex-Shader. */
+#define EU_NOMASK (1u << 2)
 #define EU_SAT    (1u << 31)                   /* Ergebnis auf 0-1 begrenzen */
 #define VS_MARK   0x5653F00Du                  /* Marke, die der Vertex-Shader zur Fehlersuche schreibt */
 
@@ -1499,7 +1503,7 @@ static int vs_out_begin(uint32_t (*k)[4], int n)
 {
     for (int h = 112; h <= 121; h += 9) {
         eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, h, 0), eu_r(EU_UD, 1, 0, 4, 3, 1), eu_none());
-        k[n - 1][0] |= EU_NOMASK; /* alle 8 Handles */
+        k[n - 1][1] |= EU_NOMASK; /* alle 8 Handles */
     }
     for (int i = 0; i < 4; i++)
         eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 113 + i, 0), eu_imm(EU_UD, 0), eu_none());
@@ -1520,14 +1524,14 @@ static int asm_vs_pass(uint32_t (*k)[4], int marker)
     int n = 0;
     if (marker) {
         eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 30, 0), eu_r(EU_UD, 0, 0, 4, 3, 1), eu_none());
-        k[n - 1][0] |= EU_NOMASK;
+        k[n - 1][1] |= EU_NOMASK;
         static const uint32_t hdr[3] = {0, 0, 31}; /* x, y, Block 32 Bytes x 1 Zeile */
         for (int i = 0; i < 3; i++) {
             eu_inst(k[n++], EU_MOV, 0, 0, eu_d(EU_UD, 30, 4 * i), eu_imm(EU_UD, hdr[i]), eu_none());
-            k[n - 1][0] |= EU_NOMASK;
+            k[n - 1][1] |= EU_NOMASK;
         }
         eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 31, 0), eu_imm(EU_UD, VS_MARK), eu_none());
-        k[n - 1][0] |= EU_NOMASK;
+        k[n - 1][1] |= EU_NOMASK;
         eu_send(k[n++], 3, SFID_DP1, eu_null(), 30, mbw_desc(2, 0));
     }
     n = vs_out_begin(k, n);
@@ -2282,8 +2286,13 @@ static int test_3d(void)
                 mark[i] = 0;
             igd_clflush((uint64_t)mark, 32);
             vs_marker = mk;
+            uint32_t l3m = igd_rd(L3_MOCS(0));
+            if (mk) /* Marke am L3 vorbei: bei einem Haenger ginge sie sonst mit dem Zuruecksetzen verloren */
+                igd_wr(L3_MOCS(0), (l3m & 0xFFFF0000u) | L3_UC);
             load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_pass(kbuf, mk));
             int r = draw_3d(mk ? "2b. Vertex-Shader mit Marke" : "2b. Vertex-Shader", &t2, 0, stat);
+            if (mk)
+                igd_wr(L3_MOCS(0), l3m);
             vs_marker = 0;
             igd_clflush(mem, TPAGES * 4096);
             igd_clflush((uint64_t)mark, 32);

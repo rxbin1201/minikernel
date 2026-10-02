@@ -103,8 +103,10 @@ In der Shell: `burn 5000 & burn 5000 & cpus` zeigt zwei ausgelastete CPUs.
   Pixel-Shader) zeigt, wie weit die GPU kam. Danach ein Dreieck, dessen Pixel-Shader die Farbe der Ecken interpoliert
   (`pln`); die CPU prueft Flaeche, Mitte und Ecken (Eckpunkte von der CPU umgerechnet: Festkomma, Sinus aus einer
   Tabelle, in float-Bitmuster umgerechnet - der Kernel hat keine FPU). Danach dasselbe Dreieck durch einen
-  Vertex-Shader (SIMD8, Ausgabe per URB-Write), der nur durchreicht. Auf dem Test-PC hingen die VS-Threads zuerst;
-  der Test probiert dann der Reihe nach Korrekturen, die Linux (i915) fuer Skylake bis Coffee Lake setzt
+  Vertex-Shader (SIMD8, Ausgabe per URB-Write), der nur durchreicht. Die VS-Threads hingen lange: der Assembler
+  setzte "NoMask" noch an die Stelle von Gen7 (Bit 9), ab Gen8 ist das "NoDDClr" - der Befehl gibt sein Zielregister
+  nie frei, der folgende `send` wartet ewig (NoMask ist ab Gen8 Bit 34). Haengt der VS trotzdem, probiert der Test
+  der Reihe nach Korrekturen, die Linux (i915) fuer Skylake bis Coffee Lake setzt
   (WaEnableGapsTsvCreditFix, Clock-Gating, ROW_CHICKEN, FF_THREAD_MODE, URB-Aufteilung wie Mesa), und beim ersten
   Haenger einen Shader, der vorher eine Marke in den Speicher schreibt (laeuft der Thread ueberhaupt?).
   Zuletzt ein Wuerfel mit Tiefentest: Tiefenpuffer D32_FLOAT (Y-Kacheln, von der CPU mit 1.0 gefuellt), Test
