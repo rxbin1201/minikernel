@@ -1375,9 +1375,12 @@ out:
  * Aufgebaut wie IGTs rendercopy fuer Gen9. Zwei Arten zu zeichnen:
  *  - Rechteck (RECTLIST) ohne Vertex-Shader: die Eckpunkte stehen schon in Bildschirmkoordinaten im Vertex-Buffer
  *    (x, y, u, v), der Pixel-Shader schreibt eine feste Farbe.
- *  - Dreiecke (TRILIST) mit Vertex-Shader (SIMD8): Eckpunkte x, y, r, g, b, a; der Vertex-Shader rechnet die Position
- *    mit einer 2x3-Matrix in Bildschirmkoordinaten um und reicht die Farbe weiter, der Pixel-Shader interpoliert sie
- *    (pln aus den Ebenen-Koeffizienten des Rasterizers).
+ *  - Dreiecke (TRILIST) ohne Vertex-Shader: Eckpunkte x, y, r, g, b, a schon in Bildschirmkoordinaten (die CPU rechnet
+ *    Drehung und Verschiebung in Festkomma), der Pixel-Shader interpoliert die Farbe (pln aus den Ebenen-Koeffizienten
+ *    des Rasterizers).
+ *  - Dasselbe mit Vertex-Shader (SIMD8, Position mal 2x3-Matrix): auf dem Test-PC werden seine Threads nie fertig,
+ *    auch mit einem Shader, der sich nur beendet - die Einrichtung der VS-Stufe stimmt noch nicht. Der Weg bleibt fuer
+ *    die spaetere Fehlersuche (VS3D_PROBE).
  * Clipper durchlassen, Rasterizer ohne Culling und ohne Viewport-Umrechnung. Die Statistikzaehler der Pipeline zeigen,
  * wie weit die GPU gekommen ist. Gleitkommawerte stehen als Bitmuster da (der Kernel rechnet ohne FPU). */
 
@@ -1484,7 +1487,7 @@ static int asm_ps_interp(uint32_t (*k)[4])
 /* Fuer die Fehlersuche (igdtest 3d probiert sie der Reihe nach): 0 = nur Thread-Ende (wie bei GPGPU), 1 = eine
  * URB-Nachricht (Kopf und Position aus der Eingabe, ohne Rechnung) mit Thread-Ende, 2 = dazu die Farbe in einer
  * zweiten Nachricht, 3 = der eigentliche Shader (asm_vs_affine) */
-static int asm_vs_variant(uint32_t (*k)[4], int v)
+__attribute__((unused)) static int asm_vs_variant(uint32_t (*k)[4], int v)
 {
     int n = 0;
     if (v == 0) {
@@ -1511,7 +1514,7 @@ static int asm_vs_variant(uint32_t (*k)[4], int v)
     return n;
 }
 
-static int asm_vs_affine(uint32_t (*k)[4], const uint32_t m[6])
+__attribute__((unused)) static int asm_vs_affine(uint32_t (*k)[4], const uint32_t m[6])
 {
     int n = 0;
     for (int h = 112; h <= 121; h += 9) {
@@ -1548,9 +1551,10 @@ static int asm_vs_affine(uint32_t (*k)[4], const uint32_t m[6])
 #define S3_RT      0x200   /* Surface State des Render-Targets */
 #define S3_VB      0x300   /* Vertex-Buffer */
 
+enum { L3_XYUV, L3_VS_XYRGBA, L3_XYRGBA }; /* Eckpunkte: x, y, u, v (ohne VS) / x, y, r, g, b, a mit / ohne VS */
 typedef struct {
     uint32_t        rt_gtt, w, h, pitch; /* Render-Target (Pixel, Zeilenlaenge in Bytes) */
-    int             vs;                  /* 1: Vertex-Shader, Eckpunkte x, y, r, g, b, a; 0: aus, x, y, u, v */
+    int             vs;                  /* L3_* */
     uint32_t        prim, nvert;
     uint32_t        ps;                  /* Pixel-Shader im Kernelbereich */
     const uint32_t *verts;               /* float-Bitmuster, 6 bzw. 4 je Eckpunkt */
@@ -1572,7 +1576,7 @@ static uint32_t batch_3d(const Draw3d *d)
     rt[3] = d->pitch - 1;
     rt[7] = (4u << 25) | (5u << 22) | (6u << 19) | (7u << 16);
     rt[8] = d->rt_gtt;
-    uint32_t vsize = d->vs ? 24 : 16;
+    uint32_t vsize = d->vs == L3_XYUV ? 16 : 24;
     memcpy(st + S3_VB, d->verts, (uint64_t)d->nvert * vsize);
 
     uint32_t *b = core_ptr(C_BATCH), k = 0, base = core_gtt(C_STATE);
@@ -1647,7 +1651,7 @@ static uint32_t batch_3d(const Draw3d *d)
         b[k++] = 0;
     }
     b[k++] = S3D(0x10) | 7;          /* VS */
-    if (d->vs) { /* Kernel, Eingaben ab r2 (1 x 256 Bit: Position und Farbe), 64 Threads, Statistik, SIMD8, an */
+    if (d->vs == L3_VS_XYRGBA) { /* Kernel, Eingaben ab r2 (1 x 256 Bit: Position und Farbe), 64 Threads, Statistik, SIMD8, an */
         b[k++] = K3_VS;
         b[k++] = 0;
         b[k++] = 0;
@@ -1747,22 +1751,28 @@ static uint32_t batch_3d(const Draw3d *d)
     b[k++] = 0;
     b[k++] = d->nvert * vsize;
     uint32_t nelem;
-    if (d->vs) { /* Eingaben des Vertex-Shaders: Position x, y, 0, 1 und Farbe r, g, b, a */
+    if (d->vs == L3_VS_XYRGBA) { /* Eingaben des Vertex-Shaders: Position x, y, 0, 1 und Farbe r, g, b, a */
         nelem = 2;
         b[k++] = S3D(0x09) | (2 * nelem - 1);
         b[k++] = (1u << 25) | (SURF_RG32_FLOAT << 16) | 0;
         b[k++] = (VFC_SRC << 28) | (VFC_SRC << 24) | (VFC_0 << 20) | (VFC_1F << 16);
         b[k++] = (1u << 25) | (SURF_RGBA32_FLOAT << 16) | 8;
         b[k++] = (VFC_SRC << 28) | (VFC_SRC << 24) | (VFC_SRC << 20) | (VFC_SRC << 16);
-    } else { /* ohne Vertex-Shader ist das schon das VUE: 4 x 0 (Kopf), Position x, y, 0, 1, Attribut u, v, 0, 1 */
+    } else { /* ohne Vertex-Shader ist das schon das VUE: 4 x 0 (Kopf), Position x, y, 0, 1, Attribut (u, v, 0, 1
+              * bzw. r, g, b, a) */
         nelem = 3;
         b[k++] = S3D(0x09) | (2 * nelem - 1);
         b[k++] = (1u << 25) | (SURF_RGBA32_FLOAT << 16) | 0;
         b[k++] = (VFC_0 << 28) | (VFC_0 << 24) | (VFC_0 << 20) | (VFC_0 << 16);
         b[k++] = (1u << 25) | (SURF_RG32_FLOAT << 16) | 0;
         b[k++] = (VFC_SRC << 28) | (VFC_SRC << 24) | (VFC_0 << 20) | (VFC_1F << 16);
-        b[k++] = (1u << 25) | (SURF_RG32_FLOAT << 16) | 8;
-        b[k++] = (VFC_SRC << 28) | (VFC_SRC << 24) | (VFC_0 << 20) | (VFC_1F << 16);
+        if (d->vs == L3_XYUV) {
+            b[k++] = (1u << 25) | (SURF_RG32_FLOAT << 16) | 8;
+            b[k++] = (VFC_SRC << 28) | (VFC_SRC << 24) | (VFC_0 << 20) | (VFC_1F << 16);
+        } else {
+            b[k++] = (1u << 25) | (SURF_RGBA32_FLOAT << 16) | 8;
+            b[k++] = (VFC_SRC << 28) | (VFC_SRC << 24) | (VFC_SRC << 20) | (VFC_SRC << 16);
+        }
     }
     for (uint32_t e = 0; e < nelem; e++) { /* VF_INSTANCING: nicht instanziert */
         b[k++] = S3D(0x49) | 1;
@@ -1860,7 +1870,7 @@ static void load_kernel(uint32_t off, const uint32_t (*k)[4], int n)
 }
 
 /* Drehung um a (0-63 = 0-360 Grad), Massstab s (Pixel je Einheit), Mittelpunkt (cx, cy): 2x3-Matrix */
-static void rot_matrix(uint32_t m[6], int a, int32_t s, int32_t cx, int32_t cy)
+__attribute__((unused)) static void rot_matrix(uint32_t m[6], int a, int32_t s, int32_t cx, int32_t cy)
 {
     int32_t c = sin64[(a + 16) & 63], sn = sin64[a & 63];
     m[0] = f32q((int32_t)(((int64_t)c * s) >> 0));      /* s cos (Q16: c ist Q16, s ganzzahlig) */
@@ -1871,8 +1881,24 @@ static void rot_matrix(uint32_t m[6], int a, int32_t s, int32_t cx, int32_t cy)
     m[5] = f32q(cy << 16);
 }
 
+/* Dasselbe Dreieck schon auf der CPU gedreht (a: 0-63 = 0-360 Grad), mit Massstab s und Mittelpunkt (cx, cy) in
+ * Bildschirmkoordinaten - alles in Festkomma (Q16), der Kernel hat keine FPU */
+static void tri_screen(uint32_t v[3][6], int a, int32_t s, int32_t cx, int32_t cy)
+{
+    static const int32_t pos[3][2] = {{0, -65536}, {56756, 32768}, {-56756, 32768}}; /* Einheitskreis, Spitze oben */
+    int64_t c = sin64[(a + 16) & 63], sn = sin64[a & 63];
+    for (int i = 0; i < 3; i++) {
+        int64_t x = pos[i][0], y = pos[i][1];
+        v[i][0] = f32q((int32_t)(((int64_t)cx << 16) + (((c * x - sn * y) * s) >> 16)));
+        v[i][1] = f32q((int32_t)(((int64_t)cy << 16) + (((sn * x + c * y) * s) >> 16)));
+        for (int k = 0; k < 3; k++)
+            v[i][2 + k] = k == i ? F_1_0 : 0;
+        v[i][5] = F_1_0;
+    }
+}
+
 /* Dreieck mit roter, gruener, blauer Ecke um den Ursprung (Einheitskreis): Spitze oben */
-static void tri_verts(uint32_t v[3][6])
+__attribute__((unused)) static void tri_verts(uint32_t v[3][6])
 {
     static const uint32_t pos[3][2] = {{0, 0xBF800000u}, {0x3F5DB3D7u, 0x3F000000u}, {0xBF5DB3D7u, 0x3F000000u}};
     for (int i = 0; i < 3; i++) {
@@ -1933,7 +1959,7 @@ static int test_3d(void)
     const uint32_t X0 = 16, Y0 = 8, X1 = 176, Y1 = 40, want = 0xFFFF3399u;
     load_kernel(K3_PSCOL, (const uint32_t (*)[4])kbuf, asm_ps_color(kbuf, F_1_0, F_0_2, F_0_6, F_1_0));
     const uint32_t rv[3][4] = {{f32(X1), f32(Y1), F_1_0, F_1_0}, {f32(X0), f32(Y1), 0, F_1_0}, {f32(X0), f32(Y0), 0, 0}};
-    Draw3d r1 = {base << 12, TW, TH, TW * 4, 0, PRIM_RECTLIST, 3, K3_PSCOL, &rv[0][0]};
+    Draw3d r1 = {base << 12, TW, TH, TW * 4, L3_XYUV, PRIM_RECTLIST, 3, K3_PSCOL, &rv[0][0]};
     if (draw_3d("1. Rechteck ueber die 3D-Pipeline", &r1, 1, stat) != 0) {
         rc = -30;
         goto out_ring;
@@ -1949,15 +1975,16 @@ static int test_3d(void)
         goto out_ring;
     }
 
-    /* 2. Dreieck mit Vertex-Shader: Ecken rot (oben), gruen (rechts unten), blau (links unten), Massstab 100,
+    /* 2. Dreieck mit Farbverlauf: Ecken rot (oben), gruen (rechts unten), blau (links unten), Massstab 100,
      *    Mittelpunkt (128, 128) -> Ecken (128, 28), (214.6, 178), (41.4, 178), Flaeche etwa 12990 Pixel */
     for (uint32_t i = 0; i < TW * TH; i++)
         px[i] = 0x11111111u;
     igd_clflush(mem, TPAGES * 4096);
     uint32_t m[6], tv[3][6];
+#ifdef VS3D_PROBE
     rot_matrix(m, 0, 100, 128, 128);
     tri_verts(tv);
-    Draw3d t1 = {base << 12, TW, TH, TW * 4, 1, PRIM_TRILIST, 3, K3_PSINT, &tv[0][0]};
+    Draw3d t1 = {base << 12, TW, TH, TW * 4, L3_VS_XYRGBA, PRIM_TRILIST, 3, K3_PSINT, &tv[0][0]};
     /* Varianten des Vertex-Shaders der Reihe nach (Fehlersuche): welcher Baustein klemmt? */
     static const char *const vname[4] = {"nur Thread-Ende", "eine URB-Nachricht", "zwei URB-Nachrichten",
                                          "mit Matrix (eigentlicher Shader)"};
@@ -1983,6 +2010,16 @@ static int test_3d(void)
         rc = -33;
         goto out_ring;
     }
+#else
+    (void)m;
+    tri_screen(tv, 0, 100, 128, 128);
+    Draw3d t1 = {base << 12, TW, TH, TW * 4, L3_XYRGBA, PRIM_TRILIST, 3, K3_PSINT, &tv[0][0]};
+    if (draw_3d("2. Dreieck mit Farbverlauf", &t1, 1, stat) != 0) {
+        rc = -33;
+        goto out_ring;
+    }
+    igd_clflush(mem, TPAGES * 4096);
+#endif
     kprintf("igd3d: Pipeline-Statistik:");
     for (int i = 0; i < NSTAT3D; i++)
         kprintf(" %s %lu%s", stat3d[i].name, (unsigned long)stat[i], i + 1 < NSTAT3D ? "," : "\n");
@@ -2008,12 +2045,11 @@ static int test_3d(void)
         load_kernel(K3_PSCOL, (const uint32_t (*)[4])kbuf, asm_ps_color(kbuf, F_0_2, F_0_2, F_0_2, F_1_0));
         const uint32_t bx0 = cx - r - 8, by0 = cy - r - 8, bx1 = cx + r + 8, by1 = cy + r + 8;
         const uint32_t bg[3][4] = {{f32(bx1), f32(by1), 0, 0}, {f32(bx0), f32(by1), 0, 0}, {f32(bx0), f32(by0), 0, 0}};
-        Draw3d clear = {igd_surf_a, igd_scr_w, igd_scr_h, igd_scr_stride, 0, PRIM_RECTLIST, 3, K3_PSCOL, &bg[0][0]};
-        Draw3d tri = {igd_surf_a, igd_scr_w, igd_scr_h, igd_scr_stride, 1, PRIM_TRILIST, 3, K3_PSINT, &tv[0][0]};
+        Draw3d clear = {igd_surf_a, igd_scr_w, igd_scr_h, igd_scr_stride, L3_XYUV, PRIM_RECTLIST, 3, K3_PSCOL, &bg[0][0]};
+        Draw3d tri = {igd_surf_a, igd_scr_w, igd_scr_h, igd_scr_stride, L3_XYRGBA, PRIM_TRILIST, 3, K3_PSINT, &tv[0][0]};
         uint64_t t0 = time_us();
         for (int f = 0; f < 128 && rc == 0; f++) {
-            rot_matrix(m, f, (int32_t)r, (int32_t)cx, (int32_t)cy);
-            load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_affine(kbuf, m));
+            tri_screen(tv, f, (int32_t)r, (int32_t)cx, (int32_t)cy);
             if (draw_3d("3. Hintergrund", &clear, 0, 0) != 0 || draw_3d("3. Dreieck", &tri, 0, 0) != 0)
                 rc = -35;
             thread_sleep_ms(16);
