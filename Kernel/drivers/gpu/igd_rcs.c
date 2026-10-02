@@ -1401,6 +1401,7 @@ out:
 /* URB-Write SIMD8 (Typ 7) mit Kopf (Handles). Hoechstens 8 Datenregister (2 vec4) je Nachricht, wie bei Mesa:
  * erst Kopf und Position (Versatz 0), dann die Farbe (Versatz 2 vec4) mit Thread-Ende */
 #define URB_WRITE_HDRPOS     ((9u << 25) | (1u << 19) | (0u << 4) | 7u)
+#define URB_WRITE_HDRPOS_EOT (0x80000000u | URB_WRITE_HDRPOS)
 #define URB_WRITE_COLOR_EOT  (0x80000000u | (5u << 25) | (1u << 19) | (2u << 4) | 7u)
 #define VFC_SRC 1u
 #define VFC_0   2u
@@ -1480,6 +1481,36 @@ static int asm_ps_interp(uint32_t (*k)[4])
  * Komponente fuer 8 Eckpunkte). x' = m0 x + m1 y + m2, y' = m3 x + m4 y + m5 (Bildschirmkoordinaten), z 0, w 1.
  * Ausgabe per URB-Write an die Handles aus r1: r112 Kopf der Nachricht, r113-r116 VUE-Kopf (4 x 0), r117-r120
  * Position; zweite Nachricht r121 Kopf, r122-r125 Farbe, Thread-Ende */
+/* Fuer die Fehlersuche (igdtest 3d probiert sie der Reihe nach): 0 = nur Thread-Ende (wie bei GPGPU), 1 = eine
+ * URB-Nachricht (Kopf und Position aus der Eingabe, ohne Rechnung) mit Thread-Ende, 2 = dazu die Farbe in einer
+ * zweiten Nachricht, 3 = der eigentliche Shader (asm_vs_affine) */
+static int asm_vs_variant(uint32_t (*k)[4], int v)
+{
+    int n = 0;
+    if (v == 0) {
+        eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 112, 0), eu_r(EU_UD, 0, 0, 4, 3, 1), eu_none());
+        eu_send(k[n++], 3, SFID_SPAWNER, eu_null(), 112, EOT_DESC);
+        return n;
+    }
+    for (int h = 112; h <= (v >= 2 ? 121 : 112); h += 9) {
+        eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, h, 0), eu_r(EU_UD, 1, 0, 4, 3, 1), eu_none());
+        k[n - 1][0] |= 1u << 9;
+    }
+    for (int i = 0; i < 4; i++)
+        eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 113 + i, 0), eu_imm(EU_UD, 0), eu_none());
+    for (int i = 0; i < 4; i++)
+        eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 117 + i, 0), eu_r(EU_UD, 2 + i, 0, 4, 3, 1), eu_none());
+    if (v == 1) {
+        eu_send(k[n++], 3, SFID_URB, eu_null(), 112, URB_WRITE_HDRPOS_EOT);
+        return n;
+    }
+    for (int i = 0; i < 4; i++)
+        eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 122 + i, 0), eu_r(EU_UD, 6 + i, 0, 4, 3, 1), eu_none());
+    eu_send(k[n++], 3, SFID_URB, eu_null(), 112, URB_WRITE_HDRPOS);
+    eu_send(k[n++], 3, SFID_URB, eu_null(), 121, URB_WRITE_COLOR_EOT);
+    return n;
+}
+
 static int asm_vs_affine(uint32_t (*k)[4], const uint32_t m[6])
 {
     int n = 0;
@@ -1807,7 +1838,9 @@ static int draw_3d(const char *what, const Draw3d *d, int log, uint64_t *stat)
         if (stat)
             log = 1;
         ring_stop();
-        engine_reset();
+        if (ring_start()) /* zuruecksetzen (in ring_start) und weitermachen: der naechste Versuch braucht den Ring */
+            for (int i = 0; i < 62; i++)
+                igd_wr(GFX_MOCS(i), 0x09);
     }
     if (log && stat) {
         kprintf("igd3d: Pipeline-Statistik:");
@@ -1924,13 +1957,35 @@ static int test_3d(void)
     uint32_t m[6], tv[3][6];
     rot_matrix(m, 0, 100, 128, 128);
     tri_verts(tv);
-    load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_affine(kbuf, m));
     Draw3d t1 = {base << 12, TW, TH, TW * 4, 1, PRIM_TRILIST, 3, K3_PSINT, &tv[0][0]};
-    if (draw_3d("2. Dreieck mit Vertex-Shader", &t1, 1, stat) != 0) {
+    /* Varianten des Vertex-Shaders der Reihe nach (Fehlersuche): welcher Baustein klemmt? */
+    static const char *const vname[4] = {"nur Thread-Ende", "eine URB-Nachricht", "zwei URB-Nachrichten",
+                                         "mit Matrix (eigentlicher Shader)"};
+    int vs_ok = 0;
+    for (int v = 0; v < 4; v++) {
+        for (uint32_t i = 0; i < TW * TH; i++)
+            px[i] = 0x11111111u;
+        igd_clflush(mem, TPAGES * 4096);
+        int nk = v < 3 ? asm_vs_variant(kbuf, v) : asm_vs_affine(kbuf, m);
+        load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, nk);
+        int r = draw_3d(vname[v], &t1, 0, stat);
+        igd_clflush(mem, TPAGES * 4096);
+        uint32_t wr = 0;
+        for (uint32_t i = 0; i < TW * TH; i++)
+            wr += px[i] != 0x11111111u;
+        kprintf("igd3d: VS-Variante %d (%s): %s; Vertex-Shader %lu, Clipper ein %lu, Pixel-Shader %lu, %u Pixel\n", v,
+                vname[v], r == 0 ? "fertig" : "HAENGT", (unsigned long)stat[2], (unsigned long)stat[3],
+                (unsigned long)stat[5], wr);
+        if (v == 3)
+            vs_ok = r == 0;
+    }
+    if (!vs_ok) {
         rc = -33;
         goto out_ring;
     }
-    igd_clflush(mem, TPAGES * 4096);
+    kprintf("igd3d: Pipeline-Statistik:");
+    for (int i = 0; i < NSTAT3D; i++)
+        kprintf(" %s %lu%s", stat3d[i].name, (unsigned long)stat[i], i + 1 < NSTAT3D ? "," : "\n");
     uint32_t written = 0;
     for (uint32_t i = 0; i < TW * TH; i++)
         written += px[i] != 0x11111111u;
