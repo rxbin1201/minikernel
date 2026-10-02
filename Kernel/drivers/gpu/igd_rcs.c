@@ -1384,8 +1384,9 @@ out:
  *  - Mit Vertex-Shader (SIMD8): der Wuerfel steht unveraendert im Vertex-Buffer (Ecke, Farbe, Normale); der Shader
  *    rechnet Ecke mal 4x4-Matrix (Drehung, Verschiebung, Perspektive - durch w teilt danach die Hardware) und die
  *    Helligkeit aus der gedrehten Normale. Die CPU rechnet je Bild nur die Matrix. (Die VS-Threads hingen lange: das
- *    NoMask-Bit lag an der Stelle von Gen7, siehe EU_NOMASK. Haengt der VS doch, probiert igdtest 3d der Reihe nach
- *    Korrekturen aus dem Linux-Treiber, vs_wa_*, und schreibt eine Marke.)
+ *    NoMask-Bit lag an der Stelle von Gen7, siehe EU_NOMASK.)
+ *  - Texturen: Surface State und SAMPLER_STATE (naechster Texel oder bilinear, Wiederholen), der Pixel-Shader
+ *    interpoliert u, v (pln) und liest per "sample" (SIMD16, wie IGT) - pur oder mal einer zweiten Farbe.
  * Clipper durchlassen, Rasterizer ohne Culling und ohne Viewport-Umrechnung. Die Statistikzaehler der Pipeline zeigen,
  * wie weit die GPU gekommen ist. Gleitkommawerte stehen als Bitmuster da (der Kernel rechnet ohne FPU). */
 
@@ -1413,6 +1414,12 @@ out:
 #define URB_WRITE_HDRPOS     ((9u << 25) | (1u << 19) | (0u << 4) | 7u)
 #define URB_WRITE_HDRPOS_EOT (0x80000000u | URB_WRITE_HDRPOS)
 #define URB_WRITE_COLOR_EOT  (0x80000000u | (5u << 25) | (1u << 19) | (2u << 4) | 7u)
+/* zwei Attribute (u, v, 0, 1 und Farbe) ab Versatz 2 vec4, mit Thread-Ende */
+#define URB_WRITE_ATTR2_EOT  (0x80000000u | (9u << 25) | (1u << 19) | (2u << 4) | 7u)
+#define SFID_SAMPLER         0x2
+/* Sampler "sample" SIMD16 ohne Kopf: u, v (je 2 Register), Antwort R, G, B, A (je 2), Sampler 0, Binding-Table-Eintrag 1
+ * (wie der Kernel von IGT: 0x08840001) */
+#define SAMPLE_SIMD16        ((4u << 25) | (8u << 20) | (2u << 17) | (0u << 12) | (0u << 8) | 1u)
 #define VFC_SRC 1u
 #define VFC_0   2u
 #define VFC_1F  3u
@@ -1424,6 +1431,8 @@ out:
 #define K3_PSCOL  0x000                        /* Kernel im Kernelbereich (C_KERN) */
 #define K3_PSINT  0x400
 #define K3_VS     0x800
+#define K3_PSTEX  0xC00                        /* Pixel-Shader: Textur */
+#define K3_PSTEXC 0x1000                       /* Pixel-Shader: Textur mal Farbe */
 #define F_0_35    0x3EB33333u
 #define F_0_65    0x3F266666u
 /* Befehl fuer alle Kanaele, unabhaengig von der Ausfuehrungsmaske: ab Gen8 Bit 34 (zweites Dword, Bit 2). Bit 9 im
@@ -1431,7 +1440,6 @@ out:
  * wartet ewig: daran hingen alle frueheren Versuche mit dem Vertex-Shader. */
 #define EU_NOMASK (1u << 2)
 #define EU_SAT    (1u << 31)                   /* Ergebnis auf 0-1 begrenzen */
-#define VS_MARK   0x5653F00Du                  /* Marke, die der Vertex-Shader zur Fehlersuche schreibt */
 
 /* Festkomma Q16.16 (mit Vorzeichen) als float-Bitmuster */
 static uint32_t f32q(int32_t q)
@@ -1517,24 +1525,10 @@ static int vs_out_end(uint32_t (*k)[4], int n)
     return n;
 }
 
-/* Durchreichen: Position r2-r5, Farbe r6-r9 (schon in Bildschirmkoordinaten). marker: vorher 32 Bytes VS_MARK per
- * Media Block Write an Binding-Table-Eintrag 0 des VS - zeigt bei einem Haenger, ob der Thread ueberhaupt lief */
-static int asm_vs_pass(uint32_t (*k)[4], int marker)
+/* Durchreichen: Position r2-r5, Farbe r6-r9 (schon in Bildschirmkoordinaten) */
+static int asm_vs_pass(uint32_t (*k)[4])
 {
-    int n = 0;
-    if (marker) {
-        eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 30, 0), eu_r(EU_UD, 0, 0, 4, 3, 1), eu_none());
-        k[n - 1][1] |= EU_NOMASK;
-        static const uint32_t hdr[3] = {0, 0, 31}; /* x, y, Block 32 Bytes x 1 Zeile */
-        for (int i = 0; i < 3; i++) {
-            eu_inst(k[n++], EU_MOV, 0, 0, eu_d(EU_UD, 30, 4 * i), eu_imm(EU_UD, hdr[i]), eu_none());
-            k[n - 1][1] |= EU_NOMASK;
-        }
-        eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 31, 0), eu_imm(EU_UD, VS_MARK), eu_none());
-        k[n - 1][1] |= EU_NOMASK;
-        eu_send(k[n++], 3, SFID_DP1, eu_null(), 30, mbw_desc(2, 0));
-    }
-    n = vs_out_begin(k, n);
+    int n = vs_out_begin(k, 0);
     for (int i = 0; i < 4; i++) {
         eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 117 + i, 0), eu_r(EU_UD, 2 + i, 0, 4, 3, 1), eu_none());
         eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 122 + i, 0), eu_r(EU_UD, 6 + i, 0, 4, 3, 1), eu_none());
@@ -1573,6 +1567,72 @@ static int asm_vs_cube(uint32_t (*k)[4], const uint32_t m[16], const uint32_t l[
     return vs_out_end(k, n);
 }
 
+/* Texturierter Wuerfel: Eingabe Ecke r2-r4, Textur u, v r6-r7, Normale r10-r12, Farbe r14-r17. Position wie bei
+ * asm_vs_cube (erste Nachricht ab r100), dann r113-r116 = u, v, 0, 1 und r117-r120 = Farbe mal Helligkeit */
+static int asm_vs_tex(uint32_t (*k)[4], const uint32_t m[16], const uint32_t l[3])
+{
+    int n = 0;
+    for (int h = 100; h <= 112; h += 12) {
+        eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, h, 0), eu_r(EU_UD, 1, 0, 4, 3, 1), eu_none());
+        k[n - 1][1] |= EU_NOMASK; /* alle 8 Handles */
+    }
+    for (int i = 0; i < 4; i++)
+        eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 101 + i, 0), eu_imm(EU_UD, 0), eu_none());
+    EuOp t = eu_r(EU_F, 20, 0, 4, 3, 1), lit = eu_r(EU_F, 21, 0, 4, 3, 1);
+    for (int row = 0; row < 4; row++) {
+        int out = 105 + row;
+        EuOp o = eu_r(EU_F, out, 0, 4, 3, 1);
+        eu_inst(k[n++], EU_MUL, 3, 0, eu_d(EU_F, out, 0), eu_r(EU_F, 2, 0, 4, 3, 1), eu_imm(EU_F, m[row * 4]));
+        for (int c = 1; c < 3; c++) {
+            eu_inst(k[n++], EU_MUL, 3, 0, eu_d(EU_F, 20, 0), eu_r(EU_F, 2 + c, 0, 4, 3, 1), eu_imm(EU_F, m[row * 4 + c]));
+            eu_inst(k[n++], EU_ADD, 3, 0, eu_d(EU_F, out, 0), o, t);
+        }
+        eu_inst(k[n++], EU_ADD, 3, 0, eu_d(EU_F, out, 0), o, eu_imm(EU_F, m[row * 4 + 3]));
+    }
+    eu_inst(k[n++], EU_MUL, 3, 0, eu_d(EU_F, 21, 0), eu_r(EU_F, 10, 0, 4, 3, 1), eu_imm(EU_F, l[0]));
+    for (int c = 1; c < 3; c++) {
+        eu_inst(k[n++], EU_MUL, 3, 0, eu_d(EU_F, 20, 0), eu_r(EU_F, 10 + c, 0, 4, 3, 1), eu_imm(EU_F, l[c]));
+        eu_inst(k[n++], EU_ADD, 3, 0, eu_d(EU_F, 21, 0), lit, t);
+    }
+    k[n - 1][0] |= EU_SAT;
+    eu_inst(k[n++], EU_MUL, 3, 0, eu_d(EU_F, 21, 0), lit, eu_imm(EU_F, F_0_65));
+    eu_inst(k[n++], EU_ADD, 3, 0, eu_d(EU_F, 21, 0), lit, eu_imm(EU_F, F_0_35));
+    eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 113, 0), eu_r(EU_UD, 6, 0, 4, 3, 1), eu_none());
+    eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 114, 0), eu_r(EU_UD, 7, 0, 4, 3, 1), eu_none());
+    eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_F, 115, 0), eu_imm(EU_F, 0), eu_none());
+    eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_F, 116, 0), eu_imm(EU_F, F_1_0), eu_none());
+    for (int c = 0; c < 3; c++)
+        eu_inst(k[n++], EU_MUL, 3, 0, eu_d(EU_F, 117 + c, 0), eu_r(EU_F, 14 + c, 0, 4, 3, 1), lit);
+    eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 120, 0), eu_r(EU_UD, 17, 0, 4, 3, 1), eu_none());
+    eu_send(k[n++], 3, SFID_URB, eu_null(), 100, URB_WRITE_HDRPOS);
+    eu_send(k[n++], 3, SFID_URB, eu_null(), 112, URB_WRITE_ATTR2_EOT);
+    return n;
+}
+
+/* Pixel-Shader mit Textur: u, v aus Attribut 0 interpolieren (r104/r106), "sample" -> r12-r19 (R, G, B, A je 2
+ * Register). mod: mal Attribut 1 (Farbe, Koeffizienten ab r8). Dann Render-Target-Write mit Thread-Ende */
+static int asm_ps_tex(uint32_t (*k)[4], int mod)
+{
+    static const int reg[4] = {6, 6, 7, 7}, sub[4] = {0, 16, 0, 16};
+    int n = 0;
+    for (int c = 0; c < 2; c++)
+        eu_inst(k[n++], EU_PLN, 4, 0, eu_d(EU_F, 104 + 2 * c, 0), eu_r(EU_F, reg[c], sub[c], SCALAR),
+                eu_r(EU_F, 2, 0, 4, 3, 1));
+    eu_send(k[n++], 4, SFID_SAMPLER, eu_d(EU_F, 12, 0), 104, SAMPLE_SIMD16);
+    for (int c = 0; c < 4; c++) {
+        if (mod && c < 3) {
+            eu_inst(k[n++], EU_PLN, 4, 0, eu_d(EU_F, 20, 0), eu_r(EU_F, reg[c] + 2, sub[c], SCALAR),
+                    eu_r(EU_F, 2, 0, 4, 3, 1));
+            eu_inst(k[n++], EU_MUL, 4, 0, eu_d(EU_F, 112 + 2 * c, 0), eu_r(EU_F, 12 + 2 * c, 0, 4, 3, 1),
+                    eu_r(EU_F, 20, 0, 4, 3, 1));
+        } else {
+            eu_inst(k[n++], EU_MOV, 4, 0, eu_d(EU_F, 112 + 2 * c, 0), eu_r(EU_F, 12 + 2 * c, 0, 4, 3, 1), eu_none());
+        }
+    }
+    eu_send(k[n++], 4, SFID_RC, eu_null(), 112, RT_WRITE_SIMD16);
+    return n;
+}
+
 /* Lage im Zustandsbereich (Surface- und Dynamic-State-Basis = C_STATE) */
 #define S3_BLEND   0x000   /* BLEND_STATE: alles 0 = nicht mischen, alle Kanaele schreiben */
 #define S3_CC      0x0C0   /* COLOR_CALC_STATE */
@@ -1580,14 +1640,14 @@ static int asm_vs_cube(uint32_t (*k)[4], const uint32_t m[16], const uint32_t l[
 #define S3_SFVP    0x140   /* SF_CLIP_VIEWPORT */
 #define S3_SCISSOR 0x180
 #define S3_BT      0x1C0   /* Binding Table des Pixel-Shaders: 0 = Render-Target */
-#define S3_BTVS    0x1E0   /* Binding Table des Vertex-Shaders (nur zur Fehlersuche: Marke) */
-#define S3_RT      0x200   /* Surface State des Render-Targets */
-#define S3_MARK    0x240   /* Surface State fuer die Marke des Vertex-Shaders (C_RES + 0x100) */
+#define S3_RT      0x200   /* Surface State des Render-Targets (Binding-Table-Eintrag 0) */
+#define S3_TEX     0x240   /* Surface State der Textur (Eintrag 1) */
+#define S3_SAMP    0x280   /* SAMPLER_STATE */
 #define S3_VB      0x300   /* Vertex-Buffer */
 
 /* Eckpunkte: x, y, u, v (ohne VS) / x, y, r, g, b, a mit / ohne VS / x, y, z, r, g, b, a (ohne VS, mit Tiefe) /
- * Wuerfel fuer den VS: x, y, z, r, g, b, a, Normale x, y, z */
-enum { L3_XYUV, L3_VS_XYRGBA, L3_XYRGBA, L3_XYZRGBA, L3_VS_CUBE };
+ * Wuerfel fuer den VS: x, y, z, r, g, b, a, Normale x, y, z / texturiert: x, y, z, u, v, Normale x, y, z, r, g, b, a */
+enum { L3_XYUV, L3_VS_XYRGBA, L3_XYRGBA, L3_XYZRGBA, L3_VS_CUBE, L3_VS_TEX };
 typedef struct {
     uint32_t        rt_gtt, w, h, pitch; /* Render-Target (Pixel, Zeilenlaenge in Bytes) */
     int             vs;                  /* L3_* */
@@ -1596,15 +1656,15 @@ typedef struct {
     const uint32_t *verts;               /* float-Bitmuster je Eckpunkt (4, 6 oder 7) */
     uint32_t        depth_gtt;           /* Tiefenpuffer (D32_FLOAT, Y-Kacheln, so gross wie das Render-Target), 0 = keiner */
     uint32_t        depth_pitch;         /* Bytes, Vielfaches von 128 */
+    uint32_t        tex_gtt;             /* Textur (B8G8R8A8, linear) fuer den Pixel-Shader, 0 = keine */
+    uint32_t        tex_w, tex_h, tex_pitch;
+    int             tex_filter;          /* 0 naechster Texel, 1 bilinear */
 } Draw3d;
 
 static uint32_t vert_size(int layout)
 {
-    return layout == L3_XYUV ? 16 : layout == L3_XYZRGBA ? 28 : layout == L3_VS_CUBE ? 40 : 24;
+    return layout == L3_XYUV ? 16 : layout == L3_XYZRGBA ? 28 : layout == L3_VS_CUBE ? 40 : layout == L3_VS_TEX ? 48 : 24;
 }
-
-static int vs_marker;   /* Fehlersuche: VS bekommt eine Binding Table mit der Flaeche fuer die Marke */
-static int vs_mesa_urb; /* Korrektur 5: URB-Aufteilung wie Mesa, Vertex-Cache aus */
 
 /* Zustaende und Batch fuer einen Aufruf */
 static uint32_t batch_3d(const Draw3d *d)
@@ -1622,14 +1682,17 @@ static uint32_t batch_3d(const Draw3d *d)
     rt[3] = d->pitch - 1;
     rt[7] = (4u << 25) | (5u << 22) | (6u << 19) | (7u << 16);
     rt[8] = d->rt_gtt;
-    if (vs_marker) { /* 8 x 1 Pixel (32 Bytes) in C_RES + 0x100 */
-        *(uint32_t *)(st + S3_BTVS) = S3_MARK;
-        uint32_t *mk = (uint32_t *)(st + S3_MARK);
-        mk[0] = rt[0];
-        mk[2] = 7;
-        mk[3] = 63;
-        mk[7] = rt[7];
-        mk[8] = core_gtt(C_RES) + 0x100;
+    if (d->tex_gtt) { /* Textur: 2D, linear wie das Render-Target; Sampler ohne Mip-Stufen, Koordinaten wiederholen */
+        *(uint32_t *)(st + S3_BT + 4) = S3_TEX;
+        uint32_t *tx = (uint32_t *)(st + S3_TEX), *sm = (uint32_t *)(st + S3_SAMP);
+        tx[0] = rt[0];
+        tx[2] = (d->tex_w - 1) | ((d->tex_h - 1) << 16);
+        tx[3] = d->tex_pitch - 1;
+        tx[7] = rt[7];
+        tx[8] = d->tex_gtt;
+        uint32_t f = d->tex_filter ? 1u : 0u; /* MAPFILTER_LINEAR / _NEAREST fuer Vergroessern und Verkleinern */
+        sm[0] = (f << 17) | (f << 14);
+        sm[3] = d->tex_filter ? 0x3Fu << 13 : 0; /* bilinear: Adressen runden (wie Mesa) */
     }
     uint32_t vsize = vert_size(d->vs);
     memcpy(st + S3_VB, d->verts, (uint64_t)d->nvert * vsize);
@@ -1673,12 +1736,11 @@ static uint32_t batch_3d(const Draw3d *d)
     b[k++] = S3_CCVP;
     b[k++] = S3D(0x21);              /* VIEWPORT_STATE_POINTERS_SF_CLIP */
     b[k++] = S3_SFVP;
-    uint32_t urb0 = vs_mesa_urb ? 4 : 2; /* Korrektur 5: wie Mesa hinter 32 KiB fuer Push-Konstanten */
-    b[k++] = S3D(0x30);              /* URB_VS: 64 Eintraege zu 2 x 64 Bytes ab urb0 x 8 KiB */
-    b[k++] = 64 | (1u << 16) | (urb0 << 25);
-    for (uint32_t s = 0x31; s <= 0x33; s++) { /* URB_HS, _DS, _GS: keine (bei Korrektur 5 hinter dem VS) */
+    b[k++] = S3D(0x30);              /* URB_VS: 64 Eintraege zu 2 x 64 Bytes ab 2 x 8 KiB */
+    b[k++] = 64 | (1u << 16) | (2u << 25);
+    for (uint32_t s = 0x31; s <= 0x33; s++) { /* URB_HS, _DS, _GS: keine */
         b[k++] = S3D(s);
-        b[k++] = (vs_mesa_urb ? urb0 + 1 : urb0) << 25;
+        b[k++] = 2u << 25;
     }
     b[k++] = S3D(0x24);              /* BLEND_STATE_POINTERS */
     b[k++] = S3_BLEND | 1;
@@ -1700,22 +1762,22 @@ static uint32_t batch_3d(const Draw3d *d)
     }
     for (uint32_t s = 0x26; s <= 0x29; s++) { /* BINDING_TABLE_POINTERS_VS, _HS, _DS, _GS */
         b[k++] = S3D(s);
-        b[k++] = s == 0x26 && vs_marker ? S3_BTVS : 0;
+        b[k++] = 0;
     }
     for (uint32_t s = 0x2B; s <= 0x2E; s++) { /* SAMPLER_STATE_POINTERS_VS, _HS, _DS, _GS */
         b[k++] = S3D(s);
         b[k++] = 0;
     }
     b[k++] = S3D(0x10) | 7;          /* VS */
-    if (d->vs == L3_VS_XYRGBA || d->vs == L3_VS_CUBE) {
+    if (d->vs == L3_VS_XYRGBA || d->vs == L3_VS_CUBE || d->vs == L3_VS_TEX) {
         /* Kernel, Eingaben ab r2 (1 bzw. 2 x 256 Bit = 2 bzw. 4 vec4), 64 Threads, Statistik, SIMD8, an */
         b[k++] = K3_VS;
         b[k++] = 0;
-        b[k++] = vs_marker ? 1u << 18 : 0; /* Binding-Table-Eintraege */
         b[k++] = 0;
         b[k++] = 0;
-        b[k++] = (2u << 20) | ((d->vs == L3_VS_CUBE ? 2u : 1u) << 11) | (0u << 4);
-        b[k++] = (63u << 23) | (1u << 10) | (1u << 2) | (vs_mesa_urb ? 1u << 1 : 0) | 1u;
+        b[k++] = 0;
+        b[k++] = (2u << 20) | ((d->vs == L3_VS_XYRGBA ? 1u : 2u) << 11) | (0u << 4);
+        b[k++] = (63u << 23) | (1u << 10) | (1u << 2) | 1u;
         b[k++] = (1u << 21) | (1u << 16); /* Ausgabe fuer SBE: ab 256 Bit (nach Kopf und Position), 1 x 256 Bit */
     } else {
         for (int i = 0; i < 8; i++)
@@ -1734,11 +1796,12 @@ static uint32_t batch_3d(const Draw3d *d)
     b[k++] = 1u << 10;
     b[k++] = 0;
     b[k++] = 0;
-    b[k++] = S3D(0x1F) | 4;          /* SBE: 1 Attribut aus dem VUE ab 256 Bit */
-    b[k++] = (1u << 22) | (1u << 29) | (1u << 28) | (1u << 11) | (1u << 5);
+    uint32_t nattr = d->vs == L3_VS_TEX ? 2 : 1; /* Attribute fuer den Pixel-Shader (2: u, v und Farbe) */
+    b[k++] = S3D(0x1F) | 4;          /* SBE: 1 bzw. 2 Attribute aus dem VUE ab 256 Bit */
+    b[k++] = (nattr << 22) | (1u << 29) | (1u << 28) | (1u << 11) | (1u << 5);
     b[k++] = 0;
     b[k++] = 0;
-    b[k++] = 3;                      /* Attribut 0: xyzw aktiv */
+    b[k++] = nattr == 2 ? 0xF : 3;   /* Attribute 0 (und 1): xyzw aktiv */
     b[k++] = 0;
     b[k++] = S3D(0x51) | 9;          /* SBE_SWIZ */
     for (int i = 0; i < 10; i++)
@@ -1759,10 +1822,11 @@ static uint32_t batch_3d(const Draw3d *d)
     b[k++] = S3D(0x17) | 9;          /* CONSTANT_PS */
     for (int i = 0; i < 10; i++)
         b[k++] = 0;
-    b[k++] = S3D(0x20) | 10;         /* PS: 1 Binding-Table-Eintrag, 64 Threads, SIMD16, Koeffizienten ab r6 */
+    b[k++] = S3D(0x20) | 10;         /* PS: 1 Binding-Table-Eintrag (mit Textur 2 und 1 Sampler), 64 Threads, SIMD16,
+                                      * Koeffizienten ab r6 */
     b[k++] = d->ps;
     b[k++] = 0;
-    b[k++] = 1u << 18;
+    b[k++] = d->tex_gtt ? (1u << 27) | (2u << 18) : 1u << 18;
     b[k++] = 0;
     b[k++] = 0;
     b[k++] = (63u << 23) | (1u << 1);
@@ -1778,7 +1842,7 @@ static uint32_t batch_3d(const Draw3d *d)
     b[k++] = S3D(0x2A);              /* BINDING_TABLE_POINTERS_PS */
     b[k++] = S3_BT;
     b[k++] = S3D(0x2F);              /* SAMPLER_STATE_POINTERS_PS */
-    b[k++] = 0;
+    b[k++] = d->tex_gtt ? S3_SAMP : 0;
     b[k++] = S3D(0x0F);              /* SCISSOR_STATE_POINTERS */
     b[k++] = S3_SCISSOR;
     b[k++] = S3D(0x4E) | 2;          /* WM_DEPTH_STENCIL: Tiefentest "kleiner" und Tiefe schreiben, kein Stencil */
@@ -1835,6 +1899,17 @@ static uint32_t batch_3d(const Draw3d *d)
         b[k++] = (VFC_SRC << 28) | (VFC_SRC << 24) | (VFC_SRC << 20) | (VFC_SRC << 16);
         b[k++] = (1u << 25) | (SURF_RGB32_FLOAT << 16) | 28;
         b[k++] = (VFC_SRC << 28) | (VFC_SRC << 24) | (VFC_SRC << 20) | (VFC_0 << 16);
+    } else if (d->vs == L3_VS_TEX) { /* Ecke x, y, z, 1, Textur u, v, 0, 1, Normale x, y, z, 0, Farbe r, g, b, a */
+        nelem = 4;
+        b[k++] = S3D(0x09) | (2 * nelem - 1);
+        b[k++] = (1u << 25) | (SURF_RGB32_FLOAT << 16) | 0;
+        b[k++] = (VFC_SRC << 28) | (VFC_SRC << 24) | (VFC_SRC << 20) | (VFC_1F << 16);
+        b[k++] = (1u << 25) | (SURF_RG32_FLOAT << 16) | 12;
+        b[k++] = (VFC_SRC << 28) | (VFC_SRC << 24) | (VFC_0 << 20) | (VFC_1F << 16);
+        b[k++] = (1u << 25) | (SURF_RGB32_FLOAT << 16) | 20;
+        b[k++] = (VFC_SRC << 28) | (VFC_SRC << 24) | (VFC_SRC << 20) | (VFC_0 << 16);
+        b[k++] = (1u << 25) | (SURF_RGBA32_FLOAT << 16) | 32;
+        b[k++] = (VFC_SRC << 28) | (VFC_SRC << 24) | (VFC_SRC << 20) | (VFC_SRC << 16);
     } else { /* ohne Vertex-Shader ist das schon das VUE: 4 x 0 (Kopf), Position x, y, 0, 1, Attribut (u, v, 0, 1
               * bzw. r, g, b, a) */
         nelem = 3;
@@ -2066,6 +2141,27 @@ static void cube_object(uint32_t v[36][10])
         }
 }
 
+/* Texturierter Wuerfel fuer asm_vs_tex: je Eckpunkt x, y, z, u, v, Normale x, y, z, Grundfarbe r, g, b, a. Die Textur
+ * steht zweimal auf jeder Seite (u, v von 0 bis 2, wiederholt); die Grundfarbe faerbt das graue Muster je Seite ein */
+static void cube_textured(uint32_t v[36][12])
+{
+    static const int tri[6] = {0, 1, 2, 0, 2, 3};
+    static const int32_t uv[4][2] = {{0, 0}, {2, 0}, {2, 2}, {0, 2}};
+    int n = 0;
+    for (int fc = 0; fc < 6; fc++)
+        for (int t = 0; t < 6; t++, n++) {
+            int e = cube_f[fc][tri[t]];
+            for (int c = 0; c < 3; c++) {
+                v[n][c] = f32q(cube_v[e][c] * 65536);
+                v[n][5 + c] = f32q(cube_n[fc][c] * 65536);
+                v[n][8 + c] = f32q((int32_t)((((cube_rgb[fc] >> (16 - 8 * c)) & 0xFF) * 65536) / 255));
+            }
+            v[n][3] = f32q(uv[tri[t]][0] * 65536);
+            v[n][4] = f32q(uv[tri[t]][1] * 65536);
+            v[n][11] = F_1_0;
+        }
+}
+
 /* Matrix fuer asm_vs_cube, Drehung wie cube_tris (a um y, b um x), Abstand 4.5, Perspektive f, Mitte (cx, cy). Mit
  * (x', y', z') = R p + (0, 0, 4.5): X = f x' + cx z', Y = -f y' + cy z', Z = 10/9 (z' - 1), W = z' - nach dem Teilen
  * durch W genau die Bildschirmkoordinaten und die Tiefe von cube_tris. l = -(dritte Zeile von R) */
@@ -2126,75 +2222,19 @@ static int cube_check(const uint32_t *px, const uint32_t *depth, uint32_t front,
     return ok;
 }
 
-/* Korrekturen fuer den Vertex-Shader: Linux (i915) setzt sie fuer Skylake/Kaby Lake/Coffee Lake, die Firmware nicht.
- * Der Reihe nach dazu, bis der VS fertig wird: 1 WaEnableGapsTsvCreditFix, 2 Clock-Gating von SDE und GAFS aus,
- * 3 WaDisablePartialInstShootdown/WaDisableThreadStallDopClockGating und WaEnableLbsSlaRetryTimerDecrement,
- * 4 VS-Referenzzaehler ohne "Full Force Miss" (so bei Broadwell), 5 URB-Aufteilung wie Mesa und Vertex-Cache aus. */
-#define R_GARBCNTL       0xB004
-#define R_UCGCTL4        0x940C
-#define R_UCGCTL6        0x9430
-#define R_ROW_CHICKEN    0xE4F0 /* maskiert */
-#define R_SCRATCH1       0xB11C
-#define R_FF_THREAD_MODE 0x20A0
-#define R_L3CNTLREG      0x7034
-#define ROW_CHICKEN_BITS ((1u << 8) | (1u << 5))
-static const char *const vs_wa_name[6] = {"ohne Korrektur", "Korrektur 1 (GAPS-TSV-Credit)",
-                                          "Korrekturen 1-2 (+ Clock-Gating aus)", "Korrekturen 1-3 (+ ROW_CHICKEN, LBS)",
-                                          "Korrekturen 1-4 (+ FF_THREAD_MODE)", "Korrekturen 1-5 (+ URB wie Mesa)"};
-static const uint32_t vs_wa_reg[7] = {R_GARBCNTL, R_UCGCTL4, R_UCGCTL6, R_SCRATCH1, R_FF_THREAD_MODE, R_ROW_CHICKEN,
-                                      R_L3CNTLREG};
-static uint32_t vs_wa_old[7];
-
-static void vs_wa_save(void)
-{
-    static const char *const nm[7] = {"GARBCNTL", "UCGCTL4", "UCGCTL6", "SCRATCH1", "FF_THREAD_MODE", "ROW_CHICKEN",
-                                      "L3CNTLREG"};
-    kprintf("igd3d: Register:");
-    for (int i = 0; i < 7; i++) {
-        vs_wa_old[i] = igd_rd(vs_wa_reg[i]);
-        kprintf(" %s %#x", nm[i], vs_wa_old[i]);
-    }
-    kprintf("\n");
-}
-
-/* Korrekturen 1..step setzen (nach jedem Zuruecksetzen der Engine erneut) */
-static void vs_wa_apply(int step)
-{
-    if (step >= 1)
-        igd_wr(R_GARBCNTL, igd_rd(R_GARBCNTL) | (1u << 7));
-    if (step >= 2) {
-        igd_wr(R_UCGCTL4, igd_rd(R_UCGCTL4) | (1u << 14));
-        igd_wr(R_UCGCTL6, igd_rd(R_UCGCTL6) | (1u << 14));
-    }
-    if (step >= 3) {
-        igd_wr(R_ROW_CHICKEN, MASKED_ON(ROW_CHICKEN_BITS));
-        igd_wr(R_SCRATCH1, igd_rd(R_SCRATCH1) | (1u << 2));
-    }
-    if (step >= 4)
-        igd_wr(R_FF_THREAD_MODE, igd_rd(R_FF_THREAD_MODE) & ~((1u << 15) | (1u << 19)));
-    vs_mesa_urb = step >= 5;
-}
-
-static void vs_wa_restore(void)
-{
-    for (int i = 0; i < 5; i++)
-        igd_wr(vs_wa_reg[i], vs_wa_old[i]);
-    igd_wr(R_ROW_CHICKEN, ROW_CHICKEN_BITS << 16 | (vs_wa_old[5] & ROW_CHICKEN_BITS));
-    vs_mesa_urb = 0;
-}
-
 static int test_3d(void)
 {
-    int pre = igd_preflight("Stufe 7 - 3D-Pipeline: Rechteck, Dreieck, Wuerfel mit Tiefentest, Vertex-Shader");
+    int pre = igd_preflight("Stufe 7 - 3D-Pipeline: Rechteck, Texturen, Dreieck, Vertex-Shader, Wuerfel mit Tiefentest");
     if (pre)
         return pre;
     int rc = core_setup();
     if (rc)
         return rc;
-    /* Testflaeche 256 x 256, Tiefenpuffer dazu, Tiefenpuffer 512 x 512 fuer den sichtbaren Wuerfel */
-    enum { TW = 256, TH = 256, TPAGES = TW * TH * 4 / 4096, DW = 512, DPAGES = DW * DW * 4 / 4096,
-           ALLP = 2 * TPAGES + DPAGES };
-    uint32_t base = core_base + 0x40, dbase = base + TPAGES, abase = base + 2 * TPAGES;
+    /* Testflaeche 256 x 256, Tiefenpuffer dazu, Tiefenpuffer 512 x 512 fuer den sichtbaren Wuerfel, zwei Texturen
+     * 64 x 64 (Pruefmuster, Wuerfel) */
+    enum { TW = 256, TH = 256, TPAGES = TW * TH * 4 / 4096, DW = 512, DPAGES = DW * DW * 4 / 4096, XW = 64,
+           XPAGES = XW * XW * 4 / 4096, ALLP = 2 * TPAGES + DPAGES + 2 * XPAGES };
+    uint32_t base = core_base + 0x40, dbase = base + TPAGES, abase = base + 2 * TPAGES, xbase = abase + DPAGES;
     static uint64_t saved[ALLP];
     if ((rc = igd_ggtt_claim(base, ALLP, saved)) != 0)
         return rc;
@@ -2207,13 +2247,22 @@ static int test_3d(void)
         igd_ggtt[base + i] = (mem + i * 4096) | IGD_PTE_VALID;
     igd_ggtt_flush();
     uint32_t *depth_t = (uint32_t *)(mem + TPAGES * 4096), *depth_a = (uint32_t *)(mem + 2 * TPAGES * 4096);
+    uint32_t *tex_t = (uint32_t *)(mem + (uint64_t)(xbase - base) * 4096), *tex_c = tex_t + XW * XW;
+    for (uint32_t y = 0; y < XW; y++)
+        for (uint32_t x = 0; x < XW; x++) {
+            /* Pruefmuster: Rot im 8er-Schachbrett, Gruen nach x, Blau nach y - jeder Texel anders */
+            tex_t[y * XW + x] = 0xFF000000u | ((((x ^ y) >> 3) & 1) ? 0xE0u << 16 : 0x20u << 16) | (x * 4) << 8 | y * 4;
+            /* Wuerfel: hellgraues Schachbrett mit weissem Rand */
+            uint32_t g = x < 3 || y < 3 || x >= XW - 3 || y >= XW - 3 ? 0xFF : (((x ^ y) >> 3) & 1) ? 0xE8 : 0x98;
+            tex_c[y * XW + x] = 0xFF000000u | g << 16 | g << 8 | g;
+        }
+    igd_clflush((uint64_t)tex_t, 2 * XPAGES * 4096);
     uint32_t *px = (uint32_t *)mem, mocs[62];
     for (uint32_t i = 0; i < TW * TH; i++)
         px[i] = 0x11111111u;
     igd_clflush(mem, TPAGES * 4096);
 
     static uint32_t kbuf[64][4];
-    vs_marker = vs_mesa_urb = 0;
     if (!igd_forcewake_get()) {
         kprintf("igd3d: Forcewake nicht bestaetigt\n");
         rc = -9;
@@ -2236,7 +2285,7 @@ static int test_3d(void)
     const uint32_t X0 = 16, Y0 = 8, X1 = 176, Y1 = 40, want = 0xFFFF3399u;
     load_kernel(K3_PSCOL, (const uint32_t (*)[4])kbuf, asm_ps_color(kbuf, F_1_0, F_0_2, F_0_6, F_1_0));
     const uint32_t rv[3][4] = {{f32(X1), f32(Y1), F_1_0, F_1_0}, {f32(X0), f32(Y1), 0, F_1_0}, {f32(X0), f32(Y0), 0, 0}};
-    Draw3d r1 = {base << 12, TW, TH, TW * 4, L3_XYUV, PRIM_RECTLIST, 3, K3_PSCOL, &rv[0][0], 0, 0};
+    Draw3d r1 = {base << 12, TW, TH, TW * 4, L3_XYUV, PRIM_RECTLIST, 3, K3_PSCOL, &rv[0][0], 0, 0, 0, 0, 0, 0, 0};
     if (draw_3d("1. Rechteck ueber die 3D-Pipeline", &r1, 1, stat) != 0) {
         rc = -30;
         goto out_ring;
@@ -2252,6 +2301,57 @@ static int test_3d(void)
         goto out_ring;
     }
 
+    /* 1b. Textur: Pruefmuster 64 x 64 auf ein Rechteck gleicher Groesse ab (16, 16), naechster Texel - jedes Pixel muss
+     *     genau sein Texel zeigen. Daneben ab (128, 16) dasselbe um einen halben Texel verschoben und bilinear: jedes
+     *     Pixel ist der Mittelwert von 2 x 2 Texeln (am Rand wiederholt sich die Textur). */
+    for (uint32_t i = 0; i < TW * TH; i++)
+        px[i] = 0x11111111u;
+    igd_clflush(mem, TPAGES * 4096);
+    load_kernel(K3_PSTEX, (const uint32_t (*)[4])kbuf, asm_ps_tex(kbuf, 0));
+    const uint32_t h0 = f32q(512), h1 = f32q(65536 + 512); /* 0.5 / 64 und 1 + 0.5 / 64 */
+    const uint32_t xr[2][3][4] = {
+        {{f32(80), f32(80), F_1_0, F_1_0}, {f32(16), f32(80), 0, F_1_0}, {f32(16), f32(16), 0, 0}},
+        {{f32(192), f32(80), h1, h1}, {f32(128), f32(80), h0, h1}, {f32(128), f32(16), h0, h0}}};
+    for (int lin = 0; lin < 2; lin++) {
+        Draw3d x1 = {base << 12, TW, TH, TW * 4, L3_XYUV, PRIM_RECTLIST, 3, K3_PSTEX, &xr[lin][0][0], 0, 0,
+                     xbase << 12, XW, XW, XW * 4, lin};
+        if (draw_3d(lin ? "1b. Textur bilinear" : "1b. Textur, naechster Texel", &x1, 1, stat) != 0) {
+            rc = -41;
+            goto out_ring;
+        }
+    }
+    igd_clflush(mem, TPAGES * 4096);
+    int tbad[2] = {0, 0}, tmax = 0;
+    for (uint32_t y = 0; y < TH; y++)
+        for (uint32_t x = 0; x < TW; x++) {
+            uint32_t got = px[y * TW + x];
+            if (y >= 16 && y < 80 && x >= 16 && x < 80) {
+                tbad[0] += got != tex_t[(y - 16) * XW + (x - 16)];
+            } else if (y >= 16 && y < 80 && x >= 128 && x < 192) {
+                uint32_t i = x - 128, j = y - 16;
+                for (int c = 0; c < 32; c += 8) {
+                    uint32_t sum = 0;
+                    for (int q = 0; q < 4; q++)
+                        sum += tex_t[((j + (q >> 1)) % XW) * XW + (i + (q & 1)) % XW] >> c & 0xFF;
+                    int d = (int)(got >> c & 0xFF) - (int)((sum + 2) / 4);
+                    d = d < 0 ? -d : d;
+                    tmax = d > tmax ? d : tmax;
+                    if (d > 3) {
+                        tbad[1]++;
+                        break;
+                    }
+                }
+            } else {
+                tbad[0] += got != 0x11111111u;
+            }
+        }
+    kprintf("igd3d: 1b. Textur: naechster Texel %d Pixel falsch, bilinear %d Pixel falsch (groesste Abweichung %d)\n",
+            tbad[0], tbad[1], tmax);
+    if (tbad[0] || tbad[1]) {
+        rc = -42;
+        goto out_ring;
+    }
+
     /* 2. Dreieck mit Farbverlauf: Ecken rot (oben), gruen (rechts unten), blau (links unten), Massstab 100,
      *    Mittelpunkt (128, 128) -> Ecken (128, 28), (214.6, 178), (41.4, 178), Flaeche etwa 12990 Pixel */
     for (uint32_t i = 0; i < TW * TH; i++)
@@ -2259,7 +2359,7 @@ static int test_3d(void)
     igd_clflush(mem, TPAGES * 4096);
     uint32_t tv[3][6];
     tri_screen(tv, 0, 100, 128, 128);
-    Draw3d t1 = {base << 12, TW, TH, TW * 4, L3_XYRGBA, PRIM_TRILIST, 3, K3_PSINT, &tv[0][0], 0, 0};
+    Draw3d t1 = {base << 12, TW, TH, TW * 4, L3_XYRGBA, PRIM_TRILIST, 3, K3_PSINT, &tv[0][0], 0, 0, 0, 0, 0, 0, 0};
     if (draw_3d("2. Dreieck mit Farbverlauf", &t1, 1, stat) != 0) {
         rc = -33;
         goto out_ring;
@@ -2270,50 +2370,20 @@ static int test_3d(void)
         goto out_ring;
     }
 
-    /* 2b. Dasselbe Dreieck durch den Vertex-Shader (er reicht Position und Farbe nur durch). Haengt er, der Reihe nach
-     *     die Korrekturen aus vs_wa_apply versuchen; beim ersten Haenger zusaetzlich mit Marke: laeuft der Thread? */
-    vs_wa_save();
-    int vs_step = -1, vs_fin = 0;
-    volatile uint32_t *mark = (volatile uint32_t *)((uint8_t *)core_ptr(C_RES) + 0x100);
-    Draw3d t2 = {base << 12, TW, TH, TW * 4, L3_VS_XYRGBA, PRIM_TRILIST, 3, K3_PSINT, &tv[0][0], 0, 0};
-    for (int step = 0; step < 6 && !vs_fin; step++) {
-        for (int mk = 0; mk < (step == 0 ? 2 : 1) && !vs_fin; mk++) {
-            vs_wa_apply(step);
-            for (uint32_t i = 0; i < TW * TH; i++)
-                px[i] = 0x11111111u;
-            igd_clflush(mem, TPAGES * 4096);
-            for (int i = 0; i < 8; i++)
-                mark[i] = 0;
-            igd_clflush((uint64_t)mark, 32);
-            vs_marker = mk;
-            uint32_t l3m = igd_rd(L3_MOCS(0));
-            if (mk) /* Marke am L3 vorbei: bei einem Haenger ginge sie sonst mit dem Zuruecksetzen verloren */
-                igd_wr(L3_MOCS(0), (l3m & 0xFFFF0000u) | L3_UC);
-            load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_pass(kbuf, mk));
-            int r = draw_3d(mk ? "2b. Vertex-Shader mit Marke" : "2b. Vertex-Shader", &t2, 0, stat);
-            if (mk)
-                igd_wr(L3_MOCS(0), l3m);
-            vs_marker = 0;
-            igd_clflush(mem, TPAGES * 4096);
-            igd_clflush((uint64_t)mark, 32);
-            kprintf("igd3d: 2b. Vertex-Shader, %s%s: %s; Vertex-Shader %lu, Clipper ein %lu, Pixel-Shader %lu\n",
-                    vs_wa_name[step], mk ? ", mit Marke" : "", r == 0 ? "fertig" : "HAENGT", (unsigned long)stat[2],
-                    (unsigned long)stat[3], (unsigned long)stat[5]);
-            if (mk)
-                kprintf("igd3d: 2b. Marke %#x: %s\n", mark[0],
-                        mark[0] == VS_MARK ? "der VS-Thread laeuft" : "der VS-Thread lief NICHT (oder schrieb nicht)");
-            if (r == 0 && !mk) {
-                vs_fin = 1;
-                if (tri_check(px, "2b. Dreieck durch den Vertex-Shader"))
-                    vs_step = step;
-            }
-        }
+    /* 2b. Dasselbe Dreieck durch den Vertex-Shader (er reicht Position und Farbe nur durch) */
+    for (uint32_t i = 0; i < TW * TH; i++)
+        px[i] = 0x11111111u;
+    igd_clflush(mem, TPAGES * 4096);
+    load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_pass(kbuf));
+    Draw3d t2 = {base << 12, TW, TH, TW * 4, L3_VS_XYRGBA, PRIM_TRILIST, 3, K3_PSINT, &tv[0][0], 0, 0, 0, 0, 0, 0, 0};
+    if (draw_3d("2b. Dreieck durch den Vertex-Shader", &t2, 1, stat) != 0) {
+        rc = -35;
+        goto out_ring;
     }
-    if (vs_step < 0) {
-        vs_wa_restore();
-        kprintf("igd3d: 2b. Vertex-Shader %s - weiter ohne\n", vs_fin ? "fertig, aber das Bild ist falsch" : "haengt weiterhin");
-    } else {
-        kprintf("igd3d: 2b. Vertex-Shader arbeitet (%s)\n", vs_wa_name[vs_step]);
+    igd_clflush(mem, TPAGES * 4096);
+    if (!tri_check(px, "2b. Dreieck durch den Vertex-Shader")) {
+        rc = -35;
+        goto out_ring;
     }
 
     /* 3. Wuerfel mit Tiefentest auf der Testflaeche: die vorderste Seite wird zuerst gezeichnet - in der Mitte muss
@@ -2326,7 +2396,7 @@ static int test_3d(void)
     static uint32_t cv[36][7];
     uint32_t front = 0;
     cube_tris(cv, 5, 3, 160, 128, 128, &front);
-    Draw3d c1 = {base << 12, TW, TH, TW * 4, L3_XYZRGBA, PRIM_TRILIST, 36, K3_PSINT, &cv[0][0], dbase << 12, TW * 4};
+    Draw3d c1 = {base << 12, TW, TH, TW * 4, L3_XYZRGBA, PRIM_TRILIST, 36, K3_PSINT, &cv[0][0], dbase << 12, TW * 4, 0, 0, 0, 0, 0};
     if (draw_3d("3. Wuerfel mit Tiefentest", &c1, 1, stat) != 0) {
         rc = -36;
         goto out_ring;
@@ -2340,22 +2410,64 @@ static int test_3d(void)
     /* 3b. Derselbe Wuerfel mit Vertex-Shader: im Vertex-Buffer stehen nur die unveraenderten Ecken, Farben und Normalen;
      *     Drehung, Perspektive und Helligkeit rechnet der Shader. Die vordere Seite steht im Puffer an erster Stelle,
      *     die hintere an zweiter - ohne Tiefentest stuende in der Mitte die hintere. */
-    static uint32_t vcube[36][10];
+    static uint32_t vcube[36][10], tcube[36][12];
     uint32_t vm[16], vl[3];
-    int vs_cube = 0;
     cube_object(vcube);
-    if (vs_step >= 0) {
-        for (uint32_t i = 0; i < TW * TH; i++) {
-            px[i] = 0x11111111u;
-            depth_t[i] = F_1_0;
+    for (uint32_t i = 0; i < TW * TH; i++) {
+        px[i] = 0x11111111u;
+        depth_t[i] = F_1_0;
+    }
+    igd_clflush(mem, 2 * TPAGES * 4096);
+    cube_matrix(vm, vl, 5, 3, 160, 128, 128);
+    load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_cube(kbuf, vm, vl));
+    Draw3d c2 = {base << 12, TW, TH, TW * 4, L3_VS_CUBE, PRIM_TRILIST, 36, K3_PSINT, &vcube[0][0], dbase << 12, TW * 4, 0, 0, 0, 0, 0};
+    if (draw_3d("3b. Wuerfel mit Vertex-Shader", &c2, 1, stat) != 0) {
+        rc = -39;
+        goto out_ring;
+    }
+    igd_clflush(mem, 2 * TPAGES * 4096);
+    if (!cube_check(px, depth_t, front, "3b. Wuerfel mit Vertex-Shader")) {
+        rc = -39;
+        goto out_ring;
+    }
+
+    /* 3c. Derselbe Wuerfel mit Textur (bilinear, zweimal je Seite) mal Farbe und Helligkeit: Pixelzahl und Tiefe wie
+     *     oben, und die Seiten zeigen das Muster - viele verschiedene Farbtoene statt einem je Seite */
+    cube_textured(tcube);
+    for (uint32_t i = 0; i < TW * TH; i++) {
+        px[i] = 0x11111111u;
+        depth_t[i] = F_1_0;
+    }
+    igd_clflush(mem, 2 * TPAGES * 4096);
+    load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_tex(kbuf, vm, vl));
+    load_kernel(K3_PSTEXC, (const uint32_t (*)[4])kbuf, asm_ps_tex(kbuf, 1));
+    Draw3d c3 = {base << 12, TW, TH, TW * 4, L3_VS_TEX, PRIM_TRILIST, 36, K3_PSTEXC, &tcube[0][0], dbase << 12, TW * 4,
+                 (xbase + XPAGES) << 12, XW, XW, XW * 4, 1};
+    if (draw_3d("3c. Wuerfel mit Textur", &c3, 1, stat) != 0) {
+        rc = -43;
+        goto out_ring;
+    }
+    igd_clflush(mem, 2 * TPAGES * 4096);
+    static uint8_t seen[512];
+    memset(seen, 0, sizeof(seen));
+    uint32_t cwr = 0, tones = 0, cdep = depth_t[ytile_off(128 * 4, 128, TW * 4) / 4];
+    for (uint32_t i = 0; i < TW * TH; i++) {
+        uint32_t c = px[i];
+        if (c == 0x11111111u)
+            continue;
+        cwr++;
+        uint32_t bin = (c >> 20 & 0xF) << 8 | (c >> 12 & 0xF) << 4 | (c >> 4 & 0xF);
+        if (!(seen[bin >> 3] >> (bin & 7) & 1)) {
+            seen[bin >> 3] |= (uint8_t)(1u << (bin & 7));
+            tones++;
         }
-        igd_clflush(mem, 2 * TPAGES * 4096);
-        cube_matrix(vm, vl, 5, 3, 160, 128, 128);
-        load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_cube(kbuf, vm, vl));
-        Draw3d c2 = {base << 12, TW, TH, TW * 4, L3_VS_CUBE, PRIM_TRILIST, 36, K3_PSINT, &vcube[0][0], dbase << 12, TW * 4};
-        int r = draw_3d("3b. Wuerfel mit Vertex-Shader", &c2, 1, stat);
-        igd_clflush(mem, 2 * TPAGES * 4096);
-        vs_cube = r == 0 && cube_check(px, depth_t, front, "3b. Wuerfel mit Vertex-Shader");
+    }
+    int tex_ok = cwr > 7000 && cwr < 10000 && cdep > 0x3E800000u && cdep < F_1_0 && tones >= 12;
+    kprintf("igd3d: 3c. Wuerfel mit Textur: %u Pixel, %u Farbtoene (ohne Textur hoechstens 3), Tiefe in der Mitte %#x, "
+            "Mitte %#x: %s\n", cwr, tones, cdep, px[128 * TW + 128], tex_ok ? "stimmt" : "FALSCH");
+    if (!tex_ok) {
+        rc = -44;
+        goto out_ring;
     }
 
     /* 4. Sichtbar (nur an der Konsole): sich drehender Wuerfel 512 x 512 in der Mitte des Bildspeichers, 240 Bilder.
@@ -2368,44 +2480,32 @@ static int test_3d(void)
         uint32_t rpitch = igd_scr_stride;
         load_kernel(K3_PSCOL, (const uint32_t (*)[4])kbuf, asm_ps_color(kbuf, F_0_2, F_0_2, F_0_2, F_1_0));
         const uint32_t bg[3][4] = {{f32(DW), f32(DW), 0, 0}, {0, f32(DW), 0, 0}, {0, 0, 0, 0}};
-        Draw3d clear = {rt, DW, DW, rpitch, L3_XYUV, PRIM_RECTLIST, 3, K3_PSCOL, &bg[0][0], 0, 0};
-        Draw3d cube = {rt, DW, DW, rpitch, L3_XYZRGBA, PRIM_TRILIST, 36, K3_PSINT, &cv[0][0], abase << 12, DW * 4};
-        if (vs_cube) { /* die CPU rechnet je Bild nur die Matrix */
-            cube.vs = L3_VS_CUBE;
-            cube.verts = &vcube[0][0];
-        }
+        Draw3d clear = {rt, DW, DW, rpitch, L3_XYUV, PRIM_RECTLIST, 3, K3_PSCOL, &bg[0][0], 0, 0, 0, 0, 0, 0, 0};
+        Draw3d cube = {rt, DW, DW, rpitch, L3_VS_TEX, PRIM_TRILIST, 36, K3_PSTEXC, &tcube[0][0], abase << 12, DW * 4,
+                       (xbase + XPAGES) << 12, XW, XW, XW * 4, 1}; /* die CPU rechnet je Bild nur die Matrix */
         int vbl = igd_vblank_ok();
         uint64_t t0 = time_us();
         for (int f = 0; f < 240 && rc == 0; f++) {
             for (uint32_t i = 0; i < DW * DW; i++)
                 depth_a[i] = F_1_0;
             igd_clflush((uint64_t)depth_a, DPAGES * 4096);
-            if (vs_cube) {
-                cube_matrix(vm, vl, f, f / 2 + 6, 420, DW / 2, DW / 2);
-                load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_cube(kbuf, vm, vl));
-            } else {
-                cube_tris(cv, f, f / 2 + 6, 420, DW / 2, DW / 2, &front);
-            }
+            cube_matrix(vm, vl, f, f / 2 + 6, 420, DW / 2, DW / 2);
+            load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_tex(kbuf, vm, vl));
             if (!vbl || !igd_wait_vblank(30))
                 thread_sleep_ms(10);
             if (draw_3d("4. Hintergrund", &clear, 0, 0) != 0 || draw_3d("4. Wuerfel", &cube, 0, 0) != 0)
                 rc = -38;
         }
         if (rc == 0)
-            kprintf("igd3d: 4. drehender Wuerfel: 240 Bilder in %lu ms (%s, %s)\n",
-                    (unsigned long)((time_us() - t0) / 1000), vs_cube ? "Ecken rechnet der Vertex-Shader" : "Ecken rechnet die CPU",
-                    vbl ? "gleich nach dem Bildwechsel" : "ohne Bildwechsel-Interrupt");
+            kprintf("igd3d: 4. drehender Wuerfel mit Textur: 240 Bilder in %lu ms (%s)\n",
+                    (unsigned long)((time_us() - t0) / 1000), vbl ? "gleich nach dem Bildwechsel" : "ohne Bildwechsel-Interrupt");
         thread_sleep_ms(1000);
         console_repaint();
     } else {
         kprintf("igd3d: sichtbarer Teil nur an der Konsole (ohne Desktop)\n");
     }
-    if (rc == 0) {
-        kprintf("igd3d: Rasterizer, Pixel-Shader und Tiefentest arbeiten; Vertex-Shader: %s\n",
-                vs_cube ? "arbeitet (Wuerfel ganz auf der GPU)" : vs_step >= 0 ? "Dreieck ja, Wuerfel FALSCH" : "geht noch nicht");
-        if (!vs_cube)
-            rc = -40;
-    }
+    if (rc == 0)
+        kprintf("igd3d: Vertex-Shader, Rasterizer, Pixel-Shader mit Texturen und Tiefentest arbeiten\n");
 
 out_ring:
     ring_stop();

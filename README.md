@@ -105,19 +105,20 @@ In der Shell: `burn 5000 & burn 5000 & cpus` zeigt zwei ausgelastete CPUs.
   Tabelle, in float-Bitmuster umgerechnet - der Kernel hat keine FPU). Danach dasselbe Dreieck durch einen
   Vertex-Shader (SIMD8, Ausgabe per URB-Write), der nur durchreicht. Die VS-Threads hingen lange: der Assembler
   setzte "NoMask" noch an die Stelle von Gen7 (Bit 9), ab Gen8 ist das "NoDDClr" - der Befehl gibt sein Zielregister
-  nie frei, der folgende `send` wartet ewig (NoMask ist ab Gen8 Bit 34). Haengt der VS trotzdem, probiert der Test
-  der Reihe nach Korrekturen, die Linux (i915) fuer Skylake bis Coffee Lake setzt
-  (WaEnableGapsTsvCreditFix, Clock-Gating, ROW_CHICKEN, FF_THREAD_MODE, URB-Aufteilung wie Mesa), und beim ersten
-  Haenger einen Shader, der vorher eine Marke in den Speicher schreibt (laeuft der Thread ueberhaupt?).
+  nie frei, der folgende `send` wartet ewig (NoMask ist ab Gen8 Bit 34).
   Zuletzt ein Wuerfel mit Tiefentest: Tiefenpuffer D32_FLOAT (Y-Kacheln, von der CPU mit 1.0 gefuellt), Test
   "kleiner" mit Schreiben; die CPU dreht die 8 Ecken um zwei Achsen, rechnet die Perspektive und als Tiefe eine
   Funktion von 1/z (auf dem Bildschirm linear). Die vorderste Seite wird absichtlich zuerst gezeichnet - in der Mitte
   muss trotzdem ihre Farbe stehen, und der Tiefenwert dort (aus dem gekachelten Puffer gelesen) kleiner als 1.0
-  sein. Geht der Vertex-Shader, kommt derselbe Wuerfel noch einmal ganz auf der GPU: im Vertex-Buffer stehen nur
+  sein. Derselbe Wuerfel kommt dann noch einmal ganz auf der GPU: im Vertex-Buffer stehen nur
   Ecken, Grundfarben und Normalen in Objektkoordinaten, der Shader rechnet Ecke mal 4x4-Matrix (W = Abstand, durch W
   teilt die Hardware) und die Helligkeit aus der gedrehten Normale (`saturate`); die CPU rechnet je Bild nur die
-  Matrix. An der Konsole dreht sich danach ein Wuerfel (512 x 512 in der Mitte, 240 Bilder, direkt nach dem
-  Bildwechsel gezeichnet) - mit Vertex-Shader, wenn er geht
+  Matrix. Texturen: Surface State (Binding-Table-Eintrag 1) und SAMPLER_STATE (naechster Texel oder bilinear,
+  Wiederholen); der Pixel-Shader interpoliert u, v (`pln`) und liest per Sampler-Nachricht `sample` (SIMD16, wie
+  IGT), auf Wunsch mal einer zweiten interpolierten Farbe. Geprueft: ein Pruefmuster 64 x 64 muss mit naechstem Texel
+  Pixel fuer Pixel stimmen und, um einen halben Texel verschoben, bilinear den Mittelwert von 2 x 2 Texeln ergeben.
+  An der Konsole dreht sich danach ein texturierter, beleuchteter Wuerfel (512 x 512 in der Mitte, 240 Bilder,
+  direkt nach dem Bildwechsel gezeichnet)
 - **Zusammensetzen auf der GPU** (`igd_comp.c`, `SYS_GPUCOMP`; Desktop: `gpu.c`): Bildschirmbild, Hintergrund,
   Fensterbilder und Schatten liegen in geteiltem Speicher, den der Kernel fest in die GGTT einblendet (eigener Bereich,
   Referenz auf das shm-Objekt, solange angemeldet). Je Bild schickt der Desktop alle geaenderten Rechtecke als eine
