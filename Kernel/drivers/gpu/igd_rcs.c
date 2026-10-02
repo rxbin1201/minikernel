@@ -1398,8 +1398,10 @@ out:
 #define EU_PLN               0x5A
 /* Render-Target-Write SIMD16 ohne Kopf: 8 Register (R, G, B, A je 2), letztes Render-Target, Thread-Ende */
 #define RT_WRITE_SIMD16      (0x80000000u | (8u << 25) | (0xCu << 14) | (1u << 12))
-/* URB-Write SIMD8 (Typ 7) mit Kopf (Handles), 12 Datenregister = 3 vec4 (Kopf, Position, Farbe), Thread-Ende */
-#define URB_WRITE_VUE3       (0x80000000u | (13u << 25) | (1u << 19) | 7u)
+/* URB-Write SIMD8 (Typ 7) mit Kopf (Handles). Hoechstens 8 Datenregister (2 vec4) je Nachricht, wie bei Mesa:
+ * erst Kopf und Position (Versatz 0), dann die Farbe (Versatz 2 vec4) mit Thread-Ende */
+#define URB_WRITE_HDRPOS     ((9u << 25) | (1u << 19) | (0u << 4) | 7u)
+#define URB_WRITE_COLOR_EOT  (0x80000000u | (5u << 25) | (1u << 19) | (2u << 4) | 7u)
 #define VFC_SRC 1u
 #define VFC_0   2u
 #define VFC_1F  3u
@@ -1476,12 +1478,15 @@ static int asm_ps_interp(uint32_t (*k)[4])
 
 /* Vertex-Shader (SIMD8, 8 Eckpunkte je Thread): Eingaben r2-r5 Position x, y, z, w und r6-r9 Farbe (je Register eine
  * Komponente fuer 8 Eckpunkte). x' = m0 x + m1 y + m2, y' = m3 x + m4 y + m5 (Bildschirmkoordinaten), z 0, w 1.
- * Ausgabe per URB-Write an die Handles aus r1: Kopf (4 x 0), Position, Farbe; Thread-Ende */
+ * Ausgabe per URB-Write an die Handles aus r1: r112 Kopf der Nachricht, r113-r116 VUE-Kopf (4 x 0), r117-r120
+ * Position; zweite Nachricht r121 Kopf, r122-r125 Farbe, Thread-Ende */
 static int asm_vs_affine(uint32_t (*k)[4], const uint32_t m[6])
 {
     int n = 0;
-    eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 112, 0), eu_r(EU_UD, 1, 0, 4, 3, 1), eu_none());
-    k[n - 1][0] |= 1u << 9; /* NoMask: alle 8 Handles */
+    for (int h = 112; h <= 121; h += 9) {
+        eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, h, 0), eu_r(EU_UD, 1, 0, 4, 3, 1), eu_none());
+        k[n - 1][0] |= 1u << 9; /* NoMask: alle 8 Handles */
+    }
     for (int i = 0; i < 4; i++)
         eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 113 + i, 0), eu_imm(EU_UD, 0), eu_none());
     EuOp x = eu_r(EU_F, 2, 0, 4, 3, 1), y = eu_r(EU_F, 3, 0, 4, 3, 1), t = eu_r(EU_F, 20, 0, 4, 3, 1);
@@ -1496,8 +1501,9 @@ static int asm_vs_affine(uint32_t (*k)[4], const uint32_t m[6])
     eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_F, 119, 0), eu_imm(EU_F, 0), eu_none());
     eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_F, 120, 0), eu_imm(EU_F, F_1_0), eu_none());
     for (int i = 0; i < 4; i++)
-        eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 121 + i, 0), eu_r(EU_UD, 6 + i, 0, 4, 3, 1), eu_none());
-    eu_send(k[n++], 3, SFID_URB, eu_null(), 112, URB_WRITE_VUE3);
+        eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 122 + i, 0), eu_r(EU_UD, 6 + i, 0, 4, 3, 1), eu_none());
+    eu_send(k[n++], 3, SFID_URB, eu_null(), 112, URB_WRITE_HDRPOS);
+    eu_send(k[n++], 3, SFID_URB, eu_null(), 121, URB_WRITE_COLOR_EOT);
     return n;
 }
 
@@ -1758,11 +1764,21 @@ static uint32_t batch_3d(const Draw3d *d)
     return k;
 }
 
+/* Einheiten der Render-Engine in INSTDONE (Bit = 1: fertig), wie bei IGT (instdone.c, ab Gen7) */
+static const struct {
+    int         bit;
+    const char *name;
+} instdone3d[] = {
+    {1, "VF"},    {2, "VS"},    {3, "HS"},   {4, "TE"},   {5, "DS"},    {6, "GS"},  {7, "SOL"}, {8, "CL"},
+    {9, "SF"},    {12, "TDG"},  {13, "URBM"}, {14, "SVG"}, {15, "GAFS"}, {16, "VFE"}, {17, "TSG"}, {18, "GAFM"},
+    {19, "GAM"},
+};
+
 /* Batch ausfuehren, Statistik vorher/nachher; 0 = fertig. stat: Werte der Statistik zurueck (oder 0) */
 static int draw_3d(const char *what, const Draw3d *d, int log, uint64_t *stat)
 {
     batch_3d(d);
-    uint64_t before[NSTAT3D];
+    uint64_t before[NSTAT3D], t0 = time_us();
     for (int i = 0; i < NSTAT3D; i++)
         before[i] = rd64(stat3d[i].reg);
     begin(4 + 8);
@@ -1770,22 +1786,28 @@ static int draw_3d(const char *what, const Draw3d *d, int log, uint64_t *stat)
     emit(core_gtt(C_BATCH));
     emit(0);
     emit(MI_NOOP);
-    uint64_t us = 0;
-    int rc = log ? run(what, 1000, &us) : (submit(), wait_seqno(seqno, 1000) ? 0 : -1);
-    if (rc != 0) { /* ACTHD - Batch-Anfang = wo die Engine stehen blieb (Dword = Abstand / 4) */
-        if (!log) {
-            kprintf("igd3d: %s: KEINE Rueckmeldung\n", what);
-            dump("Zustand");
-            ring_stop();
-            engine_reset();
-        }
-        kprintf("igd3d: Batch ab %#x, Zustaende ab %#x, Shader ab %#x\n", core_gtt(C_BATCH), core_gtt(C_STATE),
-                core_gtt(C_KERN));
-    }
-    for (int i = 0; i < NSTAT3D; i++) {
+    int rc = wait_seqno(submit(), 1000) ? 0 : -1;
+    for (int i = 0; i < NSTAT3D; i++) { /* vor einem Reset lesen (der setzt die Zaehler zurueck) */
         uint64_t v = rd64(stat3d[i].reg) - before[i];
         if (stat)
             stat[i] = v;
+    }
+    if (log && rc == 0)
+        kprintf("igdrcs: %s: fertig nach %lu us\n", what, (unsigned long)(time_us() - t0));
+    if (rc != 0) {
+        uint32_t idone = igd_rd(R_INSTDONE);
+        kprintf("igd3d: %s: KEINE Rueckmeldung nach 1000 ms; nicht fertig:", what);
+        for (unsigned i = 0; i < sizeof(instdone3d) / sizeof(instdone3d[0]); i++)
+            if (!(idone >> instdone3d[i].bit & 1))
+                kprintf(" %s", instdone3d[i].name);
+        kprintf("\n");
+        dump("Zustand"); /* ACTHD - Batch-Anfang = wo die Engine stehen blieb (Dword = Abstand / 4) */
+        kprintf("igd3d: Batch ab %#x, Zustaende ab %#x, Shader ab %#x\n", core_gtt(C_BATCH), core_gtt(C_STATE),
+                core_gtt(C_KERN));
+        if (stat)
+            log = 1;
+        ring_stop();
+        engine_reset();
     }
     if (log && stat) {
         kprintf("igd3d: Pipeline-Statistik:");
