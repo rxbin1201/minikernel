@@ -10,6 +10,7 @@
 
 #include "drivers/gpu/igd_internal.h"
 #include "arch/x86_64/apic.h"
+#include "arch/x86_64/spinlock.h"
 #include "console/console.h"
 #include "core/cmdline.h"
 #include "mm/paging.h"
@@ -78,20 +79,34 @@ static int       ring_ok;
 
 /* ---------- Forcewake ---------- */
 
+/* Mitgezaehlt: wer weckt, gibt auch wieder frei (auch wenn das Wecken nicht bestaetigt wurde); erst das letzte Freigeben
+ * laesst den Grafikkern schlafen. Vorher schaltete z. B. jede Blitter-Kopie mitten im 3D-Test (der den Kern die ganze
+ * Zeit wach haelt) das Wecken fuer alle ab. */
+static Spinlock fw_lock = SPINLOCK_INIT("igd_forcewake");
+static int      fw_refs;
+
 static int forcewake_get(void)
 {
-    igd_wr(FORCEWAKE_RENDER, MASKED_ON(1));
-    igd_wr(FORCEWAKE_BLITTER, MASKED_ON(1));
-    igd_wr(FORCEWAKE_MEDIA, MASKED_ON(1));
+    uint64_t fl = spin_lock(&fw_lock);
+    if (fw_refs++ == 0) {
+        igd_wr(FORCEWAKE_RENDER, MASKED_ON(1));
+        igd_wr(FORCEWAKE_BLITTER, MASKED_ON(1));
+        igd_wr(FORCEWAKE_MEDIA, MASKED_ON(1));
+    }
+    spin_unlock(&fw_lock, fl);
     return WAIT_UNTIL((igd_rd(FORCEWAKE_ACK_RENDER) & 1) && (igd_rd(FORCEWAKE_ACK_BLITTER) & 1) &&
                       (igd_rd(FORCEWAKE_ACK_MEDIA) & 1), 50);
 }
 
 static void forcewake_put(void)
 {
-    igd_wr(FORCEWAKE_MEDIA, MASKED_OFF(1));
-    igd_wr(FORCEWAKE_BLITTER, MASKED_OFF(1));
-    igd_wr(FORCEWAKE_RENDER, MASKED_OFF(1));
+    uint64_t fl = spin_lock(&fw_lock);
+    if (fw_refs > 0 && --fw_refs == 0) {
+        igd_wr(FORCEWAKE_MEDIA, MASKED_OFF(1));
+        igd_wr(FORCEWAKE_BLITTER, MASKED_OFF(1));
+        igd_wr(FORCEWAKE_RENDER, MASKED_OFF(1));
+    }
+    spin_unlock(&fw_lock, fl);
 }
 
 /* auch fuer die anderen Engines (igd_rcs.c) */

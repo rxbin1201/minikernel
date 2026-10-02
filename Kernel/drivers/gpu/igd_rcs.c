@@ -1196,6 +1196,7 @@ static int comp_start(void)
         return 0;
     if (!igd_forcewake_get()) {
         kprintf("igdcomp: Forcewake nicht bestaetigt\n");
+        igd_forcewake_put();
         return 0;
     }
     int ok = ring_start();
@@ -1346,6 +1347,7 @@ int igd_rcs_comp(const IgdCompOp *ops, int n, uint64_t *us, int async)
     igd_clflush((uint64_t)st, CS_OPS + (uint64_t)n * 256);
     igd_clflush((uint64_t)b, k * 4);
     if (!igd_forcewake_get()) {
+        igd_forcewake_put();
         rc = -2;
         goto out;
     }
@@ -2024,10 +2026,10 @@ static int test_3d(void)
     int rc = core_setup();
     if (rc)
         return rc;
-    /* Testflaeche 256 x 256, Tiefenpuffer dazu; fuer den sichtbaren Wuerfel Tiefenpuffer und Bild 512 x 512 */
+    /* Testflaeche 256 x 256, Tiefenpuffer dazu, Tiefenpuffer 512 x 512 fuer den sichtbaren Wuerfel */
     enum { TW = 256, TH = 256, TPAGES = TW * TH * 4 / 4096, DW = 512, DPAGES = DW * DW * 4 / 4096,
-           ALLP = 2 * TPAGES + 2 * DPAGES };
-    uint32_t base = core_base + 0x40, dbase = base + TPAGES, abase = base + 2 * TPAGES, cbase = abase + DPAGES;
+           ALLP = 2 * TPAGES + DPAGES };
+    uint32_t base = core_base + 0x40, dbase = base + TPAGES, abase = base + 2 * TPAGES;
     static uint64_t saved[ALLP];
     if ((rc = igd_ggtt_claim(base, ALLP, saved)) != 0)
         return rc;
@@ -2180,13 +2182,13 @@ static int test_3d(void)
     }
 
     /* 4. Sichtbar (nur an der Konsole): sich drehender Wuerfel 512 x 512 in der Mitte des Bildspeichers, 240 Bilder.
-     *    Gezeichnet wird in ein eigenes Bild, das der Blitter nach dem Bildwechsel fertig auf den Bildschirm kopiert -
-     *    direkt im sichtbaren Bild sah man sonst manchmal den Hintergrund ohne Wuerfel (grauer Streifen) */
+     *    Direkt ins angezeigte Bild, aber gleich nach dem Bildwechsel: Hintergrund und Wuerfel brauchen zusammen unter
+     *    0,5 ms, der Monitor erreicht die Zeilen des Wuerfels erst nach etwa 3 ms. Ohne dieses Warten sah man manchmal
+     *    den Hintergrund ohne Wuerfel (grauer Streifen). */
     if (!console_gfx_active() && igd_flip_ready && igd_scr_w >= DW + 64 && igd_scr_h >= DW + 64 && !(igd_scr_stride & 63)) {
         uint32_t x0 = ((igd_scr_w - DW) / 2) & ~15u, y0 = (igd_scr_h - DW) / 2;
-        int via_blt = igd_blt_on();
-        uint32_t rt = via_blt ? cbase << 12 : igd_surf_a + y0 * igd_scr_stride + x0 * 4; /* sonst direkt (Ausschnitt) */
-        uint32_t rpitch = via_blt ? DW * 4 : igd_scr_stride;
+        uint32_t rt = igd_surf_a + y0 * igd_scr_stride + x0 * 4; /* Ausschnitt des Bildspeichers als Render-Target */
+        uint32_t rpitch = igd_scr_stride;
         load_kernel(K3_PSCOL, (const uint32_t (*)[4])kbuf, asm_ps_color(kbuf, F_0_2, F_0_2, F_0_2, F_1_0));
         const uint32_t bg[3][4] = {{f32(DW), f32(DW), 0, 0}, {0, f32(DW), 0, 0}, {0, 0, 0, 0}};
         Draw3d clear = {rt, DW, DW, rpitch, L3_XYUV, PRIM_RECTLIST, 3, K3_PSCOL, &bg[0][0], 0, 0};
@@ -2198,18 +2200,15 @@ static int test_3d(void)
                 depth_a[i] = F_1_0;
             igd_clflush((uint64_t)depth_a, DPAGES * 4096);
             cube_tris(cv, f, f / 2 + 6, 420, DW / 2, DW / 2, &front);
-            if (draw_3d("4. Hintergrund", &clear, 0, 0) != 0 || draw_3d("4. Wuerfel", &cube, 0, 0) != 0)
-                rc = -38;
             if (!vbl || !igd_wait_vblank(30))
                 thread_sleep_ms(10);
-            if (rc == 0 && via_blt &&
-                igd_blt_copy_gtt_xy(igd_surf_a, igd_scr_stride, (int)x0, (int)y0, rt, DW * 4, DW, DW) != 0)
-                rc = -39;
+            if (draw_3d("4. Hintergrund", &clear, 0, 0) != 0 || draw_3d("4. Wuerfel", &cube, 0, 0) != 0)
+                rc = -38;
         }
         if (rc == 0)
             kprintf("igd3d: 4. drehender Wuerfel: 240 Bilder in %lu ms (%s, %s)\n",
-                    (unsigned long)((time_us() - t0) / 1000), via_blt ? "eigenes Bild, Blitter kopiert" : "direkt",
-                    vbl ? "nach dem Bildwechsel" : "ohne Bildwechsel-Interrupt");
+                    (unsigned long)((time_us() - t0) / 1000), "direkt ins Bild",
+                    vbl ? "gleich nach dem Bildwechsel" : "ohne Bildwechsel-Interrupt");
         thread_sleep_ms(1000);
         console_repaint();
     } else {
