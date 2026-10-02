@@ -101,14 +101,21 @@ In der Shell: `burn 5000 & burn 5000 & cpus` zeigt zwei ausgelastete CPUs.
   Clipper durchlassen, Rasterizer ohne Culling, Pixel-Shader (SIMD16, eigener Assembler), der eine feste Farbe per
   Render-Target-Write schreibt. Die CPU prueft die Testflaeche, die Pipeline-Statistik (Eckpunkte, Clipper,
   Pixel-Shader) zeigt, wie weit die GPU kam. Danach ein Dreieck, dessen Pixel-Shader die Farbe der Ecken interpoliert
-  (`pln`); die CPU prueft Flaeche, Mitte und Ecken. Der Vertex-Shader (SIMD8, Ausgabe per URB-Write) haengt auf dem
-  Test-PC noch, deshalb rechnet die CPU die Eckpunkte in Bildschirmkoordinaten um (Festkomma, Sinus aus einer
-  Tabelle, in float-Bitmuster umgerechnet - der Kernel hat keine FPU); der VS-Weg bleibt unter `VS3D_PROBE`.
+  (`pln`); die CPU prueft Flaeche, Mitte und Ecken (Eckpunkte von der CPU umgerechnet: Festkomma, Sinus aus einer
+  Tabelle, in float-Bitmuster umgerechnet - der Kernel hat keine FPU). Danach dasselbe Dreieck durch einen
+  Vertex-Shader (SIMD8, Ausgabe per URB-Write), der nur durchreicht. Auf dem Test-PC hingen die VS-Threads zuerst;
+  der Test probiert dann der Reihe nach Korrekturen, die Linux (i915) fuer Skylake bis Coffee Lake setzt
+  (WaEnableGapsTsvCreditFix, Clock-Gating, ROW_CHICKEN, FF_THREAD_MODE, URB-Aufteilung wie Mesa), und beim ersten
+  Haenger einen Shader, der vorher eine Marke in den Speicher schreibt (laeuft der Thread ueberhaupt?).
   Zuletzt ein Wuerfel mit Tiefentest: Tiefenpuffer D32_FLOAT (Y-Kacheln, von der CPU mit 1.0 gefuellt), Test
   "kleiner" mit Schreiben; die CPU dreht die 8 Ecken um zwei Achsen, rechnet die Perspektive und als Tiefe eine
   Funktion von 1/z (auf dem Bildschirm linear). Die vorderste Seite wird absichtlich zuerst gezeichnet - in der Mitte
   muss trotzdem ihre Farbe stehen, und der Tiefenwert dort (aus dem gekachelten Puffer gelesen) kleiner als 1.0
-  sein. An der Konsole dreht sich danach ein Wuerfel (512 x 512 in der Mitte, 240 Bilder)
+  sein. Geht der Vertex-Shader, kommt derselbe Wuerfel noch einmal ganz auf der GPU: im Vertex-Buffer stehen nur
+  Ecken, Grundfarben und Normalen in Objektkoordinaten, der Shader rechnet Ecke mal 4x4-Matrix (W = Abstand, durch W
+  teilt die Hardware) und die Helligkeit aus der gedrehten Normale (`saturate`); die CPU rechnet je Bild nur die
+  Matrix. An der Konsole dreht sich danach ein Wuerfel (512 x 512 in der Mitte, 240 Bilder, direkt nach dem
+  Bildwechsel gezeichnet) - mit Vertex-Shader, wenn er geht
 - **Zusammensetzen auf der GPU** (`igd_comp.c`, `SYS_GPUCOMP`; Desktop: `gpu.c`): Bildschirmbild, Hintergrund,
   Fensterbilder und Schatten liegen in geteiltem Speicher, den der Kernel fest in die GGTT einblendet (eigener Bereich,
   Referenz auf das shm-Objekt, solange angemeldet). Je Bild schickt der Desktop alle geaenderten Rechtecke als eine

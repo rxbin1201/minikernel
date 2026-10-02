@@ -1381,9 +1381,10 @@ out:
  *  - Dreiecke (TRILIST) ohne Vertex-Shader: Eckpunkte x, y, r, g, b, a schon in Bildschirmkoordinaten (die CPU rechnet
  *    Drehung und Verschiebung in Festkomma), der Pixel-Shader interpoliert die Farbe (pln aus den Ebenen-Koeffizienten
  *    des Rasterizers).
- *  - Dasselbe mit Vertex-Shader (SIMD8, Position mal 2x3-Matrix): auf dem Test-PC werden seine Threads nie fertig,
- *    auch mit einem Shader, der sich nur beendet - die Einrichtung der VS-Stufe stimmt noch nicht. Der Weg bleibt fuer
- *    die spaetere Fehlersuche (VS3D_PROBE).
+ *  - Mit Vertex-Shader (SIMD8): der Wuerfel steht unveraendert im Vertex-Buffer (Ecke, Farbe, Normale); der Shader
+ *    rechnet Ecke mal 4x4-Matrix (Drehung, Verschiebung, Perspektive - durch w teilt danach die Hardware) und die
+ *    Helligkeit aus der gedrehten Normale. Die CPU rechnet je Bild nur die Matrix. Auf dem Test-PC hingen die
+ *    VS-Threads zuerst; igdtest 3d probiert dafuer der Reihe nach Korrekturen aus dem Linux-Treiber (vs_wa_*).
  * Clipper durchlassen, Rasterizer ohne Culling und ohne Viewport-Umrechnung. Die Statistikzaehler der Pipeline zeigen,
  * wie weit die GPU gekommen ist. Gleitkommawerte stehen als Bitmuster da (der Kernel rechnet ohne FPU). */
 
@@ -1422,6 +1423,11 @@ out:
 #define K3_PSCOL  0x000                        /* Kernel im Kernelbereich (C_KERN) */
 #define K3_PSINT  0x400
 #define K3_VS     0x800
+#define F_0_35    0x3EB33333u
+#define F_0_65    0x3F266666u
+#define EU_NOMASK (1u << 9)                    /* Befehl fuer alle Kanaele, unabhaengig von der Ausfuehrungsmaske */
+#define EU_SAT    (1u << 31)                   /* Ergebnis auf 0-1 begrenzen */
+#define VS_MARK   0x5653F00Du                  /* Marke, die der Vertex-Shader zur Fehlersuche schreibt */
 
 /* Festkomma Q16.16 (mit Vorzeichen) als float-Bitmuster */
 static uint32_t f32q(int32_t q)
@@ -1485,65 +1491,82 @@ static int asm_ps_interp(uint32_t (*k)[4])
     return n;
 }
 
-/* Vertex-Shader (SIMD8, 8 Eckpunkte je Thread): Eingaben r2-r5 Position x, y, z, w und r6-r9 Farbe (je Register eine
- * Komponente fuer 8 Eckpunkte). x' = m0 x + m1 y + m2, y' = m3 x + m4 y + m5 (Bildschirmkoordinaten), z 0, w 1.
- * Ausgabe per URB-Write an die Handles aus r1: r112 Kopf der Nachricht, r113-r116 VUE-Kopf (4 x 0), r117-r120
- * Position; zweite Nachricht r121 Kopf, r122-r125 Farbe, Thread-Ende */
-/* Fuer die Fehlersuche (igdtest 3d probiert sie der Reihe nach): 0 = nur Thread-Ende (wie bei GPGPU), 1 = eine
- * URB-Nachricht (Kopf und Position aus der Eingabe, ohne Rechnung) mit Thread-Ende, 2 = dazu die Farbe in einer
- * zweiten Nachricht, 3 = der eigentliche Shader (asm_vs_affine) */
-__attribute__((unused)) static int asm_vs_variant(uint32_t (*k)[4], int v)
+/* Vertex-Shader (SIMD8, bis 8 Eckpunkte je Thread). Nutzlast: r0 Kopf, r1 URB-Handles (je Eckpunkt eins), ab r2 die
+ * Eingaben, je Register eine Komponente fuer 8 Eckpunkte. Ausgabe per URB-Write an die Handles (wie bei Mesa hoechstens
+ * 8 Datenregister je Nachricht): r112 Kopf, r113-r116 VUE-Kopf (4 x 0), r117-r120 Position; zweite Nachricht r121 Kopf,
+ * r122-r125 Farbe, mit Thread-Ende */
+static int vs_out_begin(uint32_t (*k)[4], int n)
 {
-    int n = 0;
-    if (v == 0) {
-        eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 112, 0), eu_r(EU_UD, 0, 0, 4, 3, 1), eu_none());
-        eu_send(k[n++], 3, SFID_SPAWNER, eu_null(), 112, EOT_DESC);
-        return n;
-    }
-    for (int h = 112; h <= (v >= 2 ? 121 : 112); h += 9) {
+    for (int h = 112; h <= 121; h += 9) {
         eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, h, 0), eu_r(EU_UD, 1, 0, 4, 3, 1), eu_none());
-        k[n - 1][0] |= 1u << 9;
+        k[n - 1][0] |= EU_NOMASK; /* alle 8 Handles */
     }
     for (int i = 0; i < 4; i++)
         eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 113 + i, 0), eu_imm(EU_UD, 0), eu_none());
-    for (int i = 0; i < 4; i++)
-        eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 117 + i, 0), eu_r(EU_UD, 2 + i, 0, 4, 3, 1), eu_none());
-    if (v == 1) {
-        eu_send(k[n++], 3, SFID_URB, eu_null(), 112, URB_WRITE_HDRPOS_EOT);
-        return n;
-    }
-    for (int i = 0; i < 4; i++)
-        eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 122 + i, 0), eu_r(EU_UD, 6 + i, 0, 4, 3, 1), eu_none());
+    return n;
+}
+
+static int vs_out_end(uint32_t (*k)[4], int n)
+{
     eu_send(k[n++], 3, SFID_URB, eu_null(), 112, URB_WRITE_HDRPOS);
     eu_send(k[n++], 3, SFID_URB, eu_null(), 121, URB_WRITE_COLOR_EOT);
     return n;
 }
 
-__attribute__((unused)) static int asm_vs_affine(uint32_t (*k)[4], const uint32_t m[6])
+/* Durchreichen: Position r2-r5, Farbe r6-r9 (schon in Bildschirmkoordinaten). marker: vorher 32 Bytes VS_MARK per
+ * Media Block Write an Binding-Table-Eintrag 0 des VS - zeigt bei einem Haenger, ob der Thread ueberhaupt lief */
+static int asm_vs_pass(uint32_t (*k)[4], int marker)
 {
     int n = 0;
-    for (int h = 112; h <= 121; h += 9) {
-        eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, h, 0), eu_r(EU_UD, 1, 0, 4, 3, 1), eu_none());
-        k[n - 1][0] |= 1u << 9; /* NoMask: alle 8 Handles */
+    if (marker) {
+        eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 30, 0), eu_r(EU_UD, 0, 0, 4, 3, 1), eu_none());
+        k[n - 1][0] |= EU_NOMASK;
+        static const uint32_t hdr[3] = {0, 0, 31}; /* x, y, Block 32 Bytes x 1 Zeile */
+        for (int i = 0; i < 3; i++) {
+            eu_inst(k[n++], EU_MOV, 0, 0, eu_d(EU_UD, 30, 4 * i), eu_imm(EU_UD, hdr[i]), eu_none());
+            k[n - 1][0] |= EU_NOMASK;
+        }
+        eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 31, 0), eu_imm(EU_UD, VS_MARK), eu_none());
+        k[n - 1][0] |= EU_NOMASK;
+        eu_send(k[n++], 3, SFID_DP1, eu_null(), 30, mbw_desc(2, 0));
     }
-    for (int i = 0; i < 4; i++)
-        eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 113 + i, 0), eu_imm(EU_UD, 0), eu_none());
-    EuOp x = eu_r(EU_F, 2, 0, 4, 3, 1), y = eu_r(EU_F, 3, 0, 4, 3, 1), t = eu_r(EU_F, 20, 0, 4, 3, 1);
-    for (int row = 0; row < 2; row++) {
+    n = vs_out_begin(k, n);
+    for (int i = 0; i < 4; i++) {
+        eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 117 + i, 0), eu_r(EU_UD, 2 + i, 0, 4, 3, 1), eu_none());
+        eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 122 + i, 0), eu_r(EU_UD, 6 + i, 0, 4, 3, 1), eu_none());
+    }
+    return vs_out_end(k, n);
+}
+
+/* Wuerfel: Eingabe Ecke r2-r4 (x, y, z), Grundfarbe r6-r9, Normale r10-r12. Position = m * (x, y, z, 1) (4x4, Zeilen
+ * X, Y, Z, W - danach teilt die Hardware durch W), Helligkeit 0.35 + 0.65 * saturate(l . Normale) mit l = zur Kamera
+ * (minus die dritte Zeile der Drehung), Farbe mal Helligkeit. m und l als Immediates (float-Bitmuster). */
+static int asm_vs_cube(uint32_t (*k)[4], const uint32_t m[16], const uint32_t l[3])
+{
+    int n = vs_out_begin(k, 0);
+    EuOp t = eu_r(EU_F, 20, 0, 4, 3, 1), lit = eu_r(EU_F, 21, 0, 4, 3, 1);
+    for (int row = 0; row < 4; row++) {
         int out = 117 + row;
         EuOp o = eu_r(EU_F, out, 0, 4, 3, 1);
-        eu_inst(k[n++], EU_MUL, 3, 0, eu_d(EU_F, out, 0), x, eu_imm(EU_F, m[row * 3 + 0]));
-        eu_inst(k[n++], EU_MUL, 3, 0, eu_d(EU_F, 20, 0), y, eu_imm(EU_F, m[row * 3 + 1]));
-        eu_inst(k[n++], EU_ADD, 3, 0, eu_d(EU_F, out, 0), o, t);
-        eu_inst(k[n++], EU_ADD, 3, 0, eu_d(EU_F, out, 0), o, eu_imm(EU_F, m[row * 3 + 2]));
+        eu_inst(k[n++], EU_MUL, 3, 0, eu_d(EU_F, out, 0), eu_r(EU_F, 2, 0, 4, 3, 1), eu_imm(EU_F, m[row * 4]));
+        for (int c = 1; c < 3; c++) {
+            eu_inst(k[n++], EU_MUL, 3, 0, eu_d(EU_F, 20, 0), eu_r(EU_F, 2 + c, 0, 4, 3, 1), eu_imm(EU_F, m[row * 4 + c]));
+            eu_inst(k[n++], EU_ADD, 3, 0, eu_d(EU_F, out, 0), o, t);
+        }
+        eu_inst(k[n++], EU_ADD, 3, 0, eu_d(EU_F, out, 0), o, eu_imm(EU_F, m[row * 4 + 3]));
     }
-    eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_F, 119, 0), eu_imm(EU_F, 0), eu_none());
-    eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_F, 120, 0), eu_imm(EU_F, F_1_0), eu_none());
-    for (int i = 0; i < 4; i++)
-        eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 122 + i, 0), eu_r(EU_UD, 6 + i, 0, 4, 3, 1), eu_none());
-    eu_send(k[n++], 3, SFID_URB, eu_null(), 112, URB_WRITE_HDRPOS);
-    eu_send(k[n++], 3, SFID_URB, eu_null(), 121, URB_WRITE_COLOR_EOT);
-    return n;
+    eu_inst(k[n++], EU_MUL, 3, 0, eu_d(EU_F, 21, 0), eu_r(EU_F, 10, 0, 4, 3, 1), eu_imm(EU_F, l[0]));
+    for (int c = 1; c < 3; c++) {
+        eu_inst(k[n++], EU_MUL, 3, 0, eu_d(EU_F, 20, 0), eu_r(EU_F, 10 + c, 0, 4, 3, 1), eu_imm(EU_F, l[c]));
+        eu_inst(k[n++], EU_ADD, 3, 0, eu_d(EU_F, 21, 0), lit, t);
+    }
+    k[n - 1][0] |= EU_SAT; /* abgewandte Seiten: 0 */
+    eu_inst(k[n++], EU_MUL, 3, 0, eu_d(EU_F, 21, 0), lit, eu_imm(EU_F, F_0_65));
+    eu_inst(k[n++], EU_ADD, 3, 0, eu_d(EU_F, 21, 0), lit, eu_imm(EU_F, F_0_35));
+    for (int c = 0; c < 3; c++)
+        eu_inst(k[n++], EU_MUL, 3, 0, eu_d(EU_F, 122 + c, 0), eu_r(EU_F, 6 + c, 0, 4, 3, 1), lit);
+    eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 125, 0), eu_r(EU_UD, 9, 0, 4, 3, 1), eu_none());
+    return vs_out_end(k, n);
 }
 
 /* Lage im Zustandsbereich (Surface- und Dynamic-State-Basis = C_STATE) */
@@ -1553,11 +1576,14 @@ __attribute__((unused)) static int asm_vs_affine(uint32_t (*k)[4], const uint32_
 #define S3_SFVP    0x140   /* SF_CLIP_VIEWPORT */
 #define S3_SCISSOR 0x180
 #define S3_BT      0x1C0   /* Binding Table des Pixel-Shaders: 0 = Render-Target */
+#define S3_BTVS    0x1E0   /* Binding Table des Vertex-Shaders (nur zur Fehlersuche: Marke) */
 #define S3_RT      0x200   /* Surface State des Render-Targets */
+#define S3_MARK    0x240   /* Surface State fuer die Marke des Vertex-Shaders (C_RES + 0x100) */
 #define S3_VB      0x300   /* Vertex-Buffer */
 
-/* Eckpunkte: x, y, u, v (ohne VS) / x, y, r, g, b, a mit / ohne VS / x, y, z, r, g, b, a (ohne VS, mit Tiefe) */
-enum { L3_XYUV, L3_VS_XYRGBA, L3_XYRGBA, L3_XYZRGBA };
+/* Eckpunkte: x, y, u, v (ohne VS) / x, y, r, g, b, a mit / ohne VS / x, y, z, r, g, b, a (ohne VS, mit Tiefe) /
+ * Wuerfel fuer den VS: x, y, z, r, g, b, a, Normale x, y, z */
+enum { L3_XYUV, L3_VS_XYRGBA, L3_XYRGBA, L3_XYZRGBA, L3_VS_CUBE };
 typedef struct {
     uint32_t        rt_gtt, w, h, pitch; /* Render-Target (Pixel, Zeilenlaenge in Bytes) */
     int             vs;                  /* L3_* */
@@ -1570,8 +1596,11 @@ typedef struct {
 
 static uint32_t vert_size(int layout)
 {
-    return layout == L3_XYUV ? 16 : layout == L3_XYZRGBA ? 28 : 24;
+    return layout == L3_XYUV ? 16 : layout == L3_XYZRGBA ? 28 : layout == L3_VS_CUBE ? 40 : 24;
 }
+
+static int vs_marker;   /* Fehlersuche: VS bekommt eine Binding Table mit der Flaeche fuer die Marke */
+static int vs_mesa_urb; /* Korrektur 5: URB-Aufteilung wie Mesa, Vertex-Cache aus */
 
 /* Zustaende und Batch fuer einen Aufruf */
 static uint32_t batch_3d(const Draw3d *d)
@@ -1589,6 +1618,15 @@ static uint32_t batch_3d(const Draw3d *d)
     rt[3] = d->pitch - 1;
     rt[7] = (4u << 25) | (5u << 22) | (6u << 19) | (7u << 16);
     rt[8] = d->rt_gtt;
+    if (vs_marker) { /* 8 x 1 Pixel (32 Bytes) in C_RES + 0x100 */
+        *(uint32_t *)(st + S3_BTVS) = S3_MARK;
+        uint32_t *mk = (uint32_t *)(st + S3_MARK);
+        mk[0] = rt[0];
+        mk[2] = 7;
+        mk[3] = 63;
+        mk[7] = rt[7];
+        mk[8] = core_gtt(C_RES) + 0x100;
+    }
     uint32_t vsize = vert_size(d->vs);
     memcpy(st + S3_VB, d->verts, (uint64_t)d->nvert * vsize);
 
@@ -1631,11 +1669,12 @@ static uint32_t batch_3d(const Draw3d *d)
     b[k++] = S3_CCVP;
     b[k++] = S3D(0x21);              /* VIEWPORT_STATE_POINTERS_SF_CLIP */
     b[k++] = S3_SFVP;
-    b[k++] = S3D(0x30);              /* URB_VS: 64 Eintraege zu 2 x 64 Bytes ab 2 x 8 KiB */
-    b[k++] = 64 | (1u << 16) | (2u << 25);
-    for (uint32_t s = 0x31; s <= 0x33; s++) { /* URB_HS, _DS, _GS: keine */
+    uint32_t urb0 = vs_mesa_urb ? 4 : 2; /* Korrektur 5: wie Mesa hinter 32 KiB fuer Push-Konstanten */
+    b[k++] = S3D(0x30);              /* URB_VS: 64 Eintraege zu 2 x 64 Bytes ab urb0 x 8 KiB */
+    b[k++] = 64 | (1u << 16) | (urb0 << 25);
+    for (uint32_t s = 0x31; s <= 0x33; s++) { /* URB_HS, _DS, _GS: keine (bei Korrektur 5 hinter dem VS) */
         b[k++] = S3D(s);
-        b[k++] = 2u << 25;
+        b[k++] = (vs_mesa_urb ? urb0 + 1 : urb0) << 25;
     }
     b[k++] = S3D(0x24);              /* BLEND_STATE_POINTERS */
     b[k++] = S3_BLEND | 1;
@@ -1657,21 +1696,22 @@ static uint32_t batch_3d(const Draw3d *d)
     }
     for (uint32_t s = 0x26; s <= 0x29; s++) { /* BINDING_TABLE_POINTERS_VS, _HS, _DS, _GS */
         b[k++] = S3D(s);
-        b[k++] = 0;
+        b[k++] = s == 0x26 && vs_marker ? S3_BTVS : 0;
     }
     for (uint32_t s = 0x2B; s <= 0x2E; s++) { /* SAMPLER_STATE_POINTERS_VS, _HS, _DS, _GS */
         b[k++] = S3D(s);
         b[k++] = 0;
     }
     b[k++] = S3D(0x10) | 7;          /* VS */
-    if (d->vs == L3_VS_XYRGBA) { /* Kernel, Eingaben ab r2 (1 x 256 Bit: Position und Farbe), 64 Threads, Statistik, SIMD8, an */
+    if (d->vs == L3_VS_XYRGBA || d->vs == L3_VS_CUBE) {
+        /* Kernel, Eingaben ab r2 (1 bzw. 2 x 256 Bit = 2 bzw. 4 vec4), 64 Threads, Statistik, SIMD8, an */
         b[k++] = K3_VS;
         b[k++] = 0;
+        b[k++] = vs_marker ? 1u << 18 : 0; /* Binding-Table-Eintraege */
         b[k++] = 0;
         b[k++] = 0;
-        b[k++] = 0;
-        b[k++] = (2u << 20) | (1u << 11) | (0u << 4);
-        b[k++] = (63u << 23) | (1u << 10) | (1u << 2) | 1u;
+        b[k++] = (2u << 20) | ((d->vs == L3_VS_CUBE ? 2u : 1u) << 11) | (0u << 4);
+        b[k++] = (63u << 23) | (1u << 10) | (1u << 2) | (vs_mesa_urb ? 1u << 1 : 0) | 1u;
         b[k++] = (1u << 21) | (1u << 16); /* Ausgabe fuer SBE: ab 256 Bit (nach Kopf und Position), 1 x 256 Bit */
     } else {
         for (int i = 0; i < 8; i++)
@@ -1782,6 +1822,15 @@ static uint32_t batch_3d(const Draw3d *d)
         b[k++] = (VFC_SRC << 28) | (VFC_SRC << 24) | (VFC_0 << 20) | (VFC_1F << 16);
         b[k++] = (1u << 25) | (SURF_RGBA32_FLOAT << 16) | 8;
         b[k++] = (VFC_SRC << 28) | (VFC_SRC << 24) | (VFC_SRC << 20) | (VFC_SRC << 16);
+    } else if (d->vs == L3_VS_CUBE) { /* Ecke x, y, z, 1, Grundfarbe r, g, b, a, Normale x, y, z, 0 */
+        nelem = 3;
+        b[k++] = S3D(0x09) | (2 * nelem - 1);
+        b[k++] = (1u << 25) | (SURF_RGB32_FLOAT << 16) | 0;
+        b[k++] = (VFC_SRC << 28) | (VFC_SRC << 24) | (VFC_SRC << 20) | (VFC_1F << 16);
+        b[k++] = (1u << 25) | (SURF_RGBA32_FLOAT << 16) | 12;
+        b[k++] = (VFC_SRC << 28) | (VFC_SRC << 24) | (VFC_SRC << 20) | (VFC_SRC << 16);
+        b[k++] = (1u << 25) | (SURF_RGB32_FLOAT << 16) | 28;
+        b[k++] = (VFC_SRC << 28) | (VFC_SRC << 24) | (VFC_SRC << 20) | (VFC_0 << 16);
     } else { /* ohne Vertex-Shader ist das schon das VUE: 4 x 0 (Kopf), Position x, y, 0, 1, Attribut (u, v, 0, 1
               * bzw. r, g, b, a) */
         nelem = 3;
@@ -1870,6 +1919,8 @@ static int draw_3d(const char *what, const Draw3d *d, int log, uint64_t *stat)
             if (!(idone >> instdone3d[i].bit & 1))
                 kprintf(" %s", instdone3d[i].name);
         kprintf("\n");
+        kprintf("igd3d:   SC_INSTDONE %#x, SAMPLER_INSTDONE %#x, ROW_INSTDONE %#x\n", igd_rd(0x7100), igd_rd(0xE160),
+                igd_rd(0xE164));
         dump("Zustand"); /* ACTHD - Batch-Anfang = wo die Engine stehen blieb (Dword = Abstand / 4) */
         kprintf("igd3d: Batch ab %#x, Zustaende ab %#x, Shader ab %#x\n", core_gtt(C_BATCH), core_gtt(C_STATE),
                 core_gtt(C_KERN));
@@ -1897,19 +1948,7 @@ static void load_kernel(uint32_t off, const uint32_t (*k)[4], int n)
     igd_clflush((uint64_t)dst, 0x400);
 }
 
-/* Drehung um a (0-63 = 0-360 Grad), Massstab s (Pixel je Einheit), Mittelpunkt (cx, cy): 2x3-Matrix */
-__attribute__((unused)) static void rot_matrix(uint32_t m[6], int a, int32_t s, int32_t cx, int32_t cy)
-{
-    int32_t c = sin64[(a + 16) & 63], sn = sin64[a & 63];
-    m[0] = f32q((int32_t)(((int64_t)c * s) >> 0));      /* s cos (Q16: c ist Q16, s ganzzahlig) */
-    m[1] = f32q((int32_t)(((int64_t)-sn * s) >> 0));
-    m[2] = f32q(cx << 16);
-    m[3] = f32q((int32_t)(((int64_t)sn * s) >> 0));
-    m[4] = f32q((int32_t)(((int64_t)c * s) >> 0));
-    m[5] = f32q(cy << 16);
-}
-
-/* Dasselbe Dreieck schon auf der CPU gedreht (a: 0-63 = 0-360 Grad), mit Massstab s und Mittelpunkt (cx, cy) in
+/* Dreieck mit roter, gruener, blauer Ecke auf der CPU gedreht (a: 0-63 = 0-360 Grad), mit Massstab s und Mittelpunkt (cx, cy) in
  * Bildschirmkoordinaten - alles in Festkomma (Q16), der Kernel hat keine FPU */
 static void tri_screen(uint32_t v[3][6], int a, int32_t s, int32_t cx, int32_t cy)
 {
@@ -2005,22 +2044,144 @@ static uint64_t ytile_off(uint32_t xb, uint32_t y, uint32_t pitch)
     return tile * 4096 + (xb % 128) / 16 * 512 + (y % 32) * 16 + xb % 16;
 }
 
-/* Dreieck mit roter, gruener, blauer Ecke um den Ursprung (Einheitskreis): Spitze oben */
-__attribute__((unused)) static void tri_verts(uint32_t v[3][6])
+/* Wuerfel fuer den Vertex-Shader: 36 Eckpunkte in Objektkoordinaten (Seiten in fester Reihenfolge), je x, y, z,
+ * Grundfarbe r, g, b, a, Normale x, y, z */
+static void cube_object(uint32_t v[36][10])
 {
-    static const uint32_t pos[3][2] = {{0, 0xBF800000u}, {0x3F5DB3D7u, 0x3F000000u}, {0xBF5DB3D7u, 0x3F000000u}};
+    static const int tri[6] = {0, 1, 2, 0, 2, 3};
+    int n = 0;
+    for (int fc = 0; fc < 6; fc++)
+        for (int t = 0; t < 6; t++, n++) {
+            int e = cube_f[fc][tri[t]];
+            for (int c = 0; c < 3; c++) {
+                v[n][c] = f32q(cube_v[e][c] * 65536);
+                v[n][3 + c] = f32q((int32_t)((((cube_rgb[fc] >> (16 - 8 * c)) & 0xFF) * 65536) / 255));
+                v[n][7 + c] = f32q(cube_n[fc][c] * 65536);
+            }
+            v[n][6] = F_1_0;
+        }
+}
+
+/* Matrix fuer asm_vs_cube, Drehung wie cube_tris (a um y, b um x), Abstand 4.5, Perspektive f, Mitte (cx, cy). Mit
+ * (x', y', z') = R p + (0, 0, 4.5): X = f x' + cx z', Y = -f y' + cy z', Z = 10/9 (z' - 1), W = z' - nach dem Teilen
+ * durch W genau die Bildschirmkoordinaten und die Tiefe von cube_tris. l = -(dritte Zeile von R) */
+static void cube_matrix(uint32_t m[16], uint32_t l[3], int a, int b, int32_t f, int32_t cx, int32_t cy)
+{
+    int64_t r[3][3];
     for (int i = 0; i < 3; i++) {
-        v[i][0] = pos[i][0];
-        v[i][1] = pos[i][1];
-        for (int c = 0; c < 3; c++)
-            v[i][2 + c] = c == i ? F_1_0 : 0;
-        v[i][5] = F_1_0;
+        int64_t e[3] = {i == 0 ? 65536 : 0, i == 1 ? 65536 : 0, i == 2 ? 65536 : 0}, o[3];
+        rot_yx(e, a, b, o);
+        for (int j = 0; j < 3; j++)
+            r[j][i] = o[j];
     }
+    const int64_t tz = 294912; /* 4.5 */
+    for (int i = 0; i < 3; i++) {
+        m[i] = f32q((int32_t)(f * r[0][i] + cx * r[2][i]));
+        m[4 + i] = f32q((int32_t)(-f * r[1][i] + cy * r[2][i]));
+        m[8 + i] = f32q((int32_t)(10 * r[2][i] / 9));
+        m[12 + i] = f32q((int32_t)r[2][i]);
+        l[i] = f32q((int32_t)-r[2][i]);
+    }
+    m[3] = f32q((int32_t)(cx * tz));
+    m[7] = f32q((int32_t)(cy * tz));
+    m[11] = f32q((int32_t)(10 * (tz - 65536) / 9));
+    m[15] = f32q((int32_t)tz);
+}
+
+/* Dreieck aus Teil 2 (Testflaeche 256 x 256) pruefen: Flaeche, Farbverlauf in der Mitte, Ecken, Rand unberuehrt */
+static int tri_check(const uint32_t *px, const char *what)
+{
+    enum { W = 256, H = 256 };
+    uint32_t written = 0;
+    for (uint32_t i = 0; i < W * H; i++)
+        written += px[i] != 0x11111111u;
+    uint32_t c_mid = px[128 * W + 128], c_r = px[40 * W + 128], c_g = px[172 * W + 200], c_b = px[172 * W + 56];
+    kprintf("igd3d: %s: %u Pixel gezeichnet (erwartet etwa 12990), Mitte %#x, oben %#x, rechts %#x, links %#x\n", what,
+            written, c_mid, c_r, c_g, c_b);
+    int mr = (int)(c_mid >> 16 & 0xFF), mg = (int)(c_mid >> 8 & 0xFF), mb = (int)(c_mid & 0xFF);
+    int ok = written > 12000 && written < 14000 && mr > 70 && mr < 100 && mg > 70 && mg < 100 && mb > 70 && mb < 100 &&
+             (c_r >> 16 & 0xFF) > 200 && (c_g >> 8 & 0xFF) > 180 && (c_b & 0xFF) > 180 && px[0] == 0x11111111u &&
+             px[W * H - 1] == 0x11111111u;
+    kprintf("igd3d: %s %s\n", what, ok ? "stimmt (Flaeche, Farbverlauf, Ecken)" : "FALSCH");
+    return ok;
+}
+
+/* Wuerfel aus Teil 3 pruefen: in der Mitte die Farbe der vorderen Seite, Tiefe dort zwischen 0.25 und 1, Pixelzahl */
+static int cube_check(const uint32_t *px, const uint32_t *depth, uint32_t front, const char *what)
+{
+    enum { W = 256, H = 256 };
+    uint32_t cpx = px[128 * W + 128] & 0xFFFFFF, cdep = depth[ytile_off(128 * 4, 128, W * 4) / 4], cwr = 0;
+    for (uint32_t i = 0; i < W * H; i++)
+        cwr += px[i] != 0x11111111u;
+    int dr = (int)(cpx >> 16) - (int)(front >> 16), dg = (int)(cpx >> 8 & 0xFF) - (int)(front >> 8 & 0xFF),
+        db = (int)(cpx & 0xFF) - (int)(front & 0xFF);
+    int ok = dr >= -2 && dr <= 2 && dg >= -2 && dg <= 2 && db >= -2 && db <= 2 && cdep > 0x3E800000u && cdep < F_1_0 &&
+             cwr > 7000 && cwr < 10000; /* erwartet etwa 8350 */
+    kprintf("igd3d: %s: %u Pixel, Mitte %#x (vordere Seite %#x), Tiefe in der Mitte %#x: %s\n", what, cwr, cpx, front,
+            cdep, ok ? "Tiefentest stimmt" : "FALSCH");
+    return ok;
+}
+
+/* Korrekturen fuer den Vertex-Shader: Linux (i915) setzt sie fuer Skylake/Kaby Lake/Coffee Lake, die Firmware nicht.
+ * Der Reihe nach dazu, bis der VS fertig wird: 1 WaEnableGapsTsvCreditFix, 2 Clock-Gating von SDE und GAFS aus,
+ * 3 WaDisablePartialInstShootdown/WaDisableThreadStallDopClockGating und WaEnableLbsSlaRetryTimerDecrement,
+ * 4 VS-Referenzzaehler ohne "Full Force Miss" (so bei Broadwell), 5 URB-Aufteilung wie Mesa und Vertex-Cache aus. */
+#define R_GARBCNTL       0xB004
+#define R_UCGCTL4        0x940C
+#define R_UCGCTL6        0x9430
+#define R_ROW_CHICKEN    0xE4F0 /* maskiert */
+#define R_SCRATCH1       0xB11C
+#define R_FF_THREAD_MODE 0x20A0
+#define R_L3CNTLREG      0x7034
+#define ROW_CHICKEN_BITS ((1u << 8) | (1u << 5))
+static const char *const vs_wa_name[6] = {"ohne Korrektur", "Korrektur 1 (GAPS-TSV-Credit)",
+                                          "Korrekturen 1-2 (+ Clock-Gating aus)", "Korrekturen 1-3 (+ ROW_CHICKEN, LBS)",
+                                          "Korrekturen 1-4 (+ FF_THREAD_MODE)", "Korrekturen 1-5 (+ URB wie Mesa)"};
+static const uint32_t vs_wa_reg[7] = {R_GARBCNTL, R_UCGCTL4, R_UCGCTL6, R_SCRATCH1, R_FF_THREAD_MODE, R_ROW_CHICKEN,
+                                      R_L3CNTLREG};
+static uint32_t vs_wa_old[7];
+
+static void vs_wa_save(void)
+{
+    static const char *const nm[7] = {"GARBCNTL", "UCGCTL4", "UCGCTL6", "SCRATCH1", "FF_THREAD_MODE", "ROW_CHICKEN",
+                                      "L3CNTLREG"};
+    kprintf("igd3d: Register:");
+    for (int i = 0; i < 7; i++) {
+        vs_wa_old[i] = igd_rd(vs_wa_reg[i]);
+        kprintf(" %s %#x", nm[i], vs_wa_old[i]);
+    }
+    kprintf("\n");
+}
+
+/* Korrekturen 1..step setzen (nach jedem Zuruecksetzen der Engine erneut) */
+static void vs_wa_apply(int step)
+{
+    if (step >= 1)
+        igd_wr(R_GARBCNTL, igd_rd(R_GARBCNTL) | (1u << 7));
+    if (step >= 2) {
+        igd_wr(R_UCGCTL4, igd_rd(R_UCGCTL4) | (1u << 14));
+        igd_wr(R_UCGCTL6, igd_rd(R_UCGCTL6) | (1u << 14));
+    }
+    if (step >= 3) {
+        igd_wr(R_ROW_CHICKEN, MASKED_ON(ROW_CHICKEN_BITS));
+        igd_wr(R_SCRATCH1, igd_rd(R_SCRATCH1) | (1u << 2));
+    }
+    if (step >= 4)
+        igd_wr(R_FF_THREAD_MODE, igd_rd(R_FF_THREAD_MODE) & ~((1u << 15) | (1u << 19)));
+    vs_mesa_urb = step >= 5;
+}
+
+static void vs_wa_restore(void)
+{
+    for (int i = 0; i < 5; i++)
+        igd_wr(vs_wa_reg[i], vs_wa_old[i]);
+    igd_wr(R_ROW_CHICKEN, ROW_CHICKEN_BITS << 16 | (vs_wa_old[5] & ROW_CHICKEN_BITS));
+    vs_mesa_urb = 0;
 }
 
 static int test_3d(void)
 {
-    int pre = igd_preflight("Stufe 7 - 3D-Pipeline: Rechteck, Dreieck mit Farbverlauf, Wuerfel mit Tiefentest");
+    int pre = igd_preflight("Stufe 7 - 3D-Pipeline: Rechteck, Dreieck, Wuerfel mit Tiefentest, Vertex-Shader");
     if (pre)
         return pre;
     int rc = core_setup();
@@ -2048,6 +2209,7 @@ static int test_3d(void)
     igd_clflush(mem, TPAGES * 4096);
 
     static uint32_t kbuf[64][4];
+    vs_marker = vs_mesa_urb = 0;
     if (!igd_forcewake_get()) {
         kprintf("igd3d: Forcewake nicht bestaetigt\n");
         rc = -9;
@@ -2091,41 +2253,7 @@ static int test_3d(void)
     for (uint32_t i = 0; i < TW * TH; i++)
         px[i] = 0x11111111u;
     igd_clflush(mem, TPAGES * 4096);
-    uint32_t m[6], tv[3][6];
-#ifdef VS3D_PROBE
-    rot_matrix(m, 0, 100, 128, 128);
-    tri_verts(tv);
-    Draw3d t1 = {base << 12, TW, TH, TW * 4, L3_VS_XYRGBA, PRIM_TRILIST, 3, K3_PSINT, &tv[0][0], 0, 0};
-    /* Varianten des Vertex-Shaders der Reihe nach (Fehlersuche): welcher Baustein klemmt? */
-    static const char *const vname[4] = {"nur Thread-Ende", "eine URB-Nachricht", "zwei URB-Nachrichten",
-                                         "mit Matrix (eigentlicher Shader)"};
-    int vs_ok = 0;
-    for (int v = 0; v < 4; v++) {
-        for (uint32_t i = 0; i < TW * TH; i++)
-            px[i] = 0x11111111u;
-        igd_clflush(mem, TPAGES * 4096);
-        int nk = v < 3 ? asm_vs_variant(kbuf, v) : asm_vs_affine(kbuf, m);
-        load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, nk);
-        int r = draw_3d(vname[v], &t1, 0, stat);
-        igd_clflush(mem, TPAGES * 4096);
-        uint32_t wr = 0;
-        for (uint32_t i = 0; i < TW * TH; i++)
-            wr += px[i] != 0x11111111u;
-        kprintf("igd3d: VS-Variante %d (%s): %s; Vertex-Shader %lu, Clipper ein %lu, Pixel-Shader %lu, %u Pixel\n", v,
-                vname[v], r == 0 ? "fertig" : "HAENGT", (unsigned long)stat[2], (unsigned long)stat[3],
-                (unsigned long)stat[5], wr);
-        if (v == 3)
-            vs_ok = r == 0;
-    }
-    if (!vs_ok) {
-        rc = -33;
-        goto out_ring;
-    }
-    kprintf("igd3d: Pipeline-Statistik:");
-    for (int i = 0; i < NSTAT3D; i++)
-        kprintf(" %s %lu%s", stat3d[i].name, (unsigned long)stat[i], i + 1 < NSTAT3D ? "," : "\n");
-#else
-    (void)m;
+    uint32_t tv[3][6];
     tri_screen(tv, 0, 100, 128, 128);
     Draw3d t1 = {base << 12, TW, TH, TW * 4, L3_XYRGBA, PRIM_TRILIST, 3, K3_PSINT, &tv[0][0], 0, 0};
     if (draw_3d("2. Dreieck mit Farbverlauf", &t1, 1, stat) != 0) {
@@ -2133,21 +2261,50 @@ static int test_3d(void)
         goto out_ring;
     }
     igd_clflush(mem, TPAGES * 4096);
-#endif
-    uint32_t written = 0;
-    for (uint32_t i = 0; i < TW * TH; i++)
-        written += px[i] != 0x11111111u;
-    uint32_t c_mid = px[128 * TW + 128], c_r = px[40 * TW + 128], c_g = px[172 * TW + 200], c_b = px[172 * TW + 56];
-    kprintf("igd3d: 2. Dreieck: %u Pixel gezeichnet (erwartet etwa 12990), Mitte %#x, oben %#x, rechts %#x, links %#x\n",
-            written, c_mid, c_r, c_g, c_b);
-    int mr = (int)(c_mid >> 16 & 0xFF), mg = (int)(c_mid >> 8 & 0xFF), mb = (int)(c_mid & 0xFF);
-    int ok = written > 12000 && written < 14000 && mr > 70 && mr < 100 && mg > 70 && mg < 100 && mb > 70 && mb < 100 &&
-             (c_r >> 16 & 0xFF) > 200 && (c_g >> 8 & 0xFF) > 180 && (c_b & 0xFF) > 180 && px[0] == 0x11111111u &&
-             px[TW * TH - 1] == 0x11111111u;
-    kprintf("igd3d: 2. Dreieck %s\n", ok ? "stimmt (Flaeche, Farbverlauf, Ecken)" : "FALSCH");
-    if (!ok) {
+    if (!tri_check(px, "2. Dreieck")) {
         rc = -34;
         goto out_ring;
+    }
+
+    /* 2b. Dasselbe Dreieck durch den Vertex-Shader (er reicht Position und Farbe nur durch). Haengt er, der Reihe nach
+     *     die Korrekturen aus vs_wa_apply versuchen; beim ersten Haenger zusaetzlich mit Marke: laeuft der Thread? */
+    vs_wa_save();
+    int vs_step = -1, vs_fin = 0;
+    volatile uint32_t *mark = (volatile uint32_t *)((uint8_t *)core_ptr(C_RES) + 0x100);
+    Draw3d t2 = {base << 12, TW, TH, TW * 4, L3_VS_XYRGBA, PRIM_TRILIST, 3, K3_PSINT, &tv[0][0], 0, 0};
+    for (int step = 0; step < 6 && !vs_fin; step++) {
+        for (int mk = 0; mk < (step == 0 ? 2 : 1) && !vs_fin; mk++) {
+            vs_wa_apply(step);
+            for (uint32_t i = 0; i < TW * TH; i++)
+                px[i] = 0x11111111u;
+            igd_clflush(mem, TPAGES * 4096);
+            for (int i = 0; i < 8; i++)
+                mark[i] = 0;
+            igd_clflush((uint64_t)mark, 32);
+            vs_marker = mk;
+            load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_pass(kbuf, mk));
+            int r = draw_3d(mk ? "2b. Vertex-Shader mit Marke" : "2b. Vertex-Shader", &t2, 0, stat);
+            vs_marker = 0;
+            igd_clflush(mem, TPAGES * 4096);
+            igd_clflush((uint64_t)mark, 32);
+            kprintf("igd3d: 2b. Vertex-Shader, %s%s: %s; Vertex-Shader %lu, Clipper ein %lu, Pixel-Shader %lu\n",
+                    vs_wa_name[step], mk ? ", mit Marke" : "", r == 0 ? "fertig" : "HAENGT", (unsigned long)stat[2],
+                    (unsigned long)stat[3], (unsigned long)stat[5]);
+            if (mk)
+                kprintf("igd3d: 2b. Marke %#x: %s\n", mark[0],
+                        mark[0] == VS_MARK ? "der VS-Thread laeuft" : "der VS-Thread lief NICHT (oder schrieb nicht)");
+            if (r == 0 && !mk) {
+                vs_fin = 1;
+                if (tri_check(px, "2b. Dreieck durch den Vertex-Shader"))
+                    vs_step = step;
+            }
+        }
+    }
+    if (vs_step < 0) {
+        vs_wa_restore();
+        kprintf("igd3d: 2b. Vertex-Shader %s - weiter ohne\n", vs_fin ? "fertig, aber das Bild ist falsch" : "haengt weiterhin");
+    } else {
+        kprintf("igd3d: 2b. Vertex-Shader arbeitet (%s)\n", vs_wa_name[vs_step]);
     }
 
     /* 3. Wuerfel mit Tiefentest auf der Testflaeche: die vorderste Seite wird zuerst gezeichnet - in der Mitte muss
@@ -2166,19 +2323,30 @@ static int test_3d(void)
         goto out_ring;
     }
     igd_clflush(mem, 2 * TPAGES * 4096);
-    uint32_t cpx = px[128 * TW + 128] & 0xFFFFFF, cdep = depth_t[ytile_off(128 * 4, 128, TW * 4) / 4];
-    uint32_t cwr = 0;
-    for (uint32_t i = 0; i < TW * TH; i++)
-        cwr += px[i] != 0x11111111u;
-    int dr = (int)(cpx >> 16) - (int)(front >> 16), dg = (int)(cpx >> 8 & 0xFF) - (int)(front >> 8 & 0xFF),
-        db = (int)(cpx & 0xFF) - (int)(front & 0xFF);
-    int cube_ok = dr >= -2 && dr <= 2 && dg >= -2 && dg <= 2 && db >= -2 && db <= 2 && cdep > 0x3E800000u &&
-                  cdep < F_1_0 && cwr > 7000 && cwr < 10000; /* erwartet etwa 8350 */
-    kprintf("igd3d: 3. Wuerfel: %u Pixel, Mitte %#x (vordere Seite %#x), Tiefe in der Mitte %#x: %s\n", cwr, cpx, front,
-            cdep, cube_ok ? "Tiefentest stimmt" : "FALSCH");
-    if (!cube_ok) {
+    if (!cube_check(px, depth_t, front, "3. Wuerfel")) {
         rc = -37;
         goto out_ring;
+    }
+
+    /* 3b. Derselbe Wuerfel mit Vertex-Shader: im Vertex-Buffer stehen nur die unveraenderten Ecken, Farben und Normalen;
+     *     Drehung, Perspektive und Helligkeit rechnet der Shader. Die vordere Seite steht im Puffer an erster Stelle,
+     *     die hintere an zweiter - ohne Tiefentest stuende in der Mitte die hintere. */
+    static uint32_t vcube[36][10];
+    uint32_t vm[16], vl[3];
+    int vs_cube = 0;
+    cube_object(vcube);
+    if (vs_step >= 0) {
+        for (uint32_t i = 0; i < TW * TH; i++) {
+            px[i] = 0x11111111u;
+            depth_t[i] = F_1_0;
+        }
+        igd_clflush(mem, 2 * TPAGES * 4096);
+        cube_matrix(vm, vl, 5, 3, 160, 128, 128);
+        load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_cube(kbuf, vm, vl));
+        Draw3d c2 = {base << 12, TW, TH, TW * 4, L3_VS_CUBE, PRIM_TRILIST, 36, K3_PSINT, &vcube[0][0], dbase << 12, TW * 4};
+        int r = draw_3d("3b. Wuerfel mit Vertex-Shader", &c2, 1, stat);
+        igd_clflush(mem, 2 * TPAGES * 4096);
+        vs_cube = r == 0 && cube_check(px, depth_t, front, "3b. Wuerfel mit Vertex-Shader");
     }
 
     /* 4. Sichtbar (nur an der Konsole): sich drehender Wuerfel 512 x 512 in der Mitte des Bildspeichers, 240 Bilder.
@@ -2193,13 +2361,22 @@ static int test_3d(void)
         const uint32_t bg[3][4] = {{f32(DW), f32(DW), 0, 0}, {0, f32(DW), 0, 0}, {0, 0, 0, 0}};
         Draw3d clear = {rt, DW, DW, rpitch, L3_XYUV, PRIM_RECTLIST, 3, K3_PSCOL, &bg[0][0], 0, 0};
         Draw3d cube = {rt, DW, DW, rpitch, L3_XYZRGBA, PRIM_TRILIST, 36, K3_PSINT, &cv[0][0], abase << 12, DW * 4};
+        if (vs_cube) { /* die CPU rechnet je Bild nur die Matrix */
+            cube.vs = L3_VS_CUBE;
+            cube.verts = &vcube[0][0];
+        }
         int vbl = igd_vblank_ok();
         uint64_t t0 = time_us();
         for (int f = 0; f < 240 && rc == 0; f++) {
             for (uint32_t i = 0; i < DW * DW; i++)
                 depth_a[i] = F_1_0;
             igd_clflush((uint64_t)depth_a, DPAGES * 4096);
-            cube_tris(cv, f, f / 2 + 6, 420, DW / 2, DW / 2, &front);
+            if (vs_cube) {
+                cube_matrix(vm, vl, f, f / 2 + 6, 420, DW / 2, DW / 2);
+                load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_cube(kbuf, vm, vl));
+            } else {
+                cube_tris(cv, f, f / 2 + 6, 420, DW / 2, DW / 2, &front);
+            }
             if (!vbl || !igd_wait_vblank(30))
                 thread_sleep_ms(10);
             if (draw_3d("4. Hintergrund", &clear, 0, 0) != 0 || draw_3d("4. Wuerfel", &cube, 0, 0) != 0)
@@ -2207,15 +2384,19 @@ static int test_3d(void)
         }
         if (rc == 0)
             kprintf("igd3d: 4. drehender Wuerfel: 240 Bilder in %lu ms (%s, %s)\n",
-                    (unsigned long)((time_us() - t0) / 1000), "direkt ins Bild",
+                    (unsigned long)((time_us() - t0) / 1000), vs_cube ? "Ecken rechnet der Vertex-Shader" : "Ecken rechnet die CPU",
                     vbl ? "gleich nach dem Bildwechsel" : "ohne Bildwechsel-Interrupt");
         thread_sleep_ms(1000);
         console_repaint();
     } else {
         kprintf("igd3d: sichtbarer Teil nur an der Konsole (ohne Desktop)\n");
     }
-    if (rc == 0)
-        kprintf("igd3d: Rasterizer, Pixel-Shader und Tiefentest arbeiten\n");
+    if (rc == 0) {
+        kprintf("igd3d: Rasterizer, Pixel-Shader und Tiefentest arbeiten; Vertex-Shader: %s\n",
+                vs_cube ? "arbeitet (Wuerfel ganz auf der GPU)" : vs_step >= 0 ? "Dreieck ja, Wuerfel FALSCH" : "geht noch nicht");
+        if (!vs_cube)
+            rc = -40;
+    }
 
 out_ring:
     ring_stop();
