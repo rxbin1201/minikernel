@@ -695,7 +695,7 @@ static void syscall_do(SyscallFrame *f)
     }
     case SYS_FDAVAIL: {
         FdObj *o = process_fd_get(process_current(), (int)f->rdi);
-        ret = o ? fdobj_available(o) : ERR_BADF;
+        ret = o ? fdobj_wait(o, f->rsi > 1000 ? 1000 : f->rsi) : ERR_BADF;
         break;
     }
     case SYS_STATFS: {

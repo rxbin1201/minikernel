@@ -334,6 +334,7 @@ static inline s64 sys_keymap(const char *set, char out[16]) { return syscall3(SY
 static inline s64 sys_gfx(int op, const void *arg)          { return syscall3(SYS_GFX, op, (u64)arg, 0); } /* 0 = uebernehmen, 1 = GfxBlit, 2 = freigeben */
 static inline s64 sys_font(unsigned cp, unsigned char out[16]) { return syscall3(SYS_FONT, cp, (u64)out, 0); }
 static inline s64 sys_fdavail(int fd)                         { return syscall3(SYS_FDAVAIL, fd, 0, 0); } /* Pipe: Bytes, 0 = nichts, -1 = Ende; Schreibende: freier Platz */
+static inline s64 sys_fdwait(int fd, u64 ms)                  { return syscall3(SYS_FDAVAIL, fd, ms, 0); } /* wie sys_fdavail, wartet aber bis zu ms (max. 1000) auf Daten */
 static inline s64 sys_statfs(const char *path, u64 out[2])  { return syscall3(SYS_STATFS, (u64)path, (u64)out, 0); } /* Groesse, frei (Bytes) */
 static inline s64 sys_mousemode(int app)                    { return syscall3(SYS_MOUSEMODE, app, 0, 0); } /* 1 = Programm wertet die Maus aus */
 static inline s64 sys_clipboard_get(char *buf, u64 max)      { return syscall3(SYS_CLIPBOARD, 0, (u64)buf, max); } /* Laenge */

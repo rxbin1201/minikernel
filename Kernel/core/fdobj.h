@@ -41,5 +41,6 @@ int64_t fdobj_seek(FdObj *o, int64_t offset, int whence); /* nur Dateien; sonst 
 /* Pipe-Leseende und TCP: Zahl der wartenden Bytes, 0 = noch nichts, -1 = Ende (kein Schreiber mehr bzw. geschlossen). Pipe-Schreibende: freier
  * Platz, -1 = kein Leser mehr. Dateien: 1, Konsole: 0 */
 int64_t fdobj_available(FdObj *o);
+int64_t fdobj_wait(FdObj *o, uint64_t ms); /* wie fdobj_available, wartet aber am Leseende einer leeren Pipe bis zu ms */
 
 #endif

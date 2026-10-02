@@ -251,17 +251,19 @@ Thread *thread_create(const char *name, ThreadEntry entry, void *arg)
 }
 
 /* Idle-Thread jeder CPU: waehrend er auf den naechsten Interrupt wartet, haelt die CPU den Big Kernel Lock nicht.
- * Der Timer-Interrupt holt ihn wieder (bkl_enter) und wechselt ueber sched_tick zu bereiten Threads. */
+ * Nach jedem Interrupt (Geraet, Timer, VECTOR_WAKE von event_signal) uebernimmt er einen bereiten Thread sofort -
+ * frueher erst beim naechsten Timer-Tick: ein geweckter Thread wartete so bis zu 10 ms auf eine CPU. */
 static void __attribute__((noreturn)) idle_loop(void)
 {
     for (;;) {
         reap_dead();
         cpu_cli();
         bkl_release();
-        do /* ohne BKL schlafen, bis es etwas aufzuraeumen gibt; bereite Threads holt der Timer (sched_tick_prepare) */
+        while ((cpu_cli(), !*(Thread *volatile *)&dead_list && !sched_has_waiting()))
             cpu_wait_for_interrupt(); /* sti; hlt */
-        while ((cpu_cli(), !*(Thread *volatile *)&dead_list));
         bkl_acquire();
+        if (sched_has_waiting())
+            schedule(); /* IF = 0, mit BKL - wie sched_preempt aus dem Timer */
         cpu_sti();
     }
 }
@@ -406,20 +408,41 @@ int event_wait(Event *e, uint64_t timeout_ms)
     return got;
 }
 
+/* Eine andere CPU im Leerlauf aus dem hlt holen, damit sie einen eben bereit gewordenen Thread sofort uebernimmt
+ * (sonst erst bei ihrem naechsten Timer-Tick). Laeuft auf dieser CPU selbst der Idle-Thread (Interrupt im Leerlauf),
+ * uebernimmt sie ihn nach dem Interrupt selbst. */
+static void kick_idle_cpu(void)
+{
+    Cpu *self = this_cpu();
+    if (self->current == self->idle)
+        return;
+    for (unsigned i = 0; i < smp_cpu_count(); i++) {
+        Cpu *c = smp_cpu(i);
+        if (c && c != self && c->online && c->idle && *(Thread *volatile *)&c->current == c->idle) {
+            apic_send_wake(c->apic_id);
+            return;
+        }
+    }
+}
+
 /* Weckt den wartenden Thread (oder merkt sich das Signal). Auch aus Interrupt-Handlern und ohne BKL aufrufbar. */
 void event_signal(Event *e)
 {
     uint64_t f = spin_lock(&sched_lock);
     e->pending = 1;
     Thread *t = e->waiter;
+    int woke = 0;
     if (t && t->state == T_SLEEPING) {
         t->state = T_READY;
         t->wakeups++;
         wakeups_total++;
         enqueue(t);
+        woke = 1;
     }
     e->waiter = 0;
     spin_unlock(&sched_lock, f);
+    if (woke && sched_on)
+        kick_idle_cpu();
 }
 
 /* ---------- Timer ---------- */

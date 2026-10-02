@@ -344,6 +344,65 @@ static void stress_thread(void *arg)
     stress_done++;
 }
 
+/* Aufwecken ueber eine freie CPU: der Wartende soll sofort laufen, nicht erst beim naechsten Timer-Tick der CPU */
+static Event             wake_ev;
+static volatile int      wake_ready, wake_quit;
+static volatile uint64_t wake_at;
+
+static void wake_thread(void *arg)
+{
+    (void)arg;
+    while (!wake_quit) {
+        wake_ready = 1;
+        if (event_wait(&wake_ev, 500))
+            wake_at = time_us();
+    }
+    wake_ready = 2;
+}
+
+static void smp_wake(void)
+{
+    wake_quit = wake_ready = 0;
+    wake_at = 0;
+    thread_create("wake", wake_thread, 0);
+    uint64_t sum = 0, worst = 0;
+    int rounds = 10, ok = 1;
+    for (int i = 0; i < rounds && ok; i++) {
+        for (int w = 0; w < 100 && !wake_ready; w++)
+            thread_sleep_ms(1);
+        thread_sleep_ms(20); /* der Wartende schlaeft sicher, seine CPU ist im hlt */
+        wake_ready = 0;
+        wake_at = 0;
+        if (i == rounds - 1)
+            wake_quit = 1;
+        uint64_t t0 = time_us();
+        event_signal(&wake_ev);
+        cpu_cli();
+        bkl_release(); /* weiterrechnen, ohne zu blockieren: aufnehmen muss ihn eine andere CPU */
+        cpu_sti();
+        while (!wake_at && time_us() - t0 < 50000)
+            __asm__ __volatile__("pause");
+        cpu_cli();
+        bkl_acquire();
+        cpu_sti();
+        if (!wake_at) {
+            ok = 0;
+            break;
+        }
+        uint64_t d = wake_at - t0;
+        sum += d;
+        worst = d > worst ? d : worst;
+    }
+    wake_quit = 1;
+    event_signal(&wake_ev);
+    for (int w = 0; w < 100 && wake_ready != 2; w++)
+        thread_sleep_ms(10);
+    kprintf("  Aufwecken ueber eine freie CPU: im Mittel %lu us, hoechstens %lu us\n",
+            (unsigned long)(ok ? sum / (uint64_t)rounds : 0), (unsigned long)worst);
+    check("Aufwecken: ein freier Kern uebernimmt den Thread sofort (im Mittel unter 2 ms, nicht erst beim Tick)",
+          ok && sum / (uint64_t)rounds < 2000);
+}
+
 static void smp_stress(unsigned n)
 {
     unsigned k = n < 4 ? n : 4;
@@ -427,6 +486,7 @@ void test_smp(void)
         check("Mit freien CPUs werden rechnende kaum unterbrochen", bkl_ticks * 10 < sum);
 
     smp_stress(n);
+    smp_wake();
 
     /* brk/mmap/munmap laufen ohne BKL: mehrere Prozesse gleichzeitig, jeder prueft seinen Speicher */
     uint64_t frames = pmm_free_frame_count(), heap0 = heap_total_bytes(), tables0 = paging_table_frames();

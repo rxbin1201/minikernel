@@ -83,6 +83,10 @@ void isr_handler(InterruptFrame *f)
         apic_timer_unlocked(f); /* holt den BKL nur bei Bedarf */
         return;
     }
+    if (f->vector == VECTOR_WAKE) { /* nur aus dem hlt holen: den bereiten Thread holt sich idle_loop */
+        apic_eoi();
+        return;
+    }
     int taken = bkl_enter();
     isr_dispatch(f);
     bkl_leave(taken);

@@ -44,7 +44,8 @@
 #define SYS_VIDEOINFO 41 /* (index, VideoInfo*) -> 0 oder ERR_NOENT am Ende: verfuegbare Grafikmodi */
 #define SYS_GFX       47 /* (op, arg): 0 = Bildschirm uebernehmen -> (Breite << 32) | Hoehe, 1 = GfxBlit* kopieren, 2 = freigeben, 3 = Hardware-Mauszeiger (arg = x | y << 16 | sichtbar << 32; ERR_NOSYS ohne) */
 #define SYS_FONT      48 /* (zeichen, out[16]) -> 0: 8x16-Glyph (Bit 7 = links) */
-#define SYS_FDAVAIL   49 /* (fd) -> wartende Bytes einer Pipe, 0 = noch nichts, -1 = Ende; Schreibende: freier Platz, -1 = kein Leser */
+#define SYS_FDAVAIL   49 /* (fd, warten_ms) -> wartende Bytes einer Pipe, 0 = noch nichts, -1 = Ende; Schreibende: freier Platz, -1 = kein Leser.
+                          * warten_ms (hoechstens 1000): am Leseende einer leeren Pipe so lange auf Daten warten (wacht sofort auf) */
 #define SYS_STATFS    46 /* (pfad, u64 out[2]) -> 0: Groesse und freier Platz in Bytes */
 #define SYS_MOUSEMODE 44 /* (1 = Programm wertet die Maus aus, 0 = Konsole) */
 #define SYS_CLIPBOARD 45 /* (0, buf, max) -> Laenge der Zwischenablage (kopiert hoechstens max Bytes); (1, text, len) -> 0: setzen */
