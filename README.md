@@ -119,6 +119,18 @@ In der Shell: `burn 5000 & burn 5000 & cpus` zeigt zwei ausgelastete CPUs.
   Pixel fuer Pixel stimmen und, um einen halben Texel verschoben, bilinear den Mittelwert von 2 x 2 Texeln ergeben.
   An der Konsole dreht sich danach ein texturierter, beleuchteter Wuerfel (512 x 512 in der Mitte, 240 Bilder,
   direkt nach dem Bildwechsel gezeichnet)
+- **3D fuer Programme** (`SYS_GPUCOMP 8`, Bibliothek `Userland/lib/gl.c` mit `gl.h`, Demo `gldemo`): ein kleines
+  OpenGL im Stil von 1.x - `glBegin`/`glEnd` (Dreiecke, Streifen, Faecher, Vierecke), Matrix-Stapel mit
+  `glTranslatef`/`glRotatef`/`glScalef`/`gluPerspective`/`glFrustum`/`glOrtho`, Texturen (`glTexImage2D`, naechster
+  Texel oder bilinear), ein Richtungslicht (`GL_LIGHTING`, `GL_LIGHT0`), Tiefentest, `glClear`. Die GPU zeichnet
+  direkt in das geteilte Fensterbild (beim Desktop als Flaeche angemeldet, Breite Vielfaches von 16), der Desktop
+  setzt es wie jedes Fenster zusammen - nichts wird umkopiert. Die Bibliothek sammelt Dreiecke mit gleichem Zustand
+  (bis 1365 Eckpunkte) und gibt sie als einen Auftrag ab: der Kernel loescht auf Wunsch Farbe und Tiefe (Rechteck
+  mit Tiefentest "immer"), laedt Matrix und Licht als Immediates in den Vertex-Shader und zeichnet mit Textur mal
+  Farbe; Tiefenpuffer ist ein weiterer geteilter Speicher (D32_FLOAT, Y-Kacheln). Die Render-Engine teilt er sich mit
+  dem Zusammensetzen (vorher dessen Auftrag abwarten; jeder Batch waehlt seine Pipeline und setzt den ganzen Zustand).
+  Ohne Intel-GPU (QEMU, `gpucomp=soft`, ausserhalb des Desktops) rechnet `gl.c` dasselbe mit der CPU; `gldemo -cpu`
+  erzwingt das zum Vergleich. Noch nicht: Abschneiden an der nahen Ebene, Mischen (Alpha), Mip-Stufen
 - **Zusammensetzen auf der GPU** (`igd_comp.c`, `SYS_GPUCOMP`; Desktop: `gpu.c`): Bildschirmbild, Hintergrund,
   Fensterbilder und Schatten liegen in geteiltem Speicher, den der Kernel fest in die GGTT einblendet (eigener Bereich,
   Referenz auf das shm-Objekt, solange angemeldet). Je Bild schickt der Desktop alle geaenderten Rechtecke als eine

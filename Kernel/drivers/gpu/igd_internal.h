@@ -70,6 +70,27 @@ int igd_rcs_comp(const IgdCompOp *ops, int n, uint64_t *us, int async);
 int igd_rcs_comp_wait(uint64_t *us);
 int igd_front_surface(uint32_t *gtt, uint32_t *pitch, uint32_t *w, uint32_t *h); /* angezeigter Puffer, 0 = ok */
 
+/* 3D fuer Programme (igd_rcs.c, Systemaufruf in igd_comp.c): erst auf Wunsch Farbe und/oder Tiefe loeschen, dann
+ * Dreiecke (je Eckpunkt x, y, z, u, v, Normale x, y, z, r, g, b, a als float) mit Matrix und Licht im Vertex-Shader
+ * (Helligkeit = amb + dif * saturate(Normale . l)) und Textur mal Farbe im Pixel-Shader. Gleitkommawerte als Bitmuster.
+ * Ziel: Zeichenbereich w x h ab rt_gtt (Anfang an 64 Byte, Zeilenlaenge pitch); Tiefenpuffer D32_FLOAT, Y-Kacheln.
+ * 0 = fertig, -1 = Engine-Fehler (zurueckgesetzt) */
+#define IGD_3D_DEPTH       1 /* Tiefentest "kleiner" mit Schreiben */
+#define IGD_3D_LINEAR      2 /* Textur bilinear (sonst naechster Texel) */
+#define IGD_3D_CLEAR_COLOR 4
+#define IGD_3D_CLEAR_DEPTH 8
+#define IGD_3D_MAX_VERT    1365 /* passt in 64 KiB (48 Bytes je Eckpunkt), Vielfaches von 3 */
+typedef struct {
+    uint32_t        rt_gtt, w, h, pitch, mocs;
+    uint32_t        depth_gtt, depth_pitch;
+    uint32_t        tex_gtt, tex_w, tex_h, tex_pitch;
+    uint32_t        flags, clear_color, clear_depth;
+    uint32_t        m[16], l[3], amb, dif;
+    uint32_t        nvert;
+    const uint32_t *verts;
+} IgdDraw3d;
+int igd_rcs_draw3d(const IgdDraw3d *g);
+
 /* Doppelpufferung (igd.c): A = Framebuffer der Firmware, B = zweiter Puffer im RAM */
 extern int       igd_flip_ready;
 extern uint32_t  igd_scr_w, igd_scr_h, igd_scr_stride;

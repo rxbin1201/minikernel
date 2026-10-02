@@ -156,7 +156,8 @@ static void begin(uint32_t dwords)
 /* Fester Speicher der Render-Engine: beim ersten Test angelegt und danach behalten (wie beim Blitter). So bleiben die
  * Zuordnungen in der GGTT gleich - neu angelegte Seiten an alten Adressen sah die Engine beim zweiten Lauf noch mit
  * der alten Zuordnung. */
-enum { C_RING = 0, C_HWS = 4, C_BATCH = 5, C_STATE = 9, C_RES = 10, C_KERN = 11, C_CKERN = 13, C_CSTATE = 17, C_PAGES = 25 };
+enum { C_RING = 0, C_HWS = 4, C_BATCH = 5, C_STATE = 9, C_RES = 10, C_KERN = 11, C_CKERN = 13, C_CSTATE = 17, C_VB = 25,
+       C_PAGES = 41 }; /* C_VB: Vertex-Buffer der 3D-Pipeline, 16 Seiten */
 
 /* Die Engine gehoert entweder einem Test (igdtest render/gpgpu) oder dem Zusammensetzen; nach einem Test richtet das
  * Zusammensetzen sie neu ein (comp_ready = 0) */
@@ -1568,8 +1569,9 @@ static int asm_vs_cube(uint32_t (*k)[4], const uint32_t m[16], const uint32_t l[
 }
 
 /* Texturierter Wuerfel: Eingabe Ecke r2-r4, Textur u, v r6-r7, Normale r10-r12, Farbe r14-r17. Position wie bei
- * asm_vs_cube (erste Nachricht ab r100), dann r113-r116 = u, v, 0, 1 und r117-r120 = Farbe mal Helligkeit */
-static int asm_vs_tex(uint32_t (*k)[4], const uint32_t m[16], const uint32_t l[3])
+ * asm_vs_cube (erste Nachricht ab r100), dann r113-r116 = u, v, 0, 1 und r117-r120 = Farbe mal Helligkeit
+ * amb + dif * saturate(Normale . l) (ohne Licht: l = 0, amb = 1) */
+static int asm_vs_tex(uint32_t (*k)[4], const uint32_t m[16], const uint32_t l[3], uint32_t amb, uint32_t dif)
 {
     int n = 0;
     for (int h = 100; h <= 112; h += 12) {
@@ -1595,8 +1597,8 @@ static int asm_vs_tex(uint32_t (*k)[4], const uint32_t m[16], const uint32_t l[3
         eu_inst(k[n++], EU_ADD, 3, 0, eu_d(EU_F, 21, 0), lit, t);
     }
     k[n - 1][0] |= EU_SAT;
-    eu_inst(k[n++], EU_MUL, 3, 0, eu_d(EU_F, 21, 0), lit, eu_imm(EU_F, F_0_65));
-    eu_inst(k[n++], EU_ADD, 3, 0, eu_d(EU_F, 21, 0), lit, eu_imm(EU_F, F_0_35));
+    eu_inst(k[n++], EU_MUL, 3, 0, eu_d(EU_F, 21, 0), lit, eu_imm(EU_F, dif));
+    eu_inst(k[n++], EU_ADD, 3, 0, eu_d(EU_F, 21, 0), lit, eu_imm(EU_F, amb));
     eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 113, 0), eu_r(EU_UD, 6, 0, 4, 3, 1), eu_none());
     eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_UD, 114, 0), eu_r(EU_UD, 7, 0, 4, 3, 1), eu_none());
     eu_inst(k[n++], EU_MOV, 3, 0, eu_d(EU_F, 115, 0), eu_imm(EU_F, 0), eu_none());
@@ -1643,7 +1645,6 @@ static int asm_ps_tex(uint32_t (*k)[4], int mod)
 #define S3_RT      0x200   /* Surface State des Render-Targets (Binding-Table-Eintrag 0) */
 #define S3_TEX     0x240   /* Surface State der Textur (Eintrag 1) */
 #define S3_SAMP    0x280   /* SAMPLER_STATE */
-#define S3_VB      0x300   /* Vertex-Buffer */
 
 /* Eckpunkte: x, y, u, v (ohne VS) / x, y, r, g, b, a mit / ohne VS / x, y, z, r, g, b, a (ohne VS, mit Tiefe) /
  * Wuerfel fuer den VS: x, y, z, r, g, b, a, Normale x, y, z / texturiert: x, y, z, u, v, Normale x, y, z, r, g, b, a */
@@ -1659,6 +1660,9 @@ typedef struct {
     uint32_t        tex_gtt;             /* Textur (B8G8R8A8, linear) fuer den Pixel-Shader, 0 = keine */
     uint32_t        tex_w, tex_h, tex_pitch;
     int             tex_filter;          /* 0 naechster Texel, 1 bilinear */
+    uint32_t        mocs;                /* Cache-Steuerung fuer Ziel, Tiefe und Textur (Surface State, 0 = uncached) */
+    int             depth_always;        /* Tiefentest "immer" (Loeschen) statt "kleiner" */
+    int             no_color;            /* Farbe nicht schreiben (nur Tiefe loeschen) */
 } Draw3d;
 
 static uint32_t vert_size(int layout)
@@ -1690,12 +1694,17 @@ static uint32_t batch_3d(const Draw3d *d)
         tx[3] = d->tex_pitch - 1;
         tx[7] = rt[7];
         tx[8] = d->tex_gtt;
+        tx[1] = d->mocs << 24;
         uint32_t f = d->tex_filter ? 1u : 0u; /* MAPFILTER_LINEAR / _NEAREST fuer Vergroessern und Verkleinern */
         sm[0] = (f << 17) | (f << 14);
         sm[3] = d->tex_filter ? 0x3Fu << 13 : 0; /* bilinear: Adressen runden (wie Mesa) */
     }
+    if (d->no_color) /* BLEND_STATE, Eintrag 0: Rot, Gruen, Blau, Alpha nicht schreiben */
+        *(uint32_t *)(st + S3_BLEND + 4) = 0xF;
+    rt[1] = d->mocs << 24;
     uint32_t vsize = vert_size(d->vs);
-    memcpy(st + S3_VB, d->verts, (uint64_t)d->nvert * vsize);
+    memcpy(core_ptr(C_VB), d->verts, (uint64_t)d->nvert * vsize);
+    igd_clflush((uint64_t)core_ptr(C_VB), (uint64_t)d->nvert * vsize);
 
     uint32_t *b = core_ptr(C_BATCH), k = 0, base = core_gtt(C_STATE);
     b[k++] = PIPE_CONTROL; /* vor dem Wechsel der Pipeline: alles fertig, Caches leer */
@@ -1846,7 +1855,7 @@ static uint32_t batch_3d(const Draw3d *d)
     b[k++] = S3D(0x0F);              /* SCISSOR_STATE_POINTERS */
     b[k++] = S3_SCISSOR;
     b[k++] = S3D(0x4E) | 2;          /* WM_DEPTH_STENCIL: Tiefentest "kleiner" und Tiefe schreiben, kein Stencil */
-    b[k++] = d->depth_gtt ? (CMP_LESS << 5) | (1u << 1) | 1u : 0;
+    b[k++] = d->depth_gtt ? ((d->depth_always ? 0u : CMP_LESS) << 5) | (1u << 1) | 1u : 0; /* 0 = ALWAYS */
     b[k++] = 0;
     b[k++] = 0;
     b[k++] = S3D(0x05) | 6;          /* DEPTH_BUFFER */
@@ -1856,7 +1865,7 @@ static uint32_t batch_3d(const Draw3d *d)
         b[k++] = d->depth_gtt;
         b[k++] = 0;
         b[k++] = ((d->h - 1) << 18) | ((d->w - 1) << 4);
-        b[k++] = 0;
+        b[k++] = d->mocs;
         b[k++] = 0;
         b[k++] = h32 >> 2;
     } else {
@@ -1879,7 +1888,7 @@ static uint32_t batch_3d(const Draw3d *d)
     b[k++] = 0;
     b[k++] = S3D(0x08) | 3;          /* VERTEX_BUFFERS: Puffer 0 */
     b[k++] = (0u << 26) | (1u << 14) | vsize;
-    b[k++] = base + S3_VB;
+    b[k++] = core_gtt(C_VB);
     b[k++] = 0;
     b[k++] = d->nvert * vsize;
     uint32_t nelem;
@@ -1953,6 +1962,8 @@ static uint32_t batch_3d(const Draw3d *d)
     b[k++] = core_gtt(C_RES);
     b[k++] = 0;
     b[k++] = 0x600D3D00u;
+    b[k++] = 0;
+    b[k++] = S3D(0x0E);              /* CC_STATE_POINTERS ungueltig: vor PIPELINE_SELECT GPGPU noetig (Zusammensetzen) */
     b[k++] = 0;
     b[k++] = MI_BATCH_BUFFER_END;
     b[k++] = MI_NOOP;
@@ -2285,7 +2296,7 @@ static int test_3d(void)
     const uint32_t X0 = 16, Y0 = 8, X1 = 176, Y1 = 40, want = 0xFFFF3399u;
     load_kernel(K3_PSCOL, (const uint32_t (*)[4])kbuf, asm_ps_color(kbuf, F_1_0, F_0_2, F_0_6, F_1_0));
     const uint32_t rv[3][4] = {{f32(X1), f32(Y1), F_1_0, F_1_0}, {f32(X0), f32(Y1), 0, F_1_0}, {f32(X0), f32(Y0), 0, 0}};
-    Draw3d r1 = {base << 12, TW, TH, TW * 4, L3_XYUV, PRIM_RECTLIST, 3, K3_PSCOL, &rv[0][0], 0, 0, 0, 0, 0, 0, 0};
+    Draw3d r1 = {base << 12, TW, TH, TW * 4, L3_XYUV, PRIM_RECTLIST, 3, K3_PSCOL, &rv[0][0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (draw_3d("1. Rechteck ueber die 3D-Pipeline", &r1, 1, stat) != 0) {
         rc = -30;
         goto out_ring;
@@ -2314,7 +2325,7 @@ static int test_3d(void)
         {{f32(192), f32(80), h1, h1}, {f32(128), f32(80), h0, h1}, {f32(128), f32(16), h0, h0}}};
     for (int lin = 0; lin < 2; lin++) {
         Draw3d x1 = {base << 12, TW, TH, TW * 4, L3_XYUV, PRIM_RECTLIST, 3, K3_PSTEX, &xr[lin][0][0], 0, 0,
-                     xbase << 12, XW, XW, XW * 4, lin};
+                     xbase << 12, XW, XW, XW * 4, lin, 0, 0, 0};
         if (draw_3d(lin ? "1b. Textur bilinear" : "1b. Textur, naechster Texel", &x1, 1, stat) != 0) {
             rc = -41;
             goto out_ring;
@@ -2359,7 +2370,7 @@ static int test_3d(void)
     igd_clflush(mem, TPAGES * 4096);
     uint32_t tv[3][6];
     tri_screen(tv, 0, 100, 128, 128);
-    Draw3d t1 = {base << 12, TW, TH, TW * 4, L3_XYRGBA, PRIM_TRILIST, 3, K3_PSINT, &tv[0][0], 0, 0, 0, 0, 0, 0, 0};
+    Draw3d t1 = {base << 12, TW, TH, TW * 4, L3_XYRGBA, PRIM_TRILIST, 3, K3_PSINT, &tv[0][0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (draw_3d("2. Dreieck mit Farbverlauf", &t1, 1, stat) != 0) {
         rc = -33;
         goto out_ring;
@@ -2375,7 +2386,7 @@ static int test_3d(void)
         px[i] = 0x11111111u;
     igd_clflush(mem, TPAGES * 4096);
     load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_pass(kbuf));
-    Draw3d t2 = {base << 12, TW, TH, TW * 4, L3_VS_XYRGBA, PRIM_TRILIST, 3, K3_PSINT, &tv[0][0], 0, 0, 0, 0, 0, 0, 0};
+    Draw3d t2 = {base << 12, TW, TH, TW * 4, L3_VS_XYRGBA, PRIM_TRILIST, 3, K3_PSINT, &tv[0][0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (draw_3d("2b. Dreieck durch den Vertex-Shader", &t2, 1, stat) != 0) {
         rc = -35;
         goto out_ring;
@@ -2396,7 +2407,7 @@ static int test_3d(void)
     static uint32_t cv[36][7];
     uint32_t front = 0;
     cube_tris(cv, 5, 3, 160, 128, 128, &front);
-    Draw3d c1 = {base << 12, TW, TH, TW * 4, L3_XYZRGBA, PRIM_TRILIST, 36, K3_PSINT, &cv[0][0], dbase << 12, TW * 4, 0, 0, 0, 0, 0};
+    Draw3d c1 = {base << 12, TW, TH, TW * 4, L3_XYZRGBA, PRIM_TRILIST, 36, K3_PSINT, &cv[0][0], dbase << 12, TW * 4, 0, 0, 0, 0, 0, 0, 0, 0};
     if (draw_3d("3. Wuerfel mit Tiefentest", &c1, 1, stat) != 0) {
         rc = -36;
         goto out_ring;
@@ -2420,7 +2431,7 @@ static int test_3d(void)
     igd_clflush(mem, 2 * TPAGES * 4096);
     cube_matrix(vm, vl, 5, 3, 160, 128, 128);
     load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_cube(kbuf, vm, vl));
-    Draw3d c2 = {base << 12, TW, TH, TW * 4, L3_VS_CUBE, PRIM_TRILIST, 36, K3_PSINT, &vcube[0][0], dbase << 12, TW * 4, 0, 0, 0, 0, 0};
+    Draw3d c2 = {base << 12, TW, TH, TW * 4, L3_VS_CUBE, PRIM_TRILIST, 36, K3_PSINT, &vcube[0][0], dbase << 12, TW * 4, 0, 0, 0, 0, 0, 0, 0, 0};
     if (draw_3d("3b. Wuerfel mit Vertex-Shader", &c2, 1, stat) != 0) {
         rc = -39;
         goto out_ring;
@@ -2439,10 +2450,10 @@ static int test_3d(void)
         depth_t[i] = F_1_0;
     }
     igd_clflush(mem, 2 * TPAGES * 4096);
-    load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_tex(kbuf, vm, vl));
+    load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_tex(kbuf, vm, vl, F_0_35, F_0_65));
     load_kernel(K3_PSTEXC, (const uint32_t (*)[4])kbuf, asm_ps_tex(kbuf, 1));
     Draw3d c3 = {base << 12, TW, TH, TW * 4, L3_VS_TEX, PRIM_TRILIST, 36, K3_PSTEXC, &tcube[0][0], dbase << 12, TW * 4,
-                 (xbase + XPAGES) << 12, XW, XW, XW * 4, 1};
+                 (xbase + XPAGES) << 12, XW, XW, XW * 4, 1, 0, 0, 0};
     if (draw_3d("3c. Wuerfel mit Textur", &c3, 1, stat) != 0) {
         rc = -43;
         goto out_ring;
@@ -2480,9 +2491,9 @@ static int test_3d(void)
         uint32_t rpitch = igd_scr_stride;
         load_kernel(K3_PSCOL, (const uint32_t (*)[4])kbuf, asm_ps_color(kbuf, F_0_2, F_0_2, F_0_2, F_1_0));
         const uint32_t bg[3][4] = {{f32(DW), f32(DW), 0, 0}, {0, f32(DW), 0, 0}, {0, 0, 0, 0}};
-        Draw3d clear = {rt, DW, DW, rpitch, L3_XYUV, PRIM_RECTLIST, 3, K3_PSCOL, &bg[0][0], 0, 0, 0, 0, 0, 0, 0};
+        Draw3d clear = {rt, DW, DW, rpitch, L3_XYUV, PRIM_RECTLIST, 3, K3_PSCOL, &bg[0][0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
         Draw3d cube = {rt, DW, DW, rpitch, L3_VS_TEX, PRIM_TRILIST, 36, K3_PSTEXC, &tcube[0][0], abase << 12, DW * 4,
-                       (xbase + XPAGES) << 12, XW, XW, XW * 4, 1}; /* die CPU rechnet je Bild nur die Matrix */
+                       (xbase + XPAGES) << 12, XW, XW, XW * 4, 1, 0, 0, 0}; /* die CPU rechnet je Bild nur die Matrix */
         int vbl = igd_vblank_ok();
         uint64_t t0 = time_us();
         for (int f = 0; f < 240 && rc == 0; f++) {
@@ -2490,7 +2501,7 @@ static int test_3d(void)
                 depth_a[i] = F_1_0;
             igd_clflush((uint64_t)depth_a, DPAGES * 4096);
             cube_matrix(vm, vl, f, f / 2 + 6, 420, DW / 2, DW / 2);
-            load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_tex(kbuf, vm, vl));
+            load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_tex(kbuf, vm, vl, F_0_35, F_0_65));
             if (!vbl || !igd_wait_vblank(30))
                 thread_sleep_ms(10);
             if (draw_3d("4. Hintergrund", &clear, 0, 0) != 0 || draw_3d("4. Wuerfel", &cube, 0, 0) != 0)
@@ -2527,6 +2538,69 @@ int igd_3d_test(void)
     igd_rcs_comp_wait(0);
     comp_ready = 0;
     int rc = test_3d();
+    rcs_release();
+    return rc;
+}
+
+/* ---------- 3D fuer Programme (SYS_GPUCOMP 8, igd_comp.c) ----------
+ * Die Engine teilt sich das Programm mit dem Zusammensetzen: vorher dessen offenen Auftrag abwarten. Jeder Batch
+ * beginnt mit PIPELINE_SELECT und dem ganzen Zustand, der 3D-Batch hinterlaesst den Farbzustand ungueltig (wie Mesa vor
+ * dem Wechsel zu GPGPU). Die Cache-Steuerung bleibt die des Zusammensetzens (Eintrag 2 write-back im LLC). */
+static int run_3d(const Draw3d *d)
+{
+    batch_3d(d);
+    begin(4 + 8);
+    emit(MI_BATCH_BUFFER_START);
+    emit(core_gtt(C_BATCH));
+    emit(0);
+    emit(MI_NOOP);
+    if (wait_seqno(submit(), 500))
+        return 0;
+    kprintf("igd3d: Auftrag eines Programms: KEINE Rueckmeldung nach 500 ms\n");
+    dump("Zustand");
+    ring_stop();
+    engine_reset();
+    comp_ready = 0;
+    return -1;
+}
+
+int igd_rcs_draw3d(const IgdDraw3d *g)
+{
+    static uint32_t kbuf[64][4];
+    rcs_acquire(1);
+    int rc = -1;
+    if (comp_finish(0) != 0 || (!comp_ready && !comp_start()))
+        goto out;
+    if (!igd_forcewake_get()) {
+        igd_forcewake_put();
+        goto out;
+    }
+    rc = 0;
+    if (g->flags & (IGD_3D_CLEAR_COLOR | IGD_3D_CLEAR_DEPTH)) {
+        /* Loeschen: Rechteck ueber den ganzen Zeichenbereich in der Loeschfarbe, Tiefe = clear_depth, Test "immer" */
+        static const int sh[4] = {16, 8, 0, 24}; /* r, g, b, a in 0xAARRGGBB */
+        uint32_t c[4];
+        for (int i = 0; i < 4; i++)
+            c[i] = f32q((int32_t)(((g->clear_color >> sh[i]) & 0xFF) * 65536u / 255));
+        uint32_t W = f32(g->w), H = f32(g->h), z = g->clear_depth;
+        const uint32_t cv[3][7] = {{W, H, z, c[0], c[1], c[2], c[3]}, {0, H, z, c[0], c[1], c[2], c[3]},
+                                   {0, 0, z, c[0], c[1], c[2], c[3]}};
+        load_kernel(K3_PSINT, (const uint32_t (*)[4])kbuf, asm_ps_interp(kbuf));
+        Draw3d cl = {g->rt_gtt, g->w, g->h, g->pitch, L3_XYZRGBA, PRIM_RECTLIST, 3, K3_PSINT, &cv[0][0],
+                     (g->flags & IGD_3D_CLEAR_DEPTH) ? g->depth_gtt : 0, g->depth_pitch, 0, 0, 0, 0, 0, g->mocs, 1,
+                     !(g->flags & IGD_3D_CLEAR_COLOR)};
+        rc = run_3d(&cl);
+    }
+    if (rc == 0 && g->nvert) {
+        load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_tex(kbuf, g->m, g->l, g->amb, g->dif));
+        load_kernel(K3_PSTEXC, (const uint32_t (*)[4])kbuf, asm_ps_tex(kbuf, 1));
+        Draw3d dr = {g->rt_gtt, g->w, g->h, g->pitch, L3_VS_TEX, PRIM_TRILIST, g->nvert, K3_PSTEXC, g->verts,
+                     (g->flags & IGD_3D_DEPTH) ? g->depth_gtt : 0, g->depth_pitch, g->tex_gtt, g->tex_w, g->tex_h,
+                     g->tex_pitch, (g->flags & IGD_3D_LINEAR) != 0, g->mocs, 0, 0};
+        rc = run_3d(&dr);
+    }
+    igd_forcewake_put();
+out:
     rcs_release();
     return rc;
 }

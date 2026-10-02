@@ -938,6 +938,17 @@ int gfx_windowed(void)
     return gfx_win;
 }
 
+int gfx_window_buffer(unsigned *shm_id, int *w, int *h, int *top)
+{
+    if (!gfx_win)
+        return -1;
+    *shm_id = gfx_shm_id;
+    *w = gfx_screen.w;
+    *h = gfx_screen.h + gfx_tb;
+    *top = gfx_tb;
+    return 0;
+}
+
 int gfx_desktop(void)
 {
     if (gfx_conn < 0)

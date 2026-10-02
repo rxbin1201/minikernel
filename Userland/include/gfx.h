@@ -138,6 +138,9 @@ int  gfx_window_zoomed(void); /* 1 = maximiert bzw. angedockt */
 int gfx_desktop_open(const char *path);
 void gfx_set_title(const char *title);
 int gfx_windowed(void);  /* 1 = Programm laeuft in einem Fenster des Desktops */
+/* Im Fenster: geteilter Speicher des ganzen Fensterbildes (Breite w, Hoehe h mit Titelleiste; gfx_screen beginnt in
+ * Zeile top) - zum Beispiel, damit die GPU direkt hineinzeichnet (gl.c). 0 = ok, -1 = kein Fenster */
+int gfx_window_buffer(unsigned *shm_id, int *w, int *h, int *top);
 /* 1 = unter dem Desktop gestartet (geht schon vor gfx_open: z.B. um die Fenstergroesse nach gfx_ui_scale zu waehlen) */
 int gfx_desktop(void);
 /* Massstab der Oberflaeche in Prozent (100, ab 1300 Pixel Bildschirmhoehe 125); unter dem Desktop schon vor gfx_open,

@@ -302,6 +302,28 @@ typedef struct {
     unsigned total, wait, render, ov, ov_px, shadow, alloc, queue, submit, path; /* path: 0 CPU, 1 GPU, 2 ohne Warten */
 } FrameProf;
 static inline s64 sys_gpucomp(u64 op, u64 a, u64 b)          { return syscall3(SYS_GPUCOMP, op, a, b); }
+/* 3D zeichnen (SYS_GPUCOMP 8, nur mit Intel-GPU; sonst ERR_NOSYS - gl.c zeichnet dann selbst). Flaechen wie oben
+ * angemeldet: Ziel, Tiefenpuffer (Breite Vielfaches von 32, Hoehe des Zeichenbereichs auf 32 aufgerundet), Textur
+ * (Byte-Reihenfolge B, G, R, A). Erst wird auf Wunsch geloescht, dann gezeichnet: Eckpunkt mal m (Zeilen X, Y, Z, W,
+ * Ergebnis in Pixeln des Zeichenbereichs vor dem Teilen durch W, Tiefe 0-1), Farbe mal Helligkeit
+ * ambient + diffuse * max(0, Normale . light), dann mal Textur. Kehrt zurueck, wenn die GPU fertig ist. */
+#define GPU3D_DEPTH       1 /* Tiefentest "kleiner" mit Schreiben */
+#define GPU3D_LINEAR      2 /* Textur bilinear */
+#define GPU3D_CLEAR_COLOR 4
+#define GPU3D_CLEAR_DEPTH 8
+#define GPU3D_MAX_VERT    1365
+typedef struct {
+    unsigned short dst, depth, tex, flags;      /* Flaechen (depth 0 = keiner), GPU3D_* */
+    unsigned short tex_w, tex_h, pad0, pad1;    /* benutzter Teil der Textur (0 = ganze Flaeche) */
+    int            x, y, w, h;                  /* Zeichenbereich im Ziel, x Vielfaches von 16 */
+    unsigned       clear_color;                 /* 0xAARRGGBB */
+    float          clear_depth;
+    float          m[16];
+    float          light[3], ambient, diffuse;
+    unsigned       nvert;                       /* Vielfaches von 3, hoechstens GPU3D_MAX_VERT */
+    const float   *verts;                       /* je Eckpunkt x, y, z, u, v, nx, ny, nz, r, g, b, a */
+} Gpu3dDraw;
+static inline s64 sys_gpu3d(const Gpu3dDraw *d)               { return syscall3(SYS_GPUCOMP, 8, (u64)d, 0); }
 /* Benannte Dienste: anmelden, abmelden, verbinden (fds: lesen, schreiben), annehmen (fds: lesen, schreiben, PID;
  * ERR_AGAIN = niemand wartet). Damit finden Programme aus dem Terminal den Desktop. */
 static inline s64 sys_service_register(const char *name)     { return syscall3(SYS_SERVICE, 0, (u64)name, 0); }

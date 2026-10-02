@@ -45,6 +45,17 @@ typedef struct {
     int32_t  step;  /* skalieren: Schritt in der Quelle je Zielzeile/-spalte, 8.8 Festkomma (hoechstens 65535) */
 } GpuOp;
 
+/* 3D-Auftrag (SYS_GPUCOMP 8, gleiches Layout wie Gpu3dDraw in Userland/include/user.h; float als Bitmuster) */
+typedef struct {
+    uint16_t dst, depth, tex, flags; /* Flaechen; flags = IGD_3D_* */
+    uint16_t tex_w, tex_h, pad0, pad1; /* benutzter Teil der Textur (0 = ganze Flaeche) */
+    int32_t  x, y, w, h;               /* Zeichenbereich im Ziel (x Vielfaches von 16) */
+    uint32_t clear_color, clear_depth;
+    uint32_t m[16], light[3], ambient, diffuse;
+    uint32_t nvert;
+    uint64_t verts;                    /* je Eckpunkt 12 float */
+} Gpu3dDraw;
+
 static CompSurf  surfs[COMP_SURFS];
 static Spinlock  lock = SPINLOCK_INIT("igdcomp");
 static int       mode = -1;     /* -1 = noch nicht geprueft, 0 keins, 1 GPU, 2 CPU-Ersatz */
@@ -763,6 +774,55 @@ int64_t igd_comp_sys(uint32_t pid, uint64_t op, uint64_t a, uint64_t b)
         if (us)
             count_us(us);
         return rc ? ERR_IO : 0;
+    }
+    if (op == 8) { /* 3D zeichnen (nur auf der GPU) */
+        Gpu3dDraw u;
+        if (mode != 1)
+            return ERR_NOSYS;
+        if (!process_user_range_ok(process_current(), a, sizeof(u), 0))
+            return ERR_FAULT;
+        memcpy(&u, (const void *)a, sizeof(u));
+        CompSurf *d = surf_get(pid, u.dst), *z = u.depth ? surf_get(pid, u.depth) : 0, *t = surf_get(pid, u.tex);
+        if (!d || !t || (u.depth && !z) || !d->ggtt || !t->ggtt || (z && !z->ggtt))
+            return ERR_INVAL;
+        if (u.w <= 0 || u.h <= 0 || u.x < 0 || u.y < 0 || (u.x & 15) || u.w > 4096 || u.h > 4096 ||
+            (uint32_t)(u.x + u.w) > d->w || (uint32_t)(u.y + u.h) > d->h)
+            return ERR_INVAL;
+        uint32_t tw = u.tex_w ? u.tex_w : t->w, th = u.tex_h ? u.tex_h : t->h;
+        if (tw > t->w || th > t->h)
+            return ERR_INVAL;
+        /* Tiefenpuffer: Zeilenlaenge Vielfaches von 128 Byte, ganze Kachelzeilen (32) */
+        if (z && ((z->w & 31) || z->w < (uint32_t)u.w || z->h < (((uint32_t)u.h + 31) & ~31u)))
+            return ERR_INVAL;
+        if ((u.flags & (IGD_3D_DEPTH | IGD_3D_CLEAR_DEPTH)) && !z)
+            return ERR_INVAL;
+        if (u.nvert % 3 || u.nvert > IGD_3D_MAX_VERT)
+            return ERR_INVAL;
+        if (u.nvert && !process_user_range_ok(process_current(), u.verts, (uint64_t)u.nvert * 48, 0))
+            return ERR_FAULT;
+        IgdDraw3d g;
+        memset(&g, 0, sizeof(g));
+        g.rt_gtt = (d->ggtt << 12) + (uint32_t)u.y * d->w * 4 + (uint32_t)u.x * 4;
+        g.w = (uint32_t)u.w;
+        g.h = (uint32_t)u.h;
+        g.pitch = d->w * 4;
+        g.mocs = cache_mode ? IGD_MOCS_WB : 0; /* wie das Zusammensetzen die Flaechen liest */
+        g.depth_gtt = z ? z->ggtt << 12 : 0;
+        g.depth_pitch = z ? z->w * 4 : 0;
+        g.tex_gtt = t->ggtt << 12;
+        g.tex_w = tw;
+        g.tex_h = th;
+        g.tex_pitch = t->w * 4;
+        g.flags = u.flags;
+        g.clear_color = u.clear_color;
+        g.clear_depth = u.clear_depth;
+        memcpy(g.m, u.m, sizeof(g.m));
+        memcpy(g.l, u.light, sizeof(g.l));
+        g.amb = u.ambient;
+        g.dif = u.diffuse;
+        g.nvert = u.nvert;
+        g.verts = (const uint32_t *)u.verts;
+        return igd_rcs_draw3d(&g) == 0 ? 0 : ERR_IO;
     }
     if (op == 3 || op == 6) { /* ausfuehren: GpuOp[b]; 6 = nicht abwarten (mit "anzeigen" am Ende) */
         if (!enabled)
