@@ -240,6 +240,12 @@ int iwl_wake_test(void)
         info.gp_after = rd(CSR_GP_CNTRL);
         return -2;
     }
+    /* 4. inneren Prozessor aus dem Reset lassen (Bit 0 NEVO_RESET blieb nach dem Software-Reset stehen) */
+    info.reset_before = rd(CSR_RESET);
+    wr(CSR_RESET, 0);
+    thread_sleep_ms(1);
+    info.reset_after = rd(CSR_RESET);
+    kprintf("iwl: 4 CSR_RESET %#x -> %#x\n", info.reset_before, info.reset_after);
     wr(CSR_GP_CNTRL, rd(CSR_GP_CNTRL) | GP_MAC_ACCESS_REQ);
     info.wake_access = WAIT_UNTIL((rd(CSR_GP_CNTRL) & (GP_MAC_CLOCK_READY | GP_GOING_TO_SLEEP)) == GP_MAC_CLOCK_READY, 25);
     info.wake_us = (uint32_t)(time_us() - t0);
@@ -281,6 +287,10 @@ int iwl_info(WlanInfo *out)
 #define PRPH_WDAT            0x44C
 #define UREG_CPU_INIT_RUN    0xA05C44
 #define RFH_Q0_FRBDCB_WIDX_TRG 0x1C80 /* Schreibzeiger der freien Empfangspuffer (Queue 0) */
+#define CSR_UCODE_DRV_GP1_CLR  0x05C  /* Uebergabe Treiber/Firmware: Bits loeschen */
+#define GP1_SW_RFKILL          (1u << 1)
+#define GP1_CMD_BLOCKED        (1u << 2)
+#define CSR_MAC_SHADOW_REG_CTRL 0x0A8 /* Schattenregister fuer die Schreibzeiger der Warteschlangen */
 
 #define RX_RING   64   /* Empfangspuffer zu je 4 KiB */
 #define CMD_RING  32   /* Befehlswarteschlange (TFDs zu 256 Byte) */
@@ -390,6 +400,8 @@ int iwl_load_fw(void)
     ci->cmd_queue_size = (uint8_t)(ilog2(CMD_RING) - 3);
 
     /* Adresse uebergeben, freie Puffer melden, starten */
+    wr(CSR_UCODE_DRV_GP1_CLR, GP1_SW_RFKILL | GP1_CMD_BLOCKED);
+    wr(CSR_MAC_SHADOW_REG_CTRL, rd(CSR_MAC_SHADOW_REG_CTRL) | 0x800FFFFFu);
     wr(CSR_INT, 0xFFFFFFFFu);
     wr(CSR_FH_INT_STATUS, 0xFFFFFFFFu);
     wr(CSR_CTXT_INFO_BA, (uint32_t)(uint64_t)ci);
@@ -422,7 +434,8 @@ int iwl_load_fw(void)
     info.load_int = rd(CSR_INT);
     info.load_status = *(volatile uint16_t *)status;
     if (!info.load_alive) {
-        kprintf("iwl: keine Nachricht der Firmware nach %u ms (CSR_INT %#x, GP_CNTRL %#x)\n", info.load_ms, info.load_int,
+        kprintf("iwl: keine Nachricht der Firmware nach %u ms (CSR_INT %#x%s, GP_CNTRL %#x)\n", info.load_ms, info.load_int,
+                info.load_int & (1u << 29) ? " = Hardware-Fehler" : info.load_int & (1u << 25) ? " = Firmware-Fehler" : "",
                 rd(CSR_GP_CNTRL));
         return -3;
     }

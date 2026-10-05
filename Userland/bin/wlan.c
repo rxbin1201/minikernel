@@ -40,6 +40,7 @@ void _start(int argc, char **argv)
         printf("Bereit:    %s (HW_IF_CONFIG %#010x)\n", wi.wake_ready == 1 ? "ja (NIC_READY)"
                : wi.wake_ready == 2 ? "ja (nach PREPARE)" : "NEIN", wi.hwif_after);
         printf("Takt:      %s\n", wi.wake_clock ? "bereit" : "KEINER (nach INIT_DONE)");
+        printf("CSR_RESET: %#010x -> %#010x (inneren Prozessor freigegeben)\n", wi.reset_before, wi.reset_after);
         printf("Zugriff:   %s nach %u us\n", wi.wake_access ? "bekommen" : "NICHT bekommen", wi.wake_us);
         printf("GP_CNTRL:  %#010x danach\n", wi.gp_after);
         printf("Ladestatus der Firmware: %#010x   Status CPU 1: %#010x\n", wi.prph_load, wi.prph_cpu1);

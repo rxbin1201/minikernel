@@ -27,6 +27,7 @@ typedef struct {
     uint32_t prph_load, prph_cpu1;            /* Peripherie-Register: UREG_UCODE_LOAD_STATUS, SB_CPU_1_STATUS */
     /* Stufe 2b (SYS_WLAN 2, "wlan load"): Firmware laden, auf die erste Nachricht warten */
     uint32_t load_done, load_alive, load_ms, load_int, load_status;
+    uint32_t reset_before, reset_after;       /* CSR_RESET vor und nach dem Freigeben des inneren Prozessors */
     uint32_t alive_len, alive_cmd, alive_group, alive_status; /* erste Nachricht; ALIVE: Befehl 1, Status 0xCAFE */
 } WlanInfo;
 
