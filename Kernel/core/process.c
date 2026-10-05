@@ -18,6 +18,7 @@
 #include "arch/x86_64/spinlock.h"
 #include "core/service.h"
 #include "drivers/gpu/igd.h"
+#include "arch/x86_64/apic.h"
 
 #define MAX_PROC          64
 #define MAX_FD            32
@@ -26,9 +27,34 @@
 #define ARGS_BYTES        512
 #define PAGE              4096ULL
 #define MAX_SHM_MAPS      80   /* Desktop: Fenster der Programme, eigene Fensterbilder und Schatten */
+#define MAX_THREADS       16   /* Threads je Prozess (mit beendeten, noch nicht abgeholten) */
 
 extern void enter_user(uint64_t rip, uint64_t rsp, uint64_t arg1, uint64_t arg2) __attribute__((noreturn));
 extern void enter_user_regs(const SyscallFrame *r) __attribute__((noreturn));
+
+/* Ein Thread des Prozesses. Platz 0 ist der erste (main), weitere kommen per SYS_THREAD_CREATE. Die Nummer des
+ * Platzes ist die Thread-Nummer fuer das Programm. Ein beendeter Thread haelt seinen Platz, bis ihn jemand abholt
+ * (SYS_THREAD_JOIN). Alles unter dem BKL. */
+typedef struct {
+    Thread      *t;      /* laufender Kernel-Thread, 0 = beendet */
+    int          used;
+    volatile int done;
+    uint64_t     ret;    /* Rueckgabewert (SYS_THREAD_EXIT) */
+    int          joiner; /* Platz des Threads, der auf diesen wartet, -1 = keiner */
+    uint64_t     futex;  /* Adresse, auf die er wartet (SYS_FUTEX_WAIT), 0 = keine */
+    Event        ev;     /* weckt ihn: Futex, join, Ende des Prozesses */
+} UThread;
+
+/* Ausgeblendete Seiten eines Prozesses mit mehreren Threads: frei erst, wenn jede CPU, auf der gerade ein anderer
+ * Thread lief, ihren TLB geleert hat (sonst schriebe er ueber einen alten TLB-Eintrag in einen neu vergebenen Frame) */
+typedef struct Retired {
+    struct Retired *next;
+    uint32_t        mask;                 /* betroffene CPUs */
+    uint64_t        snap[SMP_MAX_CPUS];   /* deren tlb_flushes beim Ausblenden */
+    struct Shm     *shm;                  /* geteilter Speicher: Referenz bis dahin behalten */
+    uint64_t        n;
+    uint64_t        frames[];
+} Retired;
 
 struct Process {
     int          used;
@@ -36,7 +62,11 @@ struct Process {
     char         name[32];
     char         cwd[VFS_PATH_MAX];
     AddressSpace *as;
-    Thread      *thread;
+    UThread      th[MAX_THREADS];
+    int          nlive;      /* laufende Threads; der letzte raeumt den Prozess ab */
+    volatile int exiting;    /* exit, Ausnahme oder kill: alle Threads beenden sich beim naechsten Kernel-Eintritt */
+    int          exit_req_code, exit_req_faulted;
+    Retired     *retired;
     uint64_t     entry, user_rsp, argv;
     int          argc;
     uint64_t     brk_start, brk_cur, brk_mapped; /* brk_mapped: page-aligned Ende der gemappten Seiten */
@@ -51,6 +81,8 @@ struct Process {
 
 static Process procs[MAX_PROC];
 static void shm_release_all(Process *p);
+static void tlb_reclaim(Process *p, int all);
+static int  self_slot(Process *p);
 static uint32_t next_pid = 1;
 
 /* ---------- User-Speicher ---------- */
@@ -321,6 +353,16 @@ static void __attribute__((noreturn)) to_user(uint64_t rip, uint64_t rsp, uint64
     enter_user(rip, rsp, arg1, arg2);
 }
 
+/* Erster Thread eines neuen Prozesses (laeuft fruehestens, wenn der Erzeuger den BKL abgibt) */
+static void first_thread(Process *p, Thread *t)
+{
+    thread_set_data(t, p);
+    p->th[0].t = t;
+    p->th[0].used = 1;
+    p->th[0].joiner = -1;
+    p->nlive = 1;
+}
+
 static void process_main(void *arg)
 {
     Process *p = arg;
@@ -362,13 +404,14 @@ int process_spawn(const char *path, const char *cmdline, uint32_t parent)
         return -1;
     }
 
-    p->thread = thread_create_in(p->name, process_main, p, p->as);
-    if (!p->thread) {
+    Thread *t = thread_create_in(p->name, process_main, p, p->as);
+    if (!t) {
         as_destroy(p->as);
         close_all_fds(p);
         p->used = 0;
         return -1;
     }
+    first_thread(p, t);
     return (int)p->pid;
 }
 
@@ -418,13 +461,15 @@ int process_fork(const SyscallFrame *f)
     if (ctx) {
         ctx->regs = *f;
         ctx->proc = p;
-        p->thread = thread_create_in(p->name, fork_child_main, ctx, p->as);
-        if (!p->thread)
+        Thread *t = thread_create_in(p->name, fork_child_main, ctx, p->as);
+        if (!t) {
             kfree(ctx);
-        else
-            sched_fpu_copy_to(p->thread); /* laeuft erst, wenn wir den BKL abgeben */
+        } else {
+            sched_fpu_copy_to(t); /* laeuft erst, wenn wir den BKL abgeben */
+            first_thread(p, t);   /* das Kind hat nur den Thread, der fork aufgerufen hat (wie POSIX) */
+        }
     }
-    if (!p->thread) {
+    if (!p->nlive) {
         if (p->as)
             as_destroy(p->as);
         close_all_fds(p);
@@ -441,6 +486,8 @@ int process_exec(const char *path, const char *cmdline)
     Process *p = process_current();
     if (!p)
         return ERR_INVAL;
+    if (p->nlive > 1)
+        return ERR_AGAIN; /* erst die anderen Threads beenden: sie liefen sonst im alten Programm weiter */
 
     void *image;
     uint64_t image_size;
@@ -478,8 +525,16 @@ int process_exec(const char *path, const char *cmdline)
     }
 
     set_name(p, path);
+    int s = self_slot(p); /* das neue Programm beginnt als Thread 0, beendete alte Threads verfallen */
+    Thread *self = s >= 0 ? p->th[s].t : thread_current();
+    memset(p->th, 0, sizeof(p->th));
+    p->th[0].t = self;
+    p->th[0].used = 1;
+    p->th[0].joiner = -1;
     thread_set_as(thread_current(), new_as); /* beim naechsten Threadwechsel gilt der neue Adressraum */
+    this_cpu()->cur_as = new_as;
     as_switch(new_as);
+    tlb_reclaim(p, 1); /* aufgehobene Seiten frueherer Threads */
     shm_release_all(p); /* geteilter Speicher gehoerte zum alten Programm */
     as_destroy(old_as);
     sched_fpu_reset();
@@ -491,10 +546,10 @@ int process_exec(const char *path, const char *cmdline)
 int process_wait_tick(void)
 {
     Process *p = process_current();
-    if (p && p->killed)
+    if (process_killed(p))
         return -1;
     thread_sleep_ms(1); /* ein Timer-Tick */
-    return p && p->killed ? -1 : 0;
+    return process_killed(p) ? -1 : 0;
 }
 
 int process_wait(int pid, uint32_t parent, int *exit_code, int *faulted, int timeout_ms)
@@ -540,6 +595,7 @@ const char *process_name(const Process *p)   { return p ? p->name : "?"; }
 /* Schliesst die Dateien (damit Pipes ihr Ende melden), meldet den Prozess als beendet und uebergibt Kinder */
 static void finish_process(Process *p, int code, int faulted)
 {
+    tlb_reclaim(p, 1); /* kein anderer Thread laeuft mehr in diesem Adressraum */
     close_all_fds(p);
     shm_release_all(p); /* die Seiten bleiben bis as_destroy eingeblendet, werden aber nicht mehr benutzt */
     service_owner_exit(p->pid); /* angemeldete Dienste verschwinden */
@@ -565,11 +621,72 @@ static void finish_process(Process *p, int code, int faulted)
     irq_restore(f);
 }
 
+/* ---------- Threads ---------- */
+
+static int self_slot(Process *p)
+{
+    Thread *t = thread_current();
+    for (int i = 0; i < MAX_THREADS; i++)
+        if (p->th[i].used && p->th[i].t == t)
+            return i;
+    return -1;
+}
+
+/* Weckt alle wartenden Threads (Futex, join), damit sie ein Ende des Prozesses bemerken. Auch ohne BKL. */
+static void wake_threads(Process *p)
+{
+    for (int i = 0; i < MAX_THREADS; i++)
+        if (p->th[i].used && p->th[i].t)
+            event_signal(&p->th[i].ev);
+}
+
+/* Der laufende Thread verlaesst den Prozess (mit BKL). Der letzte raeumt ab: sein Kernel-Thread behaelt den
+ * Adressraum, den der Scheduler nach dem Ende zerstoert. Die anderen geben ihn vorher ab - er gehoert dann den
+ * verbliebenen Threads. */
+static void __attribute__((noreturn)) thread_leave(Process *p, uint64_t ret)
+{
+    int s = self_slot(p);
+    if (s >= 0) {
+        UThread *u = &p->th[s];
+        u->t = 0;
+        u->ret = ret;
+        u->done = 1;
+        if (u->joiner >= 0)
+            event_signal(&p->th[u->joiner].ev);
+    }
+    if (p->nlive == 1) {
+        p->nlive = 0;
+        if (p->exiting)
+            finish_process(p, p->exit_req_code, p->exit_req_faulted);
+        else
+            finish_process(p, 0, 0); /* letzter Thread hat sich selbst beendet (SYS_THREAD_EXIT) */
+        thread_exit();
+    }
+    /* Aufraeumen, solange noch mehrere zaehlen: mit einem Thread fasst der verbliebene die Liste ohne BKL an */
+    tlb_reclaim(p, 0);
+    p->nlive--;
+    thread_set_as(thread_current(), 0);
+    thread_exit();
+}
+
+/* Beendet den ganzen Prozess: der Code zaehlt vom ersten Grund (exit, Ausnahme, kill); die anderen Threads folgen
+ * beim naechsten Eintritt in den Kernel (Syscall, Timer, Ende eines blockierenden Aufrufs). */
+static void __attribute__((noreturn)) process_die(Process *p, int code, int faulted)
+{
+    if (!p->exiting) {
+        p->exit_req_code = code;
+        p->exit_req_faulted = faulted;
+        p->exiting = 1;
+        wake_threads(p);
+    }
+    thread_leave(p, 0);
+}
+
 void process_exit(int code)
 {
     Process *p = process_current();
     if (p)
-        finish_process(p, code, 0);
+        process_die(p, code, 0);
     thread_exit();
 }
 
@@ -577,36 +694,36 @@ void process_fault(void)
 {
     Process *p = process_current();
     if (p)
-        finish_process(p, -1, 1);
+        process_die(p, -1, 1);
     thread_exit();
 }
 
 void process_check_killed(void)
 {
     Process *p = process_current();
-    if (p && p->killed) {
-        finish_process(p, 130, 0); /* 128 + SIGINT, wie in Unix-Shells */
-        thread_exit();
-    }
+    if (p && (p->killed || p->exiting))
+        process_die(p, 130, 0); /* 128 + SIGINT, wie in Unix-Shells */
 }
 
 int process_kill_pending(void)
 {
     const volatile Process *p = process_current();
-    return p && p->killed;
+    return p && (p->killed || p->exiting);
 }
 
 int process_killed(const Process *p)
 {
-    return p && p->killed;
+    return p && (p->killed || p->exiting);
 }
 
 void process_kill_pgid(uint32_t pgid)
 {
     uint64_t f = irq_save();
     for (int i = 0; i < MAX_PROC; i++)
-        if (procs[i].used && !procs[i].exited && procs[i].pgid == pgid)
+        if (procs[i].used && !procs[i].exited && procs[i].pgid == pgid) {
             procs[i].killed = 1;
+            wake_threads(&procs[i]);
+        }
     irq_restore(f);
 }
 
@@ -616,7 +733,153 @@ int process_kill_pid(uint32_t pid)
     if (!p || p->exited)
         return ERR_NOENT;
     p->killed = 1;
+    wake_threads(p);
     return 0;
+}
+
+int process_threads(const Process *p)
+{
+    return p ? p->nlive : 0;
+}
+
+typedef struct {
+    Process *proc;
+    uint64_t entry, rsp, arg;
+} ThreadCtx;
+
+static void user_thread_main(void *arg)
+{
+    ThreadCtx ctx = *(ThreadCtx *)arg;
+    kfree(arg);
+    to_user(ctx.entry, ctx.rsp, ctx.arg, 0);
+}
+
+int process_thread_create(Process *p, uint64_t entry, uint64_t stack_top, uint64_t arg)
+{
+    uint64_t rsp = (stack_top & ~15ULL) - 8; /* wie nach einem 'call': rsp + 8 ist 16-Byte-ausgerichtet */
+    if (entry < USER_BASE || entry >= USER_END || !process_user_range_ok(p, rsp, 8, 1))
+        return ERR_FAULT;
+    if (p->exiting)
+        return ERR_INTR;
+    int s = -1;
+    for (int i = 0; i < MAX_THREADS && s < 0; i++)
+        if (!p->th[i].used)
+            s = i;
+    if (s < 0)
+        return ERR_AGAIN;
+    ThreadCtx *ctx = kmalloc(sizeof(*ctx));
+    if (!ctx)
+        return ERR_NOMEM;
+    ctx->proc = p;
+    ctx->entry = entry;
+    ctx->rsp = rsp;
+    ctx->arg = arg;
+    Thread *t = thread_create_in(p->name, user_thread_main, ctx, p->as); /* laeuft erst, wenn wir den BKL abgeben */
+    if (!t) {
+        kfree(ctx);
+        return ERR_NOMEM;
+    }
+    thread_set_data(t, p);
+    UThread *u = &p->th[s];
+    memset(u, 0, sizeof(*u));
+    u->t = t;
+    u->used = 1;
+    u->joiner = -1;
+    p->nlive++;
+    return s;
+}
+
+void process_thread_exit(Process *p, uint64_t ret)
+{
+    if (p->exiting)
+        process_die(p, 0, 0);
+    thread_leave(p, ret);
+}
+
+int process_thread_self(Process *p)
+{
+    return self_slot(p);
+}
+
+/* Wartet in kurzen Stuecken auf das eigene Event, bis cond wahr ist oder die Zeit um ist; ERR_INTR bei Ende/kill */
+static int wait_own_event(Process *p, int s, volatile int *flag, uint64_t timeout_ms)
+{
+    uint64_t end = timeout_ms ? time_ms() + timeout_ms : ~0ULL;
+    while (!*flag) {
+        if (process_killed(p))
+            return ERR_INTR;
+        uint64_t now = time_ms();
+        if (now >= end)
+            return ERR_TIMEDOUT;
+        uint64_t left = end - now;
+        event_wait(&p->th[s].ev, left > 50 ? 50 : left);
+    }
+    return 0;
+}
+
+int process_thread_join(Process *p, int tid, uint64_t *ret)
+{
+    int s = self_slot(p);
+    if (tid < 0 || tid >= MAX_THREADS || !p->th[tid].used || tid == s || s < 0)
+        return ERR_INVAL;
+    UThread *u = &p->th[tid];
+    if (u->joiner >= 0 && u->joiner != s)
+        return ERR_INVAL; /* wartet schon ein anderer */
+    u->joiner = s;
+    int r = wait_own_event(p, s, &u->done, 0);
+    if (r != 0) {
+        u->joiner = -1;
+        return r;
+    }
+    if (ret)
+        *ret = u->ret;
+    u->used = 0; /* Platz frei */
+    return 0;
+}
+
+/* Futex (nur innerhalb des Prozesses): schlafen, solange *addr == val, bis FUTEX_WAKE oder Zeitende. Pruefen und
+ * Eintragen geschehen unter dem BKL, ebenso das Wecken: ein Wecken nach dem Aendern des Werts geht nicht verloren. */
+int process_futex_wait(Process *p, uint64_t addr, uint32_t val, uint64_t timeout_ms)
+{
+    int s = self_slot(p);
+    if (s < 0 || (addr & 3) || !process_user_range_ok(p, addr, 4, 0))
+        return ERR_INVAL;
+    if (*(volatile uint32_t *)addr != val)
+        return ERR_AGAIN;
+    UThread *u = &p->th[s];
+    u->futex = addr;
+    u->ev.pending = 0;
+    uint64_t end = timeout_ms ? time_ms() + timeout_ms : ~0ULL;
+    int r = 0;
+    while (u->futex) { /* FUTEX_WAKE loescht den Eintrag */
+        if (process_killed(p)) {
+            r = ERR_INTR;
+            break;
+        }
+        uint64_t now = time_ms();
+        if (now >= end) {
+            r = ERR_TIMEDOUT;
+            break;
+        }
+        uint64_t left = end - now;
+        event_wait(&u->ev, left > 50 ? 50 : left);
+    }
+    u->futex = 0;
+    return r;
+}
+
+int process_futex_wake(Process *p, uint64_t addr, uint32_t count)
+{
+    int n = 0;
+    for (int i = 0; i < MAX_THREADS && (uint32_t)n < count; i++) {
+        UThread *u = &p->th[i];
+        if (u->used && u->t && u->futex == addr && addr) {
+            u->futex = 0;
+            event_signal(&u->ev);
+            n++;
+        }
+    }
+    return n;
 }
 
 int process_setpgid(Process *self, uint32_t pid, uint32_t pgid)
@@ -640,6 +903,7 @@ int process_info(unsigned index, ProcInfo *out)
         out->ppid = procs[i].parent == PARENT_ORPHAN ? 0 : procs[i].parent;
         out->pgid = procs[i].pgid;
         out->state = procs[i].exited ? 1 : 0;
+        out->threads = (uint32_t)procs[i].nlive;
         memcpy(out->name, procs[i].name, sizeof(out->name));
         r = 0;
         break;
@@ -719,7 +983,115 @@ int process_copy_string(const Process *p, uint64_t uptr, char *dst, size_t max)
     return -1; /* zu lang */
 }
 
-/* ---------- brk / mmap ---------- */
+/* ---------- Ausblenden bei mehreren Threads ----------
+ * Ein Thread blendet Seiten aus, ein anderer laeuft gleichzeitig auf einer anderen CPU: deren TLB kennt die Seite
+ * vielleicht noch. Die Frames bleiben deshalb reserviert, bis jede dieser CPUs ihren TLB geleert hat (tlb_flushes
+ * zaehlt weiter: per IPI VECTOR_TLB sofort, sonst beim naechsten Laden von CR3). Ohne Warten, auch unter dem BKL. */
+
+/* Platz fuer bis zu n Frames (vor dem Ausblenden holen: danach darf nichts mehr scheitern) */
+static Retired *retired_new(uint64_t n)
+{
+    Retired *r = kmalloc(sizeof(Retired) + n * sizeof(uint64_t));
+    if (r) {
+        r->next = 0;
+        r->mask = 0;
+        r->shm = 0;
+        r->n = 0;
+    }
+    return r;
+}
+
+static void shm_unref(struct Shm *s);
+
+static void retired_free(Retired *r)
+{
+    for (uint64_t i = 0; i < r->n; i++)
+        pmm_free_frame(r->frames[i]);
+    if (r->shm)
+        shm_unref(r->shm);
+    kfree(r);
+}
+
+/* Die Seiten in r sind ausgeblendet: sofort frei, wenn kein anderer Thread des Prozesses gerade laeuft, sonst
+ * spaeter (tlb_reclaim) */
+static void tlb_retire(Process *p, Retired *r)
+{
+    __atomic_thread_fence(__ATOMIC_SEQ_CST); /* geloeschte Eintraege vor dem Blick auf die anderen CPUs */
+    Cpu *self = this_cpu();
+    for (unsigned i = 0; i < smp_cpu_count() && i < SMP_MAX_CPUS; i++) {
+        Cpu *c = smp_cpu(i);
+        if (c && c != self && c->online && c->cur_as == (void *)p->as) {
+            r->mask |= 1u << i;
+            r->snap[i] = __atomic_load_n(&c->tlb_flushes, __ATOMIC_ACQUIRE);
+        }
+    }
+    if (!r->mask) {
+        retired_free(r);
+        return;
+    }
+    for (unsigned i = 0; i < SMP_MAX_CPUS; i++)
+        if (r->mask & (1u << i))
+            apic_send_ipi(smp_cpu(i)->apic_id, VECTOR_TLB);
+    uint64_t f = irq_save();
+    r->next = p->retired;
+    p->retired = r;
+    irq_restore(f);
+}
+
+/* Gibt frei, was alle betroffenen CPUs nicht mehr im TLB haben koennen (all: alles, kein Thread laeuft mehr) */
+static void tlb_reclaim(Process *p, int all)
+{
+    uint64_t f = irq_save();
+    Retired *list = p->retired, *keep = 0;
+    p->retired = 0;
+    irq_restore(f);
+    while (list) {
+        Retired *r = list;
+        list = r->next;
+        int done = 1;
+        for (unsigned i = 0; i < SMP_MAX_CPUS && !all && done; i++)
+            if ((r->mask & (1u << i)) && __atomic_load_n(&smp_cpu(i)->tlb_flushes, __ATOMIC_ACQUIRE) == r->snap[i])
+                done = 0;
+        if (done) {
+            retired_free(r);
+        } else {
+            r->next = keep;
+            keep = r;
+        }
+    }
+    if (keep) {
+        f = irq_save();
+        Retired **tail = &keep;
+        while (*tail)
+            tail = &(*tail)->next;
+        *tail = p->retired;
+        p->retired = keep;
+        irq_restore(f);
+    }
+}
+
+/* Blendet [a, end) aus. Mit einem Thread werden die Frames sofort frei, sonst ueber tlb_retire (r: Platz fuer alle) */
+static void unmap_range(Process *p, uint64_t a, uint64_t end, Retired *r)
+{
+    for (; a < end; a += PAGE) {
+        if (!r) {
+            unmap_user_page(p->as, a);
+            continue;
+        }
+        uint64_t phys, flags;
+        if (as_translate(p->as, a, &phys, &flags)) {
+            as_unmap(p->as, a);
+            if (!(flags & PAGE_SHARED))
+                r->frames[r->n++] = phys & ~(PAGE - 1);
+        }
+    }
+    if (r)
+        tlb_retire(p, r);
+}
+
+/* ---------- brk / mmap ----------
+ * Mit einem Thread laufen sie ohne BKL (syscall_unlocked), mit mehreren mit BKL: dann kommen sich die Threads
+ * nicht in die Quere. */
 
 int64_t process_brk(Process *p, uint64_t addr)
 {
@@ -727,6 +1099,8 @@ int64_t process_brk(Process *p, uint64_t addr)
         return (int64_t)p->brk_cur;
     if (addr < p->brk_start || addr > USER_BRK_LIMIT)
         return (int64_t)p->brk_cur; /* wie Linux: bei Fehler das alte Ende zurueckgeben */
+    if (p->retired)
+        tlb_reclaim(p, 0);
 
     uint64_t want = (addr + PAGE - 1) & ~(PAGE - 1);
     if (want > p->brk_mapped) {
@@ -737,9 +1111,11 @@ int64_t process_brk(Process *p, uint64_t addr)
                 return (int64_t)p->brk_cur;
             }
         }
-    } else {
-        for (uint64_t a = want; a < p->brk_mapped; a += PAGE)
-            unmap_user_page(p->as, a);
+    } else if (want < p->brk_mapped) {
+        Retired *r = 0;
+        if (p->nlive > 1 && !(r = retired_new((p->brk_mapped - want) / PAGE)))
+            return (int64_t)p->brk_cur;
+        unmap_range(p, want, p->brk_mapped, r);
     }
     p->brk_mapped = want;
     p->brk_cur = addr;
@@ -754,6 +1130,8 @@ int64_t process_mmap(Process *p, uint64_t len)
     uint64_t base = p->mmap_next;
     if (size > USER_MMAP_LIMIT - base)
         return ERR_NOMEM;
+    if (p->retired)
+        tlb_reclaim(p, 0);
 
     for (uint64_t a = base; a < base + size; a += PAGE) {
         if (map_user_page(p->as, a, PAGE_WRITE | PAGE_NX) != 0) {
@@ -771,8 +1149,12 @@ int process_munmap(Process *p, uint64_t addr, uint64_t len)
     uint64_t size = (len + PAGE - 1) & ~(PAGE - 1);
     if ((addr & (PAGE - 1)) || len == 0 || addr < USER_MMAP_BASE || addr + size > p->mmap_next || addr + size < addr)
         return ERR_INVAL;
-    for (uint64_t a = addr; a < addr + size; a += PAGE)
-        unmap_user_page(p->as, a);
+    if (p->retired)
+        tlb_reclaim(p, 0);
+    Retired *r = 0;
+    if (p->nlive > 1 && !(r = retired_new(size / PAGE)))
+        return ERR_NOMEM;
+    unmap_range(p, addr, addr + size, r);
     return 0;
 }
 
@@ -934,10 +1316,18 @@ int64_t process_shm(Process *p, uint64_t op, uint64_t a, uint64_t b)
         for (int i = 0; i < MAX_SHM_MAPS; i++) {
             Shm *s = p->shm[i].obj;
             if (s && p->shm[i].addr == a) {
+                Retired *r = 0;
+                if (p->nlive > 1 && !(r = retired_new(0)))
+                    return ERR_NOMEM;
                 for (uint64_t k = 0; k < s->npages; k++)
                     as_unmap(p->as, a + k * PAGE);
                 p->shm[i].obj = 0;
-                shm_unref(s);
+                if (r) {
+                    r->shm = s; /* die Referenz geht mit: frei erst nach dem TLB der anderen CPUs */
+                    tlb_retire(p, r);
+                } else {
+                    shm_unref(s);
+                }
                 return 0;
             }
         }
@@ -959,6 +1349,12 @@ int64_t process_shm(Process *p, uint64_t op, uint64_t a, uint64_t b)
 FdObj *process_fd_get(Process *p, int fd)
 {
     return fd >= 0 && fd < MAX_FD ? p->fds[fd] : 0;
+}
+
+FdObj *process_fd_hold(Process *p, int fd)
+{
+    FdObj *o = process_fd_get(p, fd);
+    return o ? fdobj_ref(o) : 0;
 }
 
 /* Legt das Objekt im kleinsten freien Deskriptor ab (uebernimmt die Referenz) */
@@ -1058,20 +1454,34 @@ int process_pipe(Process *p, int fds[2])
     return 0;
 }
 
+/* Lesen und Schreiben koennen blockieren (und den BKL abgeben): solange haelt der Aufruf eine eigene Referenz,
+ * damit ein anderer Thread den Deskriptor schliessen kann, ohne das Objekt unter ihm freizugeben. */
 int64_t process_fd_read(Process *p, int fd, void *buf, uint64_t len)
 {
-    FdObj *o = process_fd_get(p, fd);
-    return o ? fdobj_read(o, buf, len) : ERR_BADF;
+    FdObj *o = process_fd_hold(p, fd);
+    if (!o)
+        return ERR_BADF;
+    int64_t r = fdobj_read(o, buf, len);
+    fdobj_unref(o);
+    return r;
 }
 
 int64_t process_fd_write(Process *p, int fd, const void *buf, uint64_t len)
 {
-    FdObj *o = process_fd_get(p, fd);
-    return o ? fdobj_write(o, buf, len) : ERR_BADF;
+    FdObj *o = process_fd_hold(p, fd);
+    if (!o)
+        return ERR_BADF;
+    int64_t r = fdobj_write(o, buf, len);
+    fdobj_unref(o);
+    return r;
 }
 
 int64_t process_fd_seek(Process *p, int fd, int64_t off, int whence)
 {
-    FdObj *o = process_fd_get(p, fd);
-    return o ? fdobj_seek(o, off, whence) : ERR_BADF;
+    FdObj *o = process_fd_hold(p, fd);
+    if (!o)
+        return ERR_BADF;
+    int64_t r = fdobj_seek(o, off, whence);
+    fdobj_unref(o);
+    return r;
 }

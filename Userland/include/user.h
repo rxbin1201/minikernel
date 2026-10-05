@@ -5,6 +5,7 @@
 
 typedef unsigned long long u64;
 typedef long long          s64;
+typedef unsigned int       u32;
 
 #define SYS_WRITE     1
 #define SYS_EXIT      2
@@ -73,6 +74,12 @@ typedef long long          s64;
 #define SYS_SHM       65
 #define SYS_SERVICE   66
 #define SYS_GPUCOMP   67
+#define SYS_THREAD_CREATE 68
+#define SYS_THREAD_EXIT   69
+#define SYS_THREAD_JOIN   70
+#define SYS_GETTID        71
+#define SYS_FUTEX_WAIT    72
+#define SYS_FUTEX_WAKE    73
 #define ERR_NOENT     (-2)
 #define ERR_IO        (-5)
 #define ERR_EXIST     (-17)
@@ -169,6 +176,7 @@ typedef struct {
 typedef struct {
     unsigned pid, ppid, pgid, state;
     char     name[32];
+    unsigned threads, pad; /* laufende Threads */
 } ProcInfo;
 
 /* PCI-Geraet (SYS_PCIINFO); driver: Name des Kernel-Treibers oder "" */
@@ -369,6 +377,19 @@ static inline s64 sys_sockport(int fd)                       { return syscall3(S
 static inline s64 sys_cpuinfo(u64 index, CpuInfo *ci)        { return syscall3(SYS_CPUINFO, index, (u64)ci, 0); } /* ERR_NOENT: keine CPU mehr */
 static inline s64 sys_gpu(u64 op)                           { return syscall3(SYS_GPU, op, 0, 0); } /* 1 = Page-Flip-Test, 2 = Mauszeiger-Test, 3 = Blitter-Test, 4 = Info, 5 = EDID, 6 = Skalierer, 7 = Moduswechsel, 8 = DisplayPort, 9 = DP-Moduswechsel, 10 = DP-Link-Training, 11 | Port << 8 = Anschluss, 12 = Bildwechsel */
 static inline s64 sys_klog(u64 *pos, char *buf, u64 max)     { return syscall3(SYS_KLOG, (u64)pos, (u64)buf, max); } /* 0 = Ende des Kernel-Logs; *pos = ~0: setzt *pos auf das Ende */
+
+/* Threads (bequemer: thread.h). Nummern 0..15 je Prozess, 0 = erster Thread. Der neue Thread startet bei
+ * entry(arg) mit rsp = stack_top - 8; kehrt entry zurueck, stuerzt er ab - also am Ende sys_thread_exit. */
+static inline s64 sys_thread_create(void (*entry)(void *), void *stack_top, void *arg)
+{
+    return syscall3(SYS_THREAD_CREATE, (u64)entry, (u64)stack_top, (u64)arg); /* ERR_AGAIN: alle Plaetze belegt */
+}
+static inline __attribute__((noreturn)) void sys_thread_exit(u64 value) { syscall3(SYS_THREAD_EXIT, value, 0, 0); for (;;); }
+static inline s64 sys_thread_join(int tid, u64 *value)        { return syscall3(SYS_THREAD_JOIN, tid, (u64)value, 0); }
+static inline s64 sys_gettid(void)                            { return syscall3(SYS_GETTID, 0, 0, 0); }
+/* Schlafen, solange *addr == val (0 geweckt, ERR_AGAIN Wert anders, ERR_TIMEDOUT); timeout_ms 0 = ohne Grenze */
+static inline s64 sys_futex_wait(volatile u32 *addr, u32 val, u64 timeout_ms) { return syscall3(SYS_FUTEX_WAIT, (u64)addr, val, timeout_ms); }
+static inline s64 sys_futex_wake(volatile u32 *addr, u32 count) { return syscall3(SYS_FUTEX_WAKE, (u64)addr, count, 0); }
 static inline s64 sys_sendto(int fd, const unsigned char ip[4], unsigned port, const void *buf, unsigned len)
 {
     SockMsg m = {(u64)buf, len, {ip[0], ip[1], ip[2], ip[3]}, (unsigned short)port, 0, 0};

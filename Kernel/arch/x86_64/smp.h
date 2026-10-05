@@ -27,7 +27,8 @@
  * BKL haelt. Der Selbsttest "smp" prueft Heap und PMM mit Threads, die den BKL abgeben.
  *
  * Syscalls ohne BKL (syscall_unlocked in syscall.c): ticks, getpid, time, cpuinfo, yield (wenn niemand wartet) und
- * brk/mmap/munmap. Sie fassen nur den eigenen Prozess an (ein Thread je Prozess) oder Teile mit eigenem Lock. */
+ * brk/mmap/munmap (diese nur bei Prozessen mit einem Thread). Sie fassen nur den eigenen Prozess an oder Teile mit
+ * eigenem Lock. */
 
 #define SMP_MAX_CPUS 16
 
@@ -46,6 +47,9 @@ typedef struct Cpu {
     uint64_t       ticks_user, ticks_kernel, ticks_idle; /* Timer-Ticks nach Zustand der CPU */
     uint64_t       bkl_timer;   /* Timer-Interrupts in User-Code, die doch den BKL holen mussten (Threadwechsel/Kill) */
     uint64_t       sys_unlocked, sys_bkl; /* Syscalls ohne bzw. mit BKL (syscall_dispatch) */
+    void *volatile cur_as;         /* Adressraum in CR3 (von schedule gesetzt, vor dem Laden) */
+    volatile uint64_t tlb_flushes; /* wie oft die CPU ihren User-TLB geleert hat (CR3 geladen); process.c gibt
+                                    * ausgeblendete Seiten erst frei, wenn alle betroffenen CPUs weitergezaehlt haben */
 } Cpu;
 
 #define CPU_OFF_KERNEL_RSP 8

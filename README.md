@@ -65,6 +65,35 @@ einer gemeinsamen Run-Queue und laufen auf jeder CPU. Kernel-Code ist durch eine
 
 In der Shell: `burn 5000 & burn 5000 & cpus` zeigt zwei ausgelastete CPUs.
 
+### Threads in Programmen
+
+Ein Programm kann bis zu 16 Threads haben (`Userland/include/thread.h`). Sie teilen Speicher, Datei-Deskriptoren und
+Arbeitsverzeichnis und rechnen auf mehreren CPUs gleichzeitig:
+
+```c
+#include "thread.h"
+
+static Mutex lock = MUTEX_INIT;
+static void *arbeit(void *arg) { mutex_lock(&lock); /* ... */ mutex_unlock(&lock); return arg; }
+
+int t = thread_create(arbeit, &daten);   // laeuft parallel, eigener Stack (64 KiB)
+void *ergebnis;
+thread_join(t, &ergebnis);               // wartet aufs Ende und gibt den Stack frei
+```
+
+- **Sperren** (`Mutex`) warten ueber einen Futex (`SYS_FUTEX_WAIT/WAKE`): wer nicht drankommt, schlaeft. `malloc`/`free`
+  sperren, sobald ein zweiter Thread laeuft.
+- **Ende:** `sys_exit` (auch das Ende von `_start`), ein Absturz oder Strg+C/`kill` beenden alle Threads; die anderen
+  beim naechsten Eintritt in den Kernel, wartende werden geweckt. `thread_exit` beendet nur den eigenen Thread, mit dem
+  letzten endet das Programm (Code 0).
+- **fork** uebernimmt nur den aufrufenden Thread, **exec** geht nur mit einem Thread (sonst `ERR_AGAIN`).
+- **Kernel:** Platz 0..15 je Prozess (`process.c`), der letzte Thread raeumt den Prozess ab. `brk`/`mmap`/`munmap`
+  laufen bei mehreren Threads mit BKL. Ausgeblendete Seiten werden erst frei, wenn jede CPU, auf der gerade ein
+  anderer Thread des Programms lief, ihren TLB geleert hat (IPI `VECTOR_TLB`, ohne darauf zu warten). Ein blockierendes
+  `read` haelt sein Dateiobjekt fest, auch wenn ein anderer Thread den Deskriptor schliesst.
+
+`ps` zeigt die Threads je Prozess (Spalte THR). Der Selbsttest `threadtest` prueft das alles (22 Pruefungen).
+
 ## Intel-Grafik (Gen9: Skylake bis Comet Lake, z.B. UHD Graphics 630)
 
 `Kernel/drivers/gpu/igd.c` setzt auf der Anzeige auf, die die UEFI-Firmware eingerichtet hat, und ergaenzt:

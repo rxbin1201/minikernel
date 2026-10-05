@@ -87,6 +87,13 @@ void isr_handler(InterruptFrame *f)
         apic_eoi();
         return;
     }
+    if (f->vector == VECTOR_TLB) { /* TLB leeren (CR3 neu laden) und mitzaehlen */
+        uint64_t cr3;
+        __asm__ __volatile__("mov %%cr3, %0; mov %0, %%cr3" : "=r"(cr3) : : "memory");
+        __atomic_add_fetch(&this_cpu()->tlb_flushes, 1, __ATOMIC_RELEASE);
+        apic_eoi();
+        return;
+    }
     int taken = bkl_enter();
     isr_dispatch(f);
     bkl_leave(taken);
@@ -128,6 +135,19 @@ static void isr_dispatch(InterruptFrame *f)
         }
         kprintf(" -> beendet\n");
         process_fault();
+    }
+
+    /* Seitenfehler im Kernel an einer User-Adresse: ein Syscall hatte den Puffer geprueft, dann hat ein anderer
+     * Thread desselben Prozesses ihn ausgeblendet (munmap, brk). Das trifft nur diesen Prozess. */
+    if (f->vector == 14 && process_current()) {
+        uint64_t cr2;
+        __asm__ __volatile__("mov %%cr2, %0" : "=r"(cr2));
+        if (cr2 >= USER_BASE && cr2 < USER_END) {
+            Process *p = process_current();
+            kprintf("\n[Prozess %u '%s'] Kernel greift auf ausgeblendeten Speicher %#lx zu (RIP=%#lx) -> beendet\n",
+                    process_pid(p), process_name(p), cr2, f->rip);
+            process_fault();
+        }
     }
 
     kprintf("\n*** EXCEPTION %lu: %s ***\n", f->vector, f->vector < 32 ? exception_names[f->vector] : "Interrupt");

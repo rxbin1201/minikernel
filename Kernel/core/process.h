@@ -7,8 +7,13 @@
 #include "core/syscall.h"
 #include "fs/vfs.h"
 
-/* User-Prozesse: je ein eigener Adressraum, ein Thread und ein statisch gelinktes ELF64 (ET_EXEC) mit
+/* User-Prozesse: je ein eigener Adressraum, ein oder mehrere Threads und ein statisch gelinktes ELF64 (ET_EXEC) mit
  * Segmenten im User-Bereich (USER_BASE .. USER_END). Das Programm kommt aus dem VFS (initrd oder /disk).
+ *
+ * Threads (SYS_THREAD_*): teilen Adressraum, Datei-Deskriptoren und Arbeitsverzeichnis. exit, eine Ausnahme oder
+ * kill beenden den ganzen Prozess (die anderen Threads beim naechsten Eintritt in den Kernel); SYS_THREAD_EXIT nur
+ * den eigenen Thread, mit dem letzten endet der Prozess (Code 0). fork uebernimmt nur den aufrufenden Thread, exec
+ * geht nur mit einem Thread (sonst ERR_AGAIN).
  *
  * Jeder Prozess hat eine Tabelle von Datei-Deskriptoren (Objekte aus fdobj.h, die bei fork/dup geteilt werden),
  * ein Arbeitsverzeichnis, eine Prozessgruppe (fuer Ctrl-C) und ein Kill-Flag. */
@@ -62,6 +67,15 @@ void process_check_killed(void);        /* beendet den aktuellen Prozess, falls 
 int  process_kill_pending(void);        /* soll der aktuelle Prozess beendet werden? (ohne BKL lesbar) */
 int  process_wait_tick(void);           /* schlaeft einen Timer-Tick; -1, wenn der Prozess gekillt wurde (fuer blockierende Aufrufe) */
 
+/* Threads (mit BKL). Thread-Nummer = Platz 0..15 im Prozess (0 = erster Thread). */
+int  process_threads(const Process *p);                                              /* laufende Threads */
+int  process_thread_create(Process *p, uint64_t entry, uint64_t stack_top, uint64_t arg); /* Nummer oder Fehler */
+void process_thread_exit(Process *p, uint64_t ret) __attribute__((noreturn));
+int  process_thread_join(Process *p, int tid, uint64_t *ret);  /* wartet aufs Ende, gibt den Platz frei */
+int  process_thread_self(Process *p);
+int  process_futex_wait(Process *p, uint64_t addr, uint32_t val, uint64_t timeout_ms); /* 0, ERR_AGAIN, ERR_TIMEDOUT, ERR_INTR */
+int  process_futex_wake(Process *p, uint64_t addr, uint32_t count);                    /* geweckte Threads */
+
 /* Auskunft fuer "ps" */
 int process_info(unsigned index, ProcInfo *out);
 
@@ -86,6 +100,7 @@ void    shm_put(void *obj);
 
 /* Datei-Deskriptoren */
 struct FdObj *process_fd_get(Process *p, int fd);
+struct FdObj *process_fd_hold(Process *p, int fd);     /* wie process_fd_get, mit Referenz (fdobj_unref danach) */
 int process_fd_install(Process *p, struct FdObj *obj); /* kleinster freier fd (uebernimmt die Referenz; bei Fehler freigegeben) */
 int     process_fd_open(Process *p, const char *abs_path, int flags); /* fd oder negativer Fehler */
 int     process_fd_close(Process *p, int fd);

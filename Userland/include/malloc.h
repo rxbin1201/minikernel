@@ -4,7 +4,7 @@
 #include "user.h"
 
 /* Kleiner First-Fit-Allocator auf Basis von brk (Bloecke liegen lueckenlos hintereinander, Freigabe
- * verschmilzt mit freien Nachbarn). Nicht threadsicher; ein Prozess hat nur einen Thread. */
+ * verschmilzt mit freien Nachbarn). Threadsicher, sobald thread_create (thread.h) einmal lief. */
 
 typedef struct UBlock {
     u64            size;  /* Nutzdaten, Vielfaches von 16 */

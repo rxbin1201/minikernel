@@ -135,6 +135,13 @@ void test_user(BootInfo *info)
     check("forktest (fork, exec, Pipe, dup2, kill)", run_user("/bin/forktest", "forktest", &code, &faulted) == 0 && code == 0 && !faulted);
     check("fstest (lseek, rename, stat, chdir, getcwd)", run_user("/bin/fstest", "fstest", &code, &faulted) == 0 && code == 0 && !faulted);
     check("shmtest (geteilter Speicher, Freigabe, Dienste)", run_user("/bin/shmtest", "shmtest", &code, &faulted) == 0 && code == 0 && !faulted);
+    /* Threads in Programmen: Sperre, parallel auf mehreren CPUs, Futex, malloc/munmap aus mehreren Threads, exit,
+     * Absturz, kill und fork mit laufenden Threads (die Seiten muessen danach alle zurueck sein, siehe unten) */
+    pid = process_spawn("/bin/threadtest", "threadtest", 0);
+    check("threadtest (Threads in Programmen)",
+          pid > 0 && process_wait(pid, 0, &code, &faulted, 60000) == 0 && code == 0 && !faulted);
+    if (pid > 0 && code != 0)
+        kprintf("  threadtest: Pruefung %d fehlgeschlagen\n", code);
 
     /* Die Shell: Befehle tippen (Tastatur-Injektion), die Ergebnisse stehen danach als Dateien auf /disk.
      * Prueft Pipes, Umleitungen, Anfuehrungszeichen, relative Pfade, Verlauf (Pfeil hoch) und Ctrl-C. */
