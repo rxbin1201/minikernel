@@ -107,6 +107,29 @@ KVM dauert `fork` bei 32 MiB belegtem Speicher etwa 7 ms statt 780 ms. Prozesse 
 sofort, und vor dem zweiten Thread werden alle geteilten Seiten aufgeloest - sonst muessten bei jedem Aufloesen erst die
 anderen CPUs ihren TLB leeren. Selbsttest: `cowtest` (11 Pruefungen).
 
+### Dateien einblenden (mmap auf Dateien)
+
+`sys_mmap_file(fd, laenge, offset, schreibbar)` blendet eine Datei in den Speicher ein: das Programm greift einfach
+ueber einen Zeiger darauf zu, gelesen wird erst, wenn es eine Seite anfasst (Seitenfehler, `process.c: vma_fault`).
+So geht das Einblenden auch bei grossen Dateien sofort, und Teile, die nie gebraucht werden, werden nie gelesen:
+
+```c
+int fd = sys_open("/disk/musik.wav", O_RDONLY);
+const unsigned char *d = (const unsigned char *)sys_mmap_file(fd, groesse, 0, 0);
+sys_close(fd);                 // die Einblendung bleibt
+... d[i] ...                   // liest beim ersten Zugriff die passenden 4 KiB
+sys_munmap((void *)d, groesse);
+```
+
+- **Privat:** mit `schreibbar` darf das Programm hineinschreiben, die Datei bleibt unveraendert (wie `MAP_PRIVATE`).
+  Nur lesbare Einblendungen beenden das Programm beim Schreiben. Hinter dem Dateiende stehen Nullen.
+- Bis zu 32 Einblendungen je Prozess; jede hat ihre eigene Dateiposition (der Deskriptor darf geschlossen werden).
+  `munmap` nimmt auch Teile heraus, `fork` vererbt sie (das Kind laedt fehlende Seiten selbst), `exec` und das
+  Programmende raeumen auf. Liest der Kernel aus einer Einblendung (z.B. `write` aus ihr), laedt
+  `process_user_range_ok` die Seiten vorher.
+- In QEMU ohne KVM: einblenden und eine Seite lesen etwa 0,4 ms, dieselbe Datei (2 MiB) ganz lesen etwa 15 ms.
+  Selbsttest: `mmaptest` (23 Pruefungen).
+
 ## Intel-Grafik (Gen9: Skylake bis Comet Lake, z.B. UHD Graphics 630)
 
 `Kernel/drivers/gpu/igd.c` setzt auf der Anzeige auf, die die UEFI-Firmware eingerichtet hat, und ergaenzt:

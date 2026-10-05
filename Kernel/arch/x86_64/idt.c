@@ -131,6 +131,13 @@ static void isr_dispatch(InterruptFrame *f)
         if (process_cow_fault(process_current(), cr2))
             return;
     }
+    /* Seite fehlt (Fehlercode Bit 0 = 0): gehoert sie zu einer eingeblendeten Datei, jetzt aus der Datei laden */
+    if (f->vector == 14 && !(f->error_code & 1)) {
+        uint64_t cr2;
+        __asm__ __volatile__("mov %%cr2, %0" : "=r"(cr2));
+        if (process_file_fault(process_current(), cr2, (f->error_code & 2) != 0))
+            return;
+    }
 
     /* Ausnahme in Ring 3: nur den Prozess beenden, der Kernel laeuft weiter */
     if ((f->cs & 3) == 3) {

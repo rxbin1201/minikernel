@@ -28,6 +28,7 @@
 #define PAGE              4096ULL
 #define MAX_SHM_MAPS      80   /* Desktop: Fenster der Programme, eigene Fensterbilder und Schatten */
 #define MAX_THREADS       16   /* Threads je Prozess (mit beendeten, noch nicht abgeholten) */
+#define MAX_VMAS          32   /* eingeblendete Dateien je Prozess (SYS_MMAP_FILE) */
 
 extern void enter_user(uint64_t rip, uint64_t rsp, uint64_t arg1, uint64_t arg2) __attribute__((noreturn));
 extern void enter_user_regs(const SyscallFrame *r) __attribute__((noreturn));
@@ -56,6 +57,15 @@ typedef struct Retired {
     uint64_t        frames[];
 } Retired;
 
+/* Eine eingeblendete Datei (SYS_MMAP_FILE): die Seiten kommen erst beim ersten Zugriff (Seitenfehler) aus der Datei.
+ * Privat: geschriebene Seiten gehoeren nur dem Prozess, die Datei bleibt, wie sie ist. */
+typedef struct {
+    uint64_t start, end; /* seitenausgerichtet; end = 0: Platz frei */
+    uint64_t offset;     /* Stelle in der Datei, die bei start liegt */
+    int      writable;
+    FsFile   file;       /* eigene Kopie: eigene Position, unabhaengig vom Deskriptor (der darf geschlossen werden) */
+} Vma;
+
 struct Process {
     int          used;
     uint32_t     pid, parent, pgid;
@@ -71,6 +81,7 @@ struct Process {
     int          argc;
     uint64_t     brk_start, brk_cur, brk_mapped; /* brk_mapped: page-aligned Ende der gemappten Seiten */
     uint64_t     mmap_next;
+    Vma          vmas[MAX_VMAS];
     FdObj       *fds[MAX_FD];
     volatile int exited;
     volatile int killed;
@@ -83,6 +94,7 @@ static Process procs[MAX_PROC];
 static void shm_release_all(Process *p);
 static void tlb_reclaim(Process *p, int all);
 static int  self_slot(Process *p);
+static void vma_clear_all(Process *p);
 static uint32_t next_pid = 1;
 
 /* ---------- User-Speicher ---------- */
@@ -455,6 +467,7 @@ int process_fork(const SyscallFrame *f)
     p->brk_cur = parent->brk_cur;
     p->brk_mapped = parent->brk_mapped;
     p->mmap_next = parent->mmap_next;
+    memcpy(p->vmas, parent->vmas, sizeof(p->vmas)); /* noch nicht geladene Seiten laedt das Kind selbst */
 
     /* Mit einem Thread Copy-on-Write: die Seiten werden erst beim Schreiben kopiert (meist ruft das Kind gleich exec
      * auf und braucht sie nie). Mit mehreren Threads eine echte Kopie - die anderen Threads koennten noch alte,
@@ -539,6 +552,7 @@ int process_exec(const char *path, const char *cmdline)
     as_switch(new_as);
     tlb_reclaim(p, 1); /* aufgehobene Seiten frueherer Threads */
     shm_release_all(p); /* geteilter Speicher gehoerte zum alten Programm */
+    vma_clear_all(p);   /* eingeblendete Dateien ebenso */
     as_destroy(old_as);
     sched_fpu_reset();
     to_user(p->entry, p->user_rsp, (uint64_t)p->argc, p->argv);
@@ -601,6 +615,7 @@ static void finish_process(Process *p, int code, int faulted)
     tlb_reclaim(p, 1); /* kein anderer Thread laeuft mehr in diesem Adressraum */
     close_all_fds(p);
     shm_release_all(p); /* die Seiten bleiben bis as_destroy eingeblendet, werden aber nicht mehr benutzt */
+    vma_clear_all(p);
     service_owner_exit(p->pid); /* angemeldete Dienste verschwinden */
     mouse_owner_exit(p->pid);
     igd_comp_release(p->pid);    /* Flaechen fuer das GPU-Zusammensetzen */
@@ -972,7 +987,10 @@ int process_user_range_ok(const Process *p, uint64_t ptr, uint64_t len, int writ
         return 0;
     for (uint64_t a = ptr & ~(PAGE - 1); a < end; a += PAGE) {
         uint64_t flags;
-        if (!as_translate(p->as, a, 0, &flags) || !(flags & PAGE_USER))
+        if (!as_translate(p->as, a, 0, &flags) && /* eingeblendete Datei: die Seite jetzt laden */
+            !(process_file_fault((Process *)p, a, write) && as_translate(p->as, a, 0, &flags)))
+            return 0;
+        if (!(flags & PAGE_USER))
             return 0;
         if (write && !(flags & PAGE_WRITE) && !((flags & PAGE_COW) && as_cow_resolve(p->as, a) == 1))
             return 0; /* Copy-on-Write: der Kernel schreibt gleich hinein, also jetzt schon die eigene Kopie */
@@ -1158,6 +1176,125 @@ int64_t process_mmap(Process *p, uint64_t len)
     return (int64_t)base;
 }
 
+/* ---------- Eingeblendete Dateien ---------- */
+
+static Vma *vma_find(Process *p, uint64_t va)
+{
+    for (int i = 0; i < MAX_VMAS; i++)
+        if (p->vmas[i].end && va >= p->vmas[i].start && va < p->vmas[i].end)
+            return &p->vmas[i];
+    return 0;
+}
+
+static void vma_clear_all(Process *p)
+{
+    for (int i = 0; i < MAX_VMAS; i++)
+        if (p->vmas[i].end) {
+            fs_close(&p->vmas[i].file);
+            p->vmas[i].end = 0;
+        }
+}
+
+/* Nimmt [a, end) aus den Einblendungen heraus (die Seiten selbst blendet munmap aus). -1: Teilen ginge nur mit
+ * einem freien Platz, und es gibt keinen (dann bleibt alles, wie es ist). */
+static int vma_trim(Process *p, uint64_t a, uint64_t end)
+{
+    int need = 0, free_slot = -1;
+    for (int i = 0; i < MAX_VMAS; i++) {
+        Vma *v = &p->vmas[i];
+        if (!v->end)
+            free_slot = free_slot < 0 ? i : free_slot;
+        else if (a > v->start && end < v->end)
+            need++;
+    }
+    if (need && free_slot < 0)
+        return -1;
+    for (int i = 0; i < MAX_VMAS; i++) {
+        Vma *v = &p->vmas[i];
+        if (!v->end || end <= v->start || a >= v->end)
+            continue;
+        if (a <= v->start && end >= v->end) { /* ganz */
+            fs_close(&v->file);
+            v->end = 0;
+        } else if (a <= v->start) { /* vorne */
+            v->offset += end - v->start;
+            v->start = end;
+        } else if (end >= v->end) { /* hinten */
+            v->end = a;
+        } else { /* Mitte: hinterer Teil in einen neuen Platz */
+            Vma *w = &p->vmas[free_slot];
+            *w = *v;
+            w->offset += end - v->start;
+            w->start = end;
+            v->end = a;
+        }
+    }
+    return 0;
+}
+
+int64_t process_mmap_file(Process *p, int fd, uint64_t len, uint64_t offset, int writable)
+{
+    if (len == 0 || (offset & (PAGE - 1)))
+        return ERR_INVAL;
+    FdObj *o = process_fd_get(p, fd);
+    if (!o || o->kind != FD_FILE)
+        return ERR_BADF;
+    Vma *v = 0;
+    for (int i = 0; i < MAX_VMAS && !v; i++)
+        if (!p->vmas[i].end)
+            v = &p->vmas[i];
+    uint64_t size = (len + PAGE - 1) & ~(PAGE - 1), base = p->mmap_next;
+    if (!v || size > USER_MMAP_LIMIT - base)
+        return ERR_NOMEM;
+    v->start = base;
+    v->end = base + size;
+    v->offset = offset;
+    v->writable = writable;
+    v->file = o->file;
+    p->mmap_next = base + size + PAGE; /* eine ungemappte Luecke als Schutz, wie bei mmap */
+    return (int64_t)base;
+}
+
+/* Laedt die Seite bei va aus ihrer Datei. 1 = eingeblendet, 0 = keine Datei-Seite (oder Schreiben auf eine nur
+ * lesbare Einblendung), -1 = kein Speicher. Hinter dem Dateiende stehen Nullen. Mit BKL; das Lesen kann schlafen -
+ * danach wird nachgesehen, ob die Seite inzwischen ein anderer Thread geladen oder ausgeblendet hat. */
+static int vma_fault(Process *p, uint64_t va, int write)
+{
+    va &= ~(PAGE - 1);
+    Vma *v = vma_find(p, va);
+    if (!v || (write && !v->writable))
+        return 0;
+    uint64_t frame = pmm_alloc_frame();
+    if (!frame)
+        return -1;
+    memset((void *)frame, 0, PAGE);
+    FsFile f = v->file; /* Kopie: ein anderer Thread koennte waehrenddessen dieselbe Datei lesen */
+    uint64_t off = v->offset + (va - v->start);
+    if (fs_seek(&f, (int64_t)off, 0) == (int64_t)off) /* hinter dem Ende geht seek nicht: dann Nullen */
+        for (uint64_t got = 0; got < PAGE;) {
+            int64_t n = fs_read(&f, (uint8_t *)frame + got, PAGE - got);
+            if (n <= 0)
+                break;
+            got += (uint64_t)n;
+        }
+    v = vma_find(p, va); /* waehrend des Lesens ausgeblendet? */
+    if (!v || as_translate(p->as, va, 0, 0)) {
+        pmm_free_frame(frame);
+        return v ? 1 : 0;
+    }
+    v->file = f; /* behaelt den Cluster-Cache: der naechste Zugriff dahinter muss die Kette nicht von vorn ablaufen */
+    if (as_map(p->as, va, frame, PAGE_USER | PAGE_NX | (v->writable ? PAGE_WRITE : 0)) != 0) {
+        pmm_free_frame(frame);
+        return -1;
+    }
+    return 1;
+}
+
+int process_file_fault(Process *p, uint64_t addr, int write)
+{
+    return p && addr >= USER_MMAP_BASE && addr < USER_MMAP_LIMIT && vma_fault(p, addr, write) == 1;
+}
+
 int process_munmap(Process *p, uint64_t addr, uint64_t len)
 {
     uint64_t size = (len + PAGE - 1) & ~(PAGE - 1);
@@ -1165,6 +1302,8 @@ int process_munmap(Process *p, uint64_t addr, uint64_t len)
         return ERR_INVAL;
     if (p->retired)
         tlb_reclaim(p, 0);
+    if (vma_trim(p, addr, addr + size) != 0)
+        return ERR_NOMEM; /* eine Datei-Einblendung muesste geteilt werden, es ist aber kein Platz frei */
     Retired *r = 0;
     if (p->nlive > 1 && !(r = retired_new(size / PAGE)))
         return ERR_NOMEM;

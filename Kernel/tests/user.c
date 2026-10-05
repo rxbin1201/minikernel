@@ -149,6 +149,12 @@ void test_user(BootInfo *info)
           pid > 0 && process_wait(pid, 0, &code, &faulted, 60000) == 0 && code == 0 && !faulted);
     if (pid > 0 && code != 0)
         kprintf("  cowtest: Pruefung %d fehlgeschlagen\n", code);
+    /* Eingeblendete Dateien: Seiten erst beim Zugriff aus der Datei (alle Frames muessen danach zurueck sein) */
+    pid = process_spawn("/bin/mmaptest", "mmaptest", 0);
+    check("mmaptest (Dateien einblenden)",
+          pid > 0 && process_wait(pid, 0, &code, &faulted, 60000) == 0 && code == 0 && !faulted);
+    if (pid > 0 && code != 0)
+        kprintf("  mmaptest: Pruefung %d fehlgeschlagen\n", code);
 
     /* Die Shell: Befehle tippen (Tastatur-Injektion), die Ergebnisse stehen danach als Dateien auf /disk.
      * Prueft Pipes, Umleitungen, Anfuehrungszeichen, relative Pfade, Verlauf (Pfeil hoch) und Ctrl-C. */
