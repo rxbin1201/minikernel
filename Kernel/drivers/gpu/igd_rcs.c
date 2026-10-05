@@ -1874,9 +1874,11 @@ static uint32_t batch_3d(const Draw3d *d)
     b[k++] = d->tex_gtt ? S3_SAMP : 0;
     b[k++] = S3D(0x0F);              /* SCISSOR_STATE_POINTERS */
     b[k++] = S3_SCISSOR;
-    b[k++] = S3D(0x4E) | 2;          /* WM_DEPTH_STENCIL: Tiefentest "kleiner" und Tiefe schreiben, kein Stencil */
-    b[k++] = d->depth_gtt ? ((d->depth_always ? 0u : CMP_LESS) << 5) | ((d->opts & IGD_3D_NO_DEPTH_WRITE) ? 0u : 1u << 1) | 1u
-                          : 0; /* 0 = ALWAYS */
+    /* WM_DEPTH_STENCIL: Vergleich (Bits 7:5, 0 = ALWAYS), Bit 1 Tiefentest an, Bit 0 Tiefe schreiben; kein Stencil */
+    b[k++] = S3D(0x4E) | 2;
+    b[k++] = d->depth_gtt ? ((d->depth_always ? 0u : CMP_LESS) << 5) | (1u << 1) |
+                                ((d->opts & IGD_3D_NO_DEPTH_WRITE) ? 0u : 1u)
+                          : 0;
     b[k++] = 0;
     b[k++] = 0;
     b[k++] = S3D(0x05) | 6;          /* DEPTH_BUFFER */
