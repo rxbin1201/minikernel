@@ -19,7 +19,7 @@
 #define CSR_GP_CNTRL         0x024
 #define CSR_HW_REV           0x028
 #define CSR_HW_RF_ID         0x09C
-#define PRPH_RADDR           0x448 /* Peripherie-Register lesen: Adresse (mit 3 << 24), dann Wert aus PRPH_RDAT */
+#define PRPH_RADDR           0x448 /* Peripherie-Register lesen: Adresse (24 Bit, mit 3 << 24), dann Wert aus PRPH_RDAT */
 #define PRPH_RDAT            0x450
 /* Bits in CSR_GP_CNTRL */
 #define GP_MAC_CLOCK_READY   (1u << 0)
@@ -191,7 +191,7 @@ int iwl_wake_test(void)
     info.wake_us = (uint32_t)(time_us() - t0);
     info.gp_after = rd(CSR_GP_CNTRL);
     if (info.wake_access) {
-        wr(PRPH_RADDR, (CNVI_AUX_MISC_CHIP & 0xFFFFF) | (3u << 24));
+        wr(PRPH_RADDR, (CNVI_AUX_MISC_CHIP & 0xFFFFFF) | (3u << 24));
         info.cnvi_id = rd(PRPH_RDAT);
     }
     wr(CSR_GP_CNTRL, rd(CSR_GP_CNTRL) & ~GP_MAC_ACCESS_REQ);
