@@ -182,6 +182,14 @@ Surface *anim_temps(void)
     return tmp;
 }
 
+/* neue Bildschirmgroesse: die Hilfsflaechen passen nicht mehr (beim naechsten Gebrauch neu) */
+void anim_temps_free(void)
+{
+    for (int i = 0; i < 4; i++)
+        gsurf_free(&tmp[i]);
+    tmp_failed = 0;
+}
+
 void gq_cancel(void)
 {
     nq = q_bad = 0;

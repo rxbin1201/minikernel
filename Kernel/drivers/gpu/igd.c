@@ -595,7 +595,9 @@ static struct {
 static const int32_t arrow_poly[7][2] = {
     {32, 32}, {32, 288}, {96, 229}, {138, 326}, {176, 310}, {136, 214}, {216, 214},
 };
-static uint32_t cursor_hot; /* Spitze in Pixeln (fuer die Position) */
+static uint32_t cursor_hot;          /* Spitze in Pixeln (fuer die Position) */
+static uint64_t cursor_frames[4];    /* Bild des Zeigers (64 x 64, ARGB): neu gezeichnet, wenn sich die Groesse aendert */
+static int      cursor_x, cursor_y;  /* zuletzt gesetzte Spitze */
 
 static int arrow_inside(int64_t x, int64_t y, int64_t f) /* x, y und Eckpunkte*f in 1/64 Pixel */
 {
@@ -626,12 +628,14 @@ static int64_t arrow_dist2(int64_t x, int64_t y, int64_t f) /* Abstand zum Rand,
 
 static void draw_cursor_image(uint64_t frames[4])
 {
-    uint32_t sc = console_scale();
+    uint32_t sc = console_scale(), pct = console_cursor_pct();
     if (sc < 1)
         sc = 1;
     if (sc > 3)
         sc = 3;
     int64_t f = sc == 1 ? 4 : 1 + (int64_t)sc * 2; /* 1x, 1,25x, 1,75x in Vierteln: 16tel * f = 1/64 Pixel */
+    if (pct) /* eingestellt (Einstellungen): 100 % = 4 Viertel, hoechstens 250 % (passt mit Schatten in 64 x 64) */
+        f = pct / 25 < 4 ? 4 : pct / 25 > 10 ? 10 : (int64_t)(pct / 25);
     int64_t unit = 64;                  /* 1 Pixel (bei Groesse 1) in 1/64, skaliert unten */
     int64_t border = unit * 3 / 2 * f / 4, sh_dy = unit * 3 / 2 * f / 4, sh_r = unit * 3 * f / 4;
     cursor_hot = (uint32_t)(2 * f / 4);
@@ -684,8 +688,10 @@ static int setup_cursor(int p)
             return -1;
         }
     draw_cursor_image(frames);
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 4; i++) {
         igd_ggtt[base + i] = frames[i] | PTE_VALID;
+        cursor_frames[i] = frames[i];
+    }
     igd_ggtt_flush();
     cursor_surf = base << 12;
     igd_wr(CUR_BUF_CFG(p), (end << 16) | start);
@@ -768,8 +774,21 @@ void igd_cursor_move(int x, int y, int visible)
         igd_wr(CUR_CTL(p), visible ? 0x27 : 0);
         cursor_on = visible;
     }
+    cursor_x = x;
+    cursor_y = y;
     igd_wr(CUR_POS(p), cur_pos(x - (int)cursor_hot, y - (int)cursor_hot));
     igd_wr(CUR_BASE(p), cursor_surf); /* uebernimmt Position/Sichtbarkeit beim naechsten Bildwechsel */
+}
+
+/* Groesse geaendert (console_cursor_size): Bild neu zeichnen, Spitze bleibt, wo sie war */
+void igd_cursor_redraw(void)
+{
+    if (!hw_cursor)
+        return;
+    draw_cursor_image(cursor_frames);
+    int p = igd_state.scanout_pipe;
+    igd_wr(CUR_POS(p), cur_pos(cursor_x - (int)cursor_hot, cursor_y - (int)cursor_hot));
+    igd_wr(CUR_BASE(p), cursor_surf);
 }
 
 /* Wartet, bis der zuletzt angestossene Wechsel angezeigt wird (danach wird der andere Puffer nicht mehr gelesen) */

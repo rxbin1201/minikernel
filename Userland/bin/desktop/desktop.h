@@ -5,6 +5,7 @@
 
 #include "gfx.h"
 #include "malloc.h"
+#include "settings.h"
 #include "ui.h"
 #include "winproto.h"
 
@@ -68,7 +69,8 @@ static inline int shadow_b8(void) { return (SHADOW + RADIUS + 7) & ~7; }
 static inline int win_th(const Win *w) { return (w->flags & WPF_FRAMELESS) ? 0 : TITLE_H; }
 
 /* Aktionen (Menues und Taskleiste). Die ersten sind zugleich die Programmsymbole (ICON_* in ui.h). */
-enum { A_NONE, A_TERM, A_FILES, A_CALC, A_CLOCK, A_ABOUT, A_PAINT, A_SNAKE, A_TETRIS, A_EDIT, A_MUSIC, A_QUIT = 20, A_SEP,
+enum { A_NONE, A_TERM, A_FILES, A_CALC, A_CLOCK, A_ABOUT, A_PAINT, A_SNAKE, A_TETRIS, A_EDIT, A_MUSIC, A_SETTINGS,
+       A_QUIT = 20, A_SEP,
        A_WIN_NEW, A_WIN_MIN, A_WIN_ZOOM, A_WIN_CLOSE, A_APP_QUIT, A_SNAP_LEFT, A_SNAP_RIGHT, A_NEXT_WIN,
        A_RESTART, A_POWEROFF, A_INFO, A_NET_DHCP, A_SEARCH,
        A_WINSEL = 512 /* bis A_WINSEL + MAXW: hinter allen Aktionen und Programmsymbolen (ICON_IMAGE = 101) */ };
@@ -92,7 +94,10 @@ extern int      drag_mode;   /* 0 = nichts, 1 = verschieben, 2 = Groesse */
 extern Win     *drag_win;
 extern int      mouse_x, mouse_y;
 extern s64      now_us;      /* Zeit dieses Bildes (Mikrosekunden) */
+extern Settings cfg;         /* Einstellungen (settings.h); ui_scale gilt erst beim naechsten Start */
 void do_action(int a);
+void settings_changed(void);           /* WP_SETTINGS: neu lesen und uebernehmen */
+void change_mode(int w, int h, int hz100); /* WP_SETMODE: Aufloesung umschalten (Intel-Treiber) */
 void window_cmd(Win *w, int cmd); /* WP_WINCMD eines rahmenlosen Fensters */
 
 /* ---------- chrome.c: Masse, Hintergrund, Taskleiste, Menues ---------- */
@@ -102,6 +107,7 @@ extern int menu_hover; /* Eintrag unter der Maus, -1 = keiner */
 extern int dock_hover; /* Symbol unter der Maus, -1 = keins */
 
 void desk_init(void);
+void dock_metrics(void);         /* Masse der Taskleiste (cfg.dock) neu berechnen */
 void make_background(void);
 void draw_dock(void);
 void draw_menu(void);
@@ -149,6 +155,8 @@ void cycle_windows(int dir);              /* Alt+Tab: 1 = naechstes nach vorn, -
 Win *focused(void);
 void close_win(Win *w);      /* fragt das Programm; mit Animation, wenn es weg ist */
 void close_win_now(Win *w);
+void fit_windows(void);      /* nach geaenderter Taskleiste oder Aufloesung: Fenster neu einpassen */
+void ov_free(void);          /* neue Bildschirmgroesse: Ebene fuer die GPU verwerfen */
 void anim_tick(void);        /* laufende Fenster-Animationen weiterfuehren */
 int  title_button_at(const Win *w, int x, int y); /* 1 schliessen, 2 minimieren, 3 zoomen, 0 keiner */
 void set_button_hover(Win *w);                    /* Maus ueber den Knoepfen: Symbole zeigen */
@@ -170,6 +178,7 @@ void gq_blend(const Surface *d, int dx, int dy, const Surface *s, int sx, int sy
 void gq_blend_a(const Surface *d, int dx, int dy, const Surface *s, int sx, int sy, int w, int h, int alpha,
                 const Clip *c);       /* mischen mit Deckung alpha (0-256) */
 void gq_scale(int vertical, const Surface *d, int dx, int dy, const Surface *s, int sx, int sy, int w, int h, int step);
+void anim_temps_free(void); /* neue Bildschirmgroesse: Hilfsflaechen verwerfen */
 Surface *anim_temps(void);  /* 4 Hilfsflaechen fuer Animationen (Bild senkrecht, waagerecht, Schatten oben/unten,
                              * links/rechts), 0 = keine */
 void gq_cancel(void);

@@ -360,13 +360,110 @@ void gfx_draw_scaled(Surface *dst, const Surface *src, int dx, int dy, int dw, i
 
 /* ---------- Bildschirm, Mauszeiger ---------- */
 
-#define GFX_CUR_W 12
-#define GFX_CUR_H 19
-static const char *const gfx_cursor_img[GFX_CUR_H] = {
-    "X           ", "XX          ", "X.X         ", "X..X        ", "X...X       ", "X....X      ", "X.....X     ",
-    "X......X    ", "X.......X   ", "X........X  ", "X.....XXXXX ", "X..X..X     ", "X.X X..X    ", "XX  X..X    ",
-    "X    X..X   ", "     X..X   ", "      X..X  ", "      X..X  ", "       XX   ",
-};
+/* Mauszeiger ohne Hardware-Ebene: derselbe Pfeil wie im Kernel (igd.c) - schwarz, weisser Rand, weicher Schatten,
+ * kantengeglaettet (4 x 4 Abtastpunkte je Pixel) - in der eingestellten Groesse (SYS_GFX 6, Einstellungen). Bild
+ * vormultipliziert (Alpha in Byte 3), die Spitze liegt bei (gfx_cur_hot, gfx_cur_hot). */
+#define GFX_CUR_MAX 64
+static u32 gfx_cur_img[GFX_CUR_MAX * GFX_CUR_MAX];
+static int gfx_cur_w, gfx_cur_h, gfx_cur_hot, gfx_cur_pct = -1;
+static const float gfx_arrow[7][2] = {{2, 2}, {2, 18}, {6, 14.3125f}, {8.625f, 20.375f}, {11, 19.375f}, {8.5f, 13.375f},
+                                      {13.5f, 13.375f}};
+
+static int gfx_arrow_in(float x, float y, float k)
+{
+    int in = 0;
+    for (int i = 0, j = 6; i < 7; j = i++) {
+        float xi = gfx_arrow[i][0] * k, yi = gfx_arrow[i][1] * k, xj = gfx_arrow[j][0] * k, yj = gfx_arrow[j][1] * k;
+        if ((yi > y) != (yj > y) && x < xi + (xj - xi) * (y - yi) / (yj - yi))
+            in = !in;
+    }
+    return in;
+}
+
+static float gfx_arrow_d2(float x, float y, float k) /* Abstand zum Rand, zum Quadrat */
+{
+    float best = 1e30f;
+    for (int i = 0, j = 6; i < 7; j = i++) {
+        float ax = gfx_arrow[j][0] * k, ay = gfx_arrow[j][1] * k, dx = gfx_arrow[i][0] * k - ax, dy = gfx_arrow[i][1] * k - ay;
+        float t = ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy);
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        float px = ax + dx * t - x, py = ay + dy * t - y, d = px * px + py * py;
+        best = d < best ? d : best;
+    }
+    return best;
+}
+
+/* Pfeil in Groesse pct (0 = automatisch) nach img (Zeilenlaenge GFX_CUR_MAX); Groesse und Spitze zurueck */
+static void gfx_arrow_image(int pct, u32 *img, int *iw, int *ih, int *hot)
+{
+    float k = pct ? (float)pct / 100 : gfx_screen.h >= 1300 ? 1.25f : 1.0f;
+    float border = 1.5f * k, sh_dy = 1.5f * k, sh_r = 3 * k;
+    int cw = (int)(17 * k) + 2, ch = (int)(25 * k) + 2;
+    if (cw > GFX_CUR_MAX) cw = GFX_CUR_MAX;
+    if (ch > GFX_CUR_MAX) ch = GFX_CUR_MAX;
+    *iw = cw;
+    *ih = ch;
+    *hot = (int)(2 * k);
+    for (int y = 0; y < ch; y++)
+        for (int x = 0; x < cw; x++) {
+            int a = 0, wsum = 0;
+            for (int sy = 0; sy < 4; sy++)
+                for (int sx = 0; sx < 4; sx++) {
+                    float X = (float)x + (float)sx * 0.25f + 0.125f, Y = (float)y + (float)sy * 0.25f + 0.125f;
+                    if (gfx_arrow_in(X, Y, k)) {
+                        a += 255;
+                        continue;
+                    }
+                    if (gfx_arrow_d2(X, Y, k) <= border * border) {
+                        a += 255;
+                        wsum += 255;
+                        continue;
+                    }
+                    float ds = gfx_arrow_in(X, Y - sh_dy, k) ? 0 : gfx_arrow_d2(X, Y - sh_dy, k);
+                    if (ds < sh_r * sh_r)
+                        a += (int)(90 * (sh_r - __builtin_sqrtf(ds)) / sh_r);
+                }
+            a /= 16;
+            wsum /= 16;
+            img[y * GFX_CUR_MAX + x] = (u32)a << 24 | (u32)wsum << 16 | (u32)wsum << 8 | (u32)wsum;
+        }
+}
+
+static void gfx_cursor_build(int pct)
+{
+    gfx_cur_pct = pct;
+    gfx_arrow_image(pct, gfx_cur_img, &gfx_cur_w, &gfx_cur_h, &gfx_cur_hot);
+}
+
+void gfx_cursor_draw(Surface *s, int x, int y, int pct)
+{
+    static u32 img[GFX_CUR_MAX * GFX_CUR_MAX];
+    int w, h, hot;
+    gfx_arrow_image(pct, img, &w, &h, &hot);
+    for (int r = 0; r < h; r++)
+        for (int c = 0; c < w; c++) {
+            u32 src = img[r * GFX_CUR_MAX + c], a = src >> 24;
+            int px = x - hot + c, py = y - hot + r;
+            if (!a || px < gfx_clip.x0 || py < gfx_clip.y0 || px >= gfx_clip.x1 || py >= gfx_clip.y1 || px >= s->w ||
+                py >= s->h || px < 0 || py < 0)
+                continue;
+            u32 *d = &s->px[(u64)py * (u64)s->w + (u64)px], o = *d, out = 0;
+            for (int sh = 0; sh < 24; sh += 8)
+                out |= (((src >> sh) & 0xFF) + (((o >> sh) & 0xFF) * (255 - a) + 127) / 255) << sh;
+            *d = out;
+        }
+}
+
+/* Bereich des Zeigers auf dem Bildschirm */
+static void gfx_cur_box(int *x, int *y, int *w, int *h)
+{
+    if (gfx_cur_pct < 0)
+        gfx_cursor_build(0);
+    *x = gfx_cur_x - gfx_cur_hot;
+    *y = gfx_cur_y - gfx_cur_hot;
+    *w = gfx_cur_w;
+    *h = gfx_cur_h;
+}
 
 static void gfx_blit_from(const u32 *src, int x, int y, int w, int h)
 {
@@ -406,18 +503,45 @@ void gfx_compose(int x, int y, int w, int h)
                (u64)w * 4);
     if (!gfx_cur_visible)
         return;
-    for (int r = 0; r < GFX_CUR_H; r++) {
-        int py = gfx_cur_y + r;
+    int cx, cy, cw, ch;
+    gfx_cur_box(&cx, &cy, &cw, &ch);
+    for (int r = 0; r < ch; r++) {
+        int py = cy + r;
         if (py < y || py >= y + h)
             continue;
-        for (int c = 0; c < GFX_CUR_W; c++) {
-            int px = gfx_cur_x + c;
-            char ch = gfx_cursor_img[r][c];
-            if (ch == ' ' || px < x || px >= x + w)
+        for (int c = 0; c < cw; c++) {
+            int px = cx + c;
+            u32 src = gfx_cur_img[r * GFX_CUR_MAX + c], a = src >> 24;
+            if (!a || px < x || px >= x + w)
                 continue;
-            gfx_front[(u64)py * (u64)gfx_screen.w + (u64)px] = ch == 'X' ? 0 : 0xFFFFFF;
+            u32 *d = &gfx_front[(u64)py * (u64)gfx_screen.w + (u64)px], o = *d, out = 0;
+            for (int sh = 0; sh < 24; sh += 8) /* vormultipliziert: Quelle + Ziel * (1 - a) */
+                out |= (((src >> sh) & 0xFF) + (((o >> sh) & 0xFF) * (255 - a) + 127) / 255) << sh;
+            *d = out;
         }
     }
+}
+
+void gfx_set_cursor_size(int pct)
+{
+    sys_gfx(5, (const void *)(u64)(pct < 0 ? 0 : pct));
+    if (gfx_win)
+        return; /* im Fenster gehoert der Zeiger dem Desktop */
+    int ox, oy, ow, oh;
+    gfx_cur_box(&ox, &oy, &ow, &oh);
+    gfx_cursor_build((int)sys_gfx(6, 0));
+    if (!gfx_hw_cursor && gfx_screen.px) {
+        int x, y, w, h;
+        gfx_cur_box(&x, &y, &w, &h);
+        gfx_present(ox, oy, ow, oh);
+        gfx_present(x, y, w, h);
+    }
+}
+
+int gfx_cursor_size(void)
+{
+    s64 r = sys_gfx(6, 0);
+    return r < 0 ? 0 : (int)r;
 }
 
 static void gfx_win_damage(int x, int y, int w, int h);
@@ -452,8 +576,10 @@ void gfx_move_cursor(int x, int y)
         gfx_hw_cursor_set();
         return;
     }
-    gfx_present(ox, oy, GFX_CUR_W, GFX_CUR_H);
-    gfx_present(x, y, GFX_CUR_W, GFX_CUR_H);
+    int bx, by, bw, bh;
+    gfx_cur_box(&bx, &by, &bw, &bh);
+    gfx_present(ox - gfx_cur_hot, oy - gfx_cur_hot, bw, bh);
+    gfx_present(bx, by, bw, bh);
 }
 
 void gfx_show_cursor(int visible)
@@ -465,7 +591,9 @@ void gfx_show_cursor(int visible)
         gfx_hw_cursor_set();
         return;
     }
-    gfx_present(gfx_cur_x, gfx_cur_y, GFX_CUR_W, GFX_CUR_H);
+    int bx, by, bw, bh;
+    gfx_cur_box(&bx, &by, &bw, &bh);
+    gfx_present(bx, by, bw, bh);
 }
 
 /* ---------- Ereignisse ---------- */
@@ -775,6 +903,15 @@ void gfx_window_cmd(int cmd)
     wp_send(&m);
 }
 
+int gfx_desktop_request(int type, int a, int b, int c)
+{
+    if (!gfx_win)
+        return -1;
+    WpMsg m = {type, a, b, c, 0, 0, 0, 0, {0}};
+    wp_send(&m);
+    return 0;
+}
+
 int gfx_window_zoomed(void)
 {
     return gfx_zoomed;
@@ -1038,6 +1175,7 @@ int gfx_open_window_ex(int ww, int wh, const char *title, int flags)
     gfx_cur_x = gfx_mprev.x;
     gfx_cur_y = gfx_mprev.y;
     gfx_cur_visible = gfx_mprev.attached != 0;
+    gfx_cursor_build(gfx_cursor_size());
     gfx_hw_cursor = gfx_hw_cursor_set() == 0;
     gfx_qh = gfx_qt = 0;
     gfx_left_down = gfx_right_down = 0;
@@ -1082,6 +1220,7 @@ int gfx_resume(void)
     gfx_cur_x = gfx_mprev.x;
     gfx_cur_y = gfx_mprev.y;
     gfx_left_down = gfx_right_down = 0;
+    gfx_cursor_build(gfx_cursor_size());
     if (gfx_hw_cursor)
         gfx_hw_cursor_set();
     gfx_present_all();

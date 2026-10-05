@@ -39,6 +39,8 @@ enum {
     WP_OPEN,        /* Datei/Ordner mit dem passenden Programm oeffnen (leerer Pfad: neues Textdokument): der Pfad kommt in
                      * Stuecken zu je hoechstens 32 Byte, a = Stelle im Pfad, c = Laenge des Stuecks, b = 1 beim letzten */
     WP_WINCMD,      /* a = WPC_*: rahmenloses Fenster bittet den Desktop */
+    WP_SETTINGS,    /* Einstellungen (settings.cfg) neu lesen und uebernehmen; a = 1: danach "Neu starten" anbieten */
+    WP_SETMODE,     /* a, b = Aufloesung, c = Bildrate in 1/100 Hz (0 = beliebig): umschalten (Intel-Treiber) */
 };
 
 enum { WPC_MOVE = 1, WPC_MINIMIZE, WPC_ZOOM, WPC_CLOSE }; /* MOVE: mit der gedrueckten Maustaste verschieben */

@@ -80,6 +80,7 @@ void igd_modes_boot(void); /* aus igd_init: Modi einsammeln, "igdmode=" anwenden
 /* Fest eingebaut (ohne "noigd" in der Kommandozeile): Hardware-Mauszeiger und Doppelpufferung */
 int  igd_cursor_available(void);
 void igd_cursor_move(int x, int y, int visible); /* Spitze des Pfeils bei (x, y) */
+void igd_cursor_redraw(void);                    /* nach console_cursor_size: Bild in der neuen Groesse */
 
 /* Grafikmodus: Rechteck anzeigen. Ein ganzes Bild kommt in den verdeckten Puffer und wird beim Bildwechsel
  * umgeschaltet. 1 = erledigt, 0 = nicht zustaendig (dann wie bisher in den Framebuffer). */

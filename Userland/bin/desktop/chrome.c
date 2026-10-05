@@ -7,15 +7,27 @@ int menu_open, menu_hover = -1, dock_hover = -1;
 
 static void bar_metrics(void);
 
+/* Masse der Taskleiste: wie U(), dazu ihre eingestellte Groesse (cfg.dock: 85, 100, 125 %) */
+#define D(x) (U(x) * cfg.dock / 100)
+
 void desk_init(void)
 {
-    ui_setup(H >= 1300 ? 125 : 100);
+    static int pct; /* Groesse der Oberflaeche: einmal beim Start (Einstellung oder nach der Bildschirmhoehe) */
+    if (!pct)
+        pct = cfg.ui_scale ? cfg.ui_scale : H >= 1300 ? 125 : 100;
+    ui_setup(pct);
     MENUBAR_H = 0; /* keine Leiste oben: alles sitzt in der Taskleiste unten */
     TITLE_H = U(30);
     RADIUS = U(10);
     SHADOW = U(28);
+    dock_metrics();
+}
+
+void dock_metrics(void)
+{
     bar_metrics();
-    DOCK_H = U(48);
+    DOCK_H = D(48);
+    damage_all();
 }
 
 /* ======================================================================================================================
@@ -33,35 +45,18 @@ static void arc(Surface *s, float cx, float cy, float r, float a0, float a1, flo
     }
 }
 
-static u32 palette(float t)
-{
-    static const float stop[] = {0.0f, 0.30f, 0.55f, 0.78f, 1.0f};
-    static const u32 col[] = {0x1B2A6B, 0x5B3FC4, 0xC64B9E, 0xF28C5A, 0xFBD28B};
-    if (t <= 0) return col[0];
-    if (t >= 1) return col[4];
-    int i = 0;
-    while (t > stop[i + 1])
-        i++;
-    float f = (t - stop[i]) / (stop[i + 1] - stop[i]);
-    f = f * f * (3 - 2 * f);
-    return gfx_mix(col[i], col[i + 1], (int)(f * 255));
-}
-
 void make_background(void)
 {
+    if (bg.px)
+        gsurf_free(&bg);
+    if (bg_blur.px)
+        surface_free(&bg_blur);
     gsurf_new(&bg, W, H); /* die GPU kopiert daraus */
     unsigned rnd = 12345;
     for (int y = 0; y < H; y++) {
         float v = (float)y / (float)H;
         for (int x = 0; x < W; x++) {
-            float u = (float)x / (float)W;
-            float wave = 0.10f * ui_sin(6.2831853f * (u * 1.1f + 0.15f)) + 0.06f * ui_sin(6.2831853f * (u * 2.3f + v * 0.7f));
-            float t = v * 0.85f + u * 0.30f + wave - 0.08f;
-            u32 c = palette(t);
-            float hx = u - 0.78f, hy = v - 0.18f; /* heller Schein oben rechts */
-            float glow = 1.0f - (hx * hx * 2.2f + hy * hy * 5.0f);
-            if (glow > 0)
-                c = gfx_mix(c, 0xFFFFFF, (int)(glow * glow * 70));
+            u32 c = ui_wallpaper_at(cfg.wallpaper, (float)x / (float)W, v);
             rnd = rnd * 1103515245u + 12345u; /* etwas Rauschen gegen Stufen im Verlauf */
             int n = (int)((rnd >> 16) % 3) - 1;
             int r = (int)(c >> 16 & 0xFF) + n, g = (int)(c >> 8 & 0xFF) + n, b = (int)(c & 0xFF) + n;
@@ -202,14 +197,14 @@ static int SEG_H, SLOT, ICO, BTN, TBTN, SPAD, SGAP, SRAD;
 
 static void bar_metrics(void)
 {
-    SEG_H = U(48);
-    SLOT = U(44);
-    ICO = U(30);
-    BTN = U(40);
-    TBTN = U(34);
-    SPAD = U(6);
-    SGAP = U(10);
-    SRAD = U(16);
+    SEG_H = D(48);
+    SLOT = D(44);
+    ICO = D(30);
+    BTN = D(40);
+    TBTN = D(34);
+    SPAD = D(6);
+    SGAP = D(10);
+    SRAD = D(16);
 }
 
 typedef struct {
@@ -218,7 +213,7 @@ typedef struct {
     int  n, nm, sep;             /* Slots (Programme + minimierte Fenster), Trennstrich davor */
     int  ax[MAXSLOTS];
     int  bx[NBTN], bw[NBTN];     /* Knoepfe; bw 0 = gibt es nicht */
-    char time[8], date[48];
+    char time[12], date[48];
 } Bar;
 
 static void clock_texts(char *t, int tn, char *d, int dn)
@@ -232,8 +227,12 @@ static void clock_texts(char *t, int tn, char *d, int dn)
                                  "Juli",   "August",  "September", "Oktober", "November", "Dezember"};
     DateTime dt;
     time_to_date((u64)now, &dt);
-    snprintf(t, tn, "%02d:%02d", dt.hour, dt.min);
-    snprintf(d, dn, "%s, %d. %s", wd[dt.wday % 7], dt.day, mo[(dt.month + 11) % 12]);
+    if (cfg.seconds)
+        snprintf(t, tn, "%02d:%02d:%02d", dt.hour, dt.min, dt.sec);
+    else
+        snprintf(t, tn, "%02d:%02d", dt.hour, dt.min);
+    if (cfg.date)
+        snprintf(d, dn, "%s, %d. %s", wd[dt.wday % 7], dt.day, mo[(dt.month + 11) % 12]);
 }
 
 static void bar_layout(Bar *b)
@@ -241,9 +240,10 @@ static void bar_layout(Bar *b)
     b->h = SEG_H;
     b->y = H - U(8) - SEG_H;
     clock_texts(b->time, sizeof(b->time), b->date, sizeof(b->date));
-    int tw = text_width(font_bold, FS, b->time), dw = text_width(font_ui, FS_SMALL, b->date);
+    /* Platz fuer die breiteste Uhrzeit: die Leiste soll nicht jede Sekunde springen */
+    int tw = text_width(font_bold, FS, cfg.seconds ? "00:00:00" : "00:00") + U(4), dw = text_width(font_ui, FS_SMALL, b->date);
     b->sw[1] = SPAD * 2 + 3 * BTN;
-    b->sw[2] = (tw > dw ? tw : dw) + U(18) * 2;
+    b->sw[2] = (tw > dw ? tw : dw) + D(18) * 2;
     b->sw[3] = SPAD * 2 + TBTN * (1 + (net_ok != 0) + (vol_level >= 0));
     /* minimierte Fenster: so viele, wie auf den Bildschirm passen (die anderen im Fenstermenue) */
     int room = W - U(32) - b->sw[1] - b->sw[2] - b->sw[3] - 3 * SGAP - SPAD * 2 - U(9);
@@ -252,7 +252,7 @@ static void bar_layout(Bar *b)
     if (b->nm > fit)
         b->nm = fit > 0 ? fit : 0;
     b->n = NAPPS + b->nm;
-    b->sep = b->nm ? U(9) : 0;
+    b->sep = b->nm ? D(9) : 0;
     b->sw[0] = SPAD * 2 + b->n * SLOT + b->sep;
     int total = b->sw[0] + b->sw[1] + b->sw[2] + b->sw[3] + 3 * SGAP, x = (W - total) / 2;
     for (int i = 0; i < 4; i++) {
@@ -312,7 +312,7 @@ void dock_slot_of(const Win *w, int *x, int *y, int *size)
         k += wins[i].used && wins[i].minimized;
     int i = NAPPS + k < b.n ? NAPPS + k : b.n - 1;
     *x = b.ax[i] + (SLOT - ICO) / 2;
-    *y = b.y + (b.h - ICO) / 2 - U(2);
+    *y = b.y + (b.h - ICO) / 2 - D(2);
     *size = ICO;
 }
 
@@ -433,7 +433,7 @@ void draw_dock(void)
     Surface *s = &gfx_screen;
     Bar b;
     bar_layout(&b);
-    float k = (float)U(1), cy = b.y + b.h * 0.5f;
+    float k = (float)ui_pct * (float)cfg.dock / 10000.0f, cy = b.y + b.h * 0.5f;
     for (int i = 0; i < 4; i++)
         seg_bg(s, b.sx[i], b.y, b.sw[i], b.h);
 
@@ -441,19 +441,19 @@ void draw_dock(void)
     int ob = open_button();
     for (int i = 0; i < b.n; i++)
         if (dock_hover == i)
-            gfx_round_rect(s, b.ax[i] + U(2), b.y + U(5), SLOT - U(4), b.h - U(10), U(10), 0x000000, 16);
+            gfx_round_rect(s, b.ax[i] + D(2), b.y + D(5), SLOT - D(4), b.h - D(10), D(10), 0x000000, 16);
     for (int i = 0; i < NBTN; i++)
         if (b.bw[i] && (dock_hover == HIT_BTN + i || i == ob)) {
-            int inset = i == B_CLOCK ? U(5) : U(2);
-            gfx_round_rect(s, b.bx[i] + inset, b.y + U(5), b.bw[i] - 2 * inset, b.h - U(10), U(10), 0x000000,
+            int inset = i == B_CLOCK ? D(5) : D(2);
+            gfx_round_rect(s, b.bx[i] + inset, b.y + D(5), b.bw[i] - 2 * inset, b.h - D(10), D(10), 0x000000,
                            i == ob ? 30 : 16);
         }
 
     /* Programme und minimierte Fenster */
     Win *f = focused();
     for (int i = 0; i < b.n; i++) {
-        int ix = b.ax[i] + (SLOT - ICO) / 2, iy = b.y + (b.h - ICO) / 2 - U(2);
-        float mx = b.ax[i] + SLOT * 0.5f, my = b.y + b.h - U(5);
+        int ix = b.ax[i] + (SLOT - ICO) / 2, iy = b.y + (b.h - ICO) / 2 - D(2);
+        float mx = b.ax[i] + SLOT * 0.5f, my = b.y + b.h - D(5);
         if (i < NAPPS) {
             ui_app_icon(s, dock_apps[i].action, ix, iy, ICO);
             int running = 0;
@@ -473,17 +473,19 @@ void draw_dock(void)
         }
     }
     if (b.nm)
-        gfx_blend_fill(s, b.ax[NAPPS] - b.sep / 2 - 1, b.y + U(12), 1, b.h - U(24), 0x000000, 40);
+        gfx_blend_fill(s, b.ax[NAPPS] - b.sep / 2 - 1, b.y + D(12), 1, b.h - D(24), 0x000000, 40);
 
     /* Suche, Start, Fenster */
     draw_search_icon(s, b.bx[B_SEARCH] + BTN * 0.5f, cy, k, C_TEXT);
-    draw_logo(s, b.bx[B_START] + (BTN - U(20)) / 2, (int)cy - U(10), U(20));
+    draw_logo(s, b.bx[B_START] + (BTN - D(20)) / 2, (int)cy - D(10), D(20));
     draw_windows_icon(s, b.bx[B_WINDOWS] + BTN * 0.5f, cy, k);
 
     /* Uhrzeit und Datum */
-    int th = text_height(font_bold, FS), dh = text_height(font_ui, FS_SMALL), ty = b.y + (b.h - th - dh - U(1)) / 2;
-    text_draw(s, font_bold, FS, b.sx[2] + U(18), ty, b.time, C_TEXT);
-    text_draw(s, font_ui, FS_SMALL, b.sx[2] + U(18), ty + th + U(1), b.date, C_TEXT2);
+    int th = text_height(font_bold, FS), dh = cfg.date ? text_height(font_ui, FS_SMALL) + D(1) : 0;
+    int ty = b.y + (b.h - th - dh) / 2;
+    text_draw(s, font_bold, FS, b.sx[2] + D(18), ty, b.time, C_TEXT);
+    if (cfg.date)
+        text_draw(s, font_ui, FS_SMALL, b.sx[2] + D(18), ty + th + D(1), b.date, C_TEXT2);
 
     /* Netzwerk, Lautstaerke, System */
     if (b.bw[B_NET])
@@ -704,7 +706,7 @@ static const struct {
 } start_apps[] = {
     {A_TERM, "Terminal"}, {A_FILES, "Dateien"}, {A_EDIT, "Texteditor"}, {A_MUSIC, "Musik"}, {A_CALC, "Rechner"},
     {A_CLOCK, "Uhr"},     {A_PAINT, "Malen"},   {A_SNAKE, "Snake"},     {A_TETRIS, "Tetris"},
-    {A_ABOUT, "\xC3\x9C" "ber MiniKernel"},
+    {A_SETTINGS, "Einstellungen"}, {A_ABOUT, "\xC3\x9C" "ber MiniKernel"},
 };
 #define NSTART ((int)(sizeof(start_apps) / sizeof(start_apps[0])))
 static MenuItem start_items[NSTART + 2];
@@ -777,7 +779,8 @@ static int build_windows(void)
 }
 
 static const MenuItem sys_menu[] = {
-    {"\xC3\x9C" "ber MiniKernel", A_ABOUT, 0}, {"", A_SEP, 0}, {"Neu starten \xE2\x80\xA6", A_RESTART, 0},
+    {"Einstellungen \xE2\x80\xA6", A_SETTINGS, 0}, {"\xC3\x9C" "ber MiniKernel", A_ABOUT, 0}, {"", A_SEP, 0},
+    {"Neu starten \xE2\x80\xA6", A_RESTART, 0},
     {"Ausschalten \xE2\x80\xA6", A_POWEROFF, 0}, {"", A_SEP, 0}, {"Zur Konsole", A_QUIT, 0},
 };
 

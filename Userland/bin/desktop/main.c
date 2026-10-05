@@ -12,6 +12,7 @@ int      drag_mode; /* 0 = nichts, 1 = verschieben, 2 = Groesse */
 Win     *drag_win;
 int      mouse_x, mouse_y;
 s64      now_us;
+Settings cfg;
 
 static int  drag_dx, drag_dy, press_x, press_y;
 static int  snap_zone; /* beim Ziehen an den Rand: SNAP_* */
@@ -55,6 +56,7 @@ void do_action(int a)
     case A_PAINT: launch_app("/bin/paint", "paint", A_PAINT, "Malen"); break;
     case A_SNAKE: launch_app("/bin/snake", "snake", A_SNAKE, "Snake"); break;
     case A_TETRIS: launch_app("/bin/tetris", "tetris", A_TETRIS, "Tetris"); break;
+    case A_SETTINGS: launch_app("/bin/settings", "settings", A_SETTINGS, "Einstellungen"); break;
     case A_QUIT: quit = 1; break;
     case A_WIN_NEW: /* noch eins vom aktiven Programm (Text- und Bildansicht brauchen eine Datei: dann ein Terminal) */
         do_action(f && f->app > A_NONE && f->app < A_QUIT ? f->app : A_TERM);
@@ -309,12 +311,70 @@ static void wheel(Event *e)
         app_input(w, EV_WHEEL, e->key, e->x, e->y, 0, e->wheel);
 }
 
+/* Einstellungen neu lesen (das Programm "Einstellungen" hat sie gespeichert) und uebernehmen. Die Groesse der
+ * Oberflaeche gilt erst beim naechsten Start: die Titelleisten zeichnen die Programme selbst in ihrer Groesse */
+void settings_changed(void)
+{
+    Settings old = cfg;
+    settings_load(&cfg);
+    if (cfg.cursor != old.cursor)
+        gfx_set_cursor_size(cfg.cursor);
+    if (cfg.wallpaper != old.wallpaper) {
+        gpu_wait(); /* die GPU liest vielleicht noch aus dem alten Bild */
+        make_background();
+        damage_all();
+    }
+    if (cfg.dock != old.dock || cfg.date != old.date) {
+        dock_metrics();
+        fit_windows();
+    } else if (cfg.seconds != old.seconds) {
+        damage_dock();
+    }
+}
+
+/* Aufloesung umschalten: vorgemerkt (WP_SETMODE kommt mitten im Lesen der Programme) und in der Hauptschleife
+ * ausgefuehrt - den Bildschirm kurz abgeben (der Kernel schaltet nur um, wenn kein Programm ihn hat), dann mit der
+ * neuen Groesse wieder holen und alles neu einpassen. Klappt das Wiederholen nicht, endet der Desktop. */
+static int mode_req[3];
+
+void change_mode(int w, int h, int hz100)
+{
+    mode_req[0] = w;
+    mode_req[1] = h;
+    mode_req[2] = hz100;
+}
+
+static void apply_mode(void)
+{
+    int w = mode_req[0], h = mode_req[1], hz100 = mode_req[2];
+    mode_req[0] = 0;
+    if (w <= 0 || h <= 0)
+        return;
+    gpu_wait();
+    ov_free(); /* alles, was so gross wie der Bildschirm ist */
+    anim_temps_free();
+    gpu_quit();
+    gfx_close();
+    sys_setmode((u64)w, (u64)h, (u64)hz100);
+    if (gfx_open() != 0)
+        sys_exit(1);
+    gpu_init();
+    gfx_set_cursor_size(cfg.cursor);
+    W = gfx_screen.w;
+    H = gfx_screen.h;
+    dock_metrics();
+    make_background();
+    fit_windows();
+}
+
 void _start(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
+    settings_load(&cfg);
     if (gfx_open() != 0)
         sys_exit(1);
+    gfx_set_cursor_size(cfg.cursor);
     gpu_init(); /* Zusammensetzen auf der GPU, wenn es eine passende gibt */
     sys_tty_fg(0); /* Strg+C geht an die Fenster, nicht an den Desktop */
     W = gfx_screen.w;
@@ -327,7 +387,7 @@ void _start(int argc, char **argv)
     damage_all();
     draw_all();
 
-    s64 last_min = -1;
+    s64 last_min = -1, last_sec = -1;
     Win *last_focus = focused();
     while (!quit) {
         now_us = sys_time_us();
@@ -358,6 +418,8 @@ void _start(int argc, char **argv)
             else if (e.type == EV_WHEEL) wheel(&e);
         }
         apps_poll();
+        if (mode_req[0])
+            apply_mode();
         if (app_grab && !app_grab->used)
             app_grab = 0;
         Win *f = focused();
@@ -377,8 +439,9 @@ void _start(int argc, char **argv)
             last_focus = f;
         }
         s64 now = sys_time();
-        if (now / 60 != last_min) { /* Uhrzeit in der Taskleiste */
+        if (now / 60 != last_min || (cfg.seconds && now != last_sec)) { /* Uhrzeit in der Taskleiste */
             last_min = now / 60;
+            last_sec = now;
             damage_dock_seg(2); /* nur die Uhr */
         }
         power_tick();

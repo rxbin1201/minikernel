@@ -89,6 +89,11 @@ void gfx_present_all(void);
 void gfx_flush(void);
 void gfx_move_cursor(int x, int y);
 void gfx_show_cursor(int visible);
+/* Groesse des Mauszeigers in Prozent (0 = automatisch, 100-250), fuer das ganze System (Kernel: auch der
+ * Hardware-Zeiger und der der Konsole) */
+void gfx_set_cursor_size(int pct);
+int  gfx_cursor_size(void);
+void gfx_cursor_draw(Surface *s, int x, int y, int pct); /* den Pfeil (Spitze bei x, y) in eine Flaeche zeichnen */
 /* Naechstes Ereignis; 0 = keins (nicht blockierend) */
 int gfx_poll(Event *e);
 /* ---------- Glatt zeichnen (draw.c): Kantenglaettung und Transparenz, alpha 0-255 ---------- */
@@ -134,6 +139,7 @@ int gfx_open_window_ex(int w, int h, const char *title, int flags);
 #define GFX_WIN_CLOSE    4
 void gfx_window_cmd(int cmd);
 int  gfx_window_zoomed(void); /* 1 = maximiert bzw. angedockt */
+int  gfx_desktop_request(int type, int a, int b, int c); /* Nachricht an den Desktop (WP_SETTINGS, WP_SETMODE); -1 = kein Fenster */
 /* Unter dem Desktop: Datei oder Ordner mit dem passenden Programm oeffnen lassen. 0 = gesendet */
 int gfx_desktop_open(const char *path);
 void gfx_set_title(const char *title);

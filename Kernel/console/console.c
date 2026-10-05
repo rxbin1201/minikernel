@@ -70,6 +70,7 @@ static const char *const cursor_sprite[CUR_H] = {
 static int32_t  cur_x, cur_y;
 static int      cur_wanted, cur_drawn;
 static uint32_t cur_s = 1;
+static uint32_t cur_pct;         /* eingestellte Zeigergroesse in Prozent, 0 = wie die Schrift (scale) */
 static void   (*tick_hook)(void);
 
 /* Mit Hardware-Mauszeiger (igd.c) wird nichts gezeichnet, nur die Zeiger-Ebene verschoben bzw. aus-/eingeschaltet.
@@ -107,7 +108,9 @@ static void cursor_show(void)
     }
     if (!cur_wanted || !shadow || gfx_mode)
         return;
-    cur_s = scale;
+    cur_s = cur_pct ? (cur_pct + 50) / 100 : scale; /* Pixel-Pfeil: ganze Vielfache */
+    if (cur_s < 1)
+        cur_s = 1;
     for (uint32_t y = 0; y < CUR_H * cur_s; y++) {
         int32_t py = cur_y + (int32_t)y;
         if (py < 0 || (uint32_t)py >= height_px)
@@ -134,6 +137,25 @@ void console_cursor_set(int x, int y, int visible)
     cur_wanted = visible;
     cursor_show();
     irq_restore(f);
+}
+
+void console_cursor_size(uint32_t pct)
+{
+    if (pct && pct < 100)
+        pct = 100;
+    if (pct > 250)
+        pct = 250;
+    uint64_t f = irq_save();
+    cursor_hide();
+    cur_pct = pct;
+    cursor_show();
+    irq_restore(f);
+    igd_cursor_redraw();
+}
+
+uint32_t console_cursor_pct(void)
+{
+    return cur_pct;
 }
 
 /* ---------- Grafikmodus: ein Programm zeichnet den ganzen Bildschirm ---------- */

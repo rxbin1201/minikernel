@@ -59,6 +59,10 @@ int         console_clipboard_set(const char *text, uint32_t len); /* 0, -1 = zu
 
 /* Mauszeiger (nur Framebuffer, nicht im Abbild): Position der Spitze in Pixeln; visible = 0 blendet ihn aus */
 void     console_cursor_set(int x, int y, int visible);
+/* Groesse des Mauszeigers in Prozent (0 = nach der Schriftgroesse wie bisher, sonst 100-250); gilt fuer den
+ * Hardware-Zeiger (igd.c), den Zeiger der Konsole und - ueber SYS_GFX 6 abgefragt - den der Grafikbibliothek */
+void     console_cursor_size(uint32_t pct);
+uint32_t console_cursor_pct(void);
 void     console_set_tick(void (*hook)(void));
 
 /* Grafikmodus: ein Programm uebernimmt den Bildschirm (die Konsole schreibt dann nur in ihr Abbild und kommt beim

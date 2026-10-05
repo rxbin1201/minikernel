@@ -352,8 +352,30 @@ Alt-Kombinationen kommen als zwei Bytes (`KEY_ALT`/`KEY_ALT_SHIFT`, dann die Tas
 Animationen (nach der Uhr, nicht nach Bildern): Fenster blenden beim Oeffnen und Schliessen weich ein und aus, fliegen
 beim Minimieren an ihren Platz in der Taskleiste und von dort zurueck, Zoomen gleitet auf die neue Groesse.
 
+Einstellungen (`settings`; im Startmenue und im Systemmenue unter "Einstellungen ..."): links die Bereiche, rechts
+Karten mit Schaltern im Stil des Desktops.
+
+- **Anzeige:** Aufloesung aus den Modi des Monitors bzw. der Firmware. Mit Intel-Treiber schaltet der Desktop sofort um
+  (`WP_SETMODE`: er gibt den Bildschirm kurz ab, der Kernel schaltet, er holt ihn in der neuen Groesse wieder und passt
+  Hintergrund, Taskleiste und Fenster an); danach fragt das Programm "beibehalten?" und springt nach 15 s zurueck.
+  Beibehalten speichert wie `resolution` (`igdmode=`, `mode=max` in cmdline.txt). Ohne Intel-Treiber stellt der
+  Bootloader die Aufloesung ein: sie gilt ab dem naechsten Start ("Jetzt neu starten"). Groesse der Oberflaeche
+  (automatisch, 100, 125, 150 %): ab dem naechsten Start des Desktops, weil jedes Programm seine Titelleiste in seiner
+  Groesse selbst zeichnet.
+- **Zeiger:** Groesse 100-250 % mit Vorschau. Gilt sofort fuer den Hardware-Zeiger (der Kernel zeichnet sein Bild neu),
+  den Zeiger der Konsole und den der Grafikbibliothek (`SYS_GFX 5/6`; ohne Hardware-Zeiger zeichnet `gfx.c` jetzt
+  denselben kantengeglaetteten Pfeil wie der Kernel statt der alten Pixel-Grafik).
+- **Taskleiste:** klein, normal, gross (85/100/125 %), Uhr mit Sekunden, Datum unter der Uhrzeit.
+- **Hintergrund:** fuenf Farbthemen (Abendrot, Ozean, Wald, Lavendel, Graphit; `ui_wallpaper_at` in `ui.c`).
+- **Tastatur:** Layout de/us/uk, sofort und dauerhaft (`kbd=` in cmdline.txt).
+- **Info:** Bildschirm, Grafik, Groesse der Oberflaeche und wo die Einstellungen liegen.
+
+Gespeichert wird in `settings.cfg` auf dem Boot-Volume neben cmdline.txt (ohne Boot-Volume auf `/disk`;
+`Userland/lib/settings.c`). Der Desktop liest die Datei beim Start und auf `WP_SETTINGS` hin neu und uebernimmt alles
+ausser der Groesse der Oberflaeche sofort.
+
 Jedes Fenster gehoert einem eigenen Prozess; der Desktop zeichnet nur Rahmen und Taskleiste. Programme:
-`term` (Terminal mit Shell), `files` (Dateien; Doppelklick oeffnet Ordner hier, Bilder in `view`, alles andere im
+`term` (Terminal mit Shell), `settings` (Einstellungen), `files` (Dateien; Doppelklick oeffnet Ordner hier, Bilder in `view`, alles andere im
 Texteditor), `textedit`, `textview` (nur ansehen), `view`, `calc`, `clock`, `about`, `paint`, `snake`, `tetris`. Ohne
 Desktop gestartet, laufen sie im Vollbild.
 

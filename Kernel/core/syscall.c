@@ -715,6 +715,11 @@ static void syscall_do(SyscallFrame *f)
                 igd_cursor_move((int16_t)(f->rsi & 0xFFFF), (int16_t)((f->rsi >> 16) & 0xFFFF), (int)((f->rsi >> 32) & 1));
                 ret = 0;
             }
+        } else if (f->rdi == 5) { /* Groesse des Mauszeigers in Prozent setzen (0 = nach der Schrift); fuer alle */
+            console_cursor_size((uint32_t)(f->rsi > 250 ? 250 : f->rsi));
+            ret = 0;
+        } else if (f->rdi == 6) { /* ... abfragen */
+            ret = console_cursor_pct();
         } else if (f->rdi == 2) {
             if (console_gfx_owner(pid)) {
                 console_gfx_release(pid);

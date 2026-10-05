@@ -275,6 +275,12 @@ static void poll_window(Win *w)
                 win_dirty(w, 0, 0, w->w, TITLE_H);
         } else if (m.type == WP_WINCMD) {
             window_cmd(w, m.a);
+        } else if (m.type == WP_SETTINGS) {
+            settings_changed();
+            if (m.a == 1)
+                dialog_open(A_RESTART);
+        } else if (m.type == WP_SETMODE) {
+            change_mode(m.a, m.b, m.c);
         } else if (m.type == WP_WANT_FRAME) {
             w->app_frame = 1;
         } else if (m.type == WP_BUFFER) { /* neuer Puffer nach WP_RESIZE */
