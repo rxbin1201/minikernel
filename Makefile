@@ -96,6 +96,9 @@ USER_SOURCES  := $(wildcard Userland/bin/*.c Userland/bin/*/*.c Userland/lib/*.c
 USER_LIB_OBJS := $(patsubst Userland/lib/%.c,Build/user/lib/%.o,$(wildcard Userland/lib/*.c))
 USER_LIB      := Build/user/libuser.a
 INITRD_FILES  := $(shell find Initrd -type f 2>/dev/null)
+# Firmware fuer Geraete (z.B. Intel WLAN/Bluetooth, aus linux-firmware): liegt sie in firmware/, kommt sie nach
+# /firmware in der initrd. Nicht im Repository (Lizenz von Intel, Binaerdateien) - siehe README
+FIRMWARE_FILES := $(wildcard firmware/*)
 
 Build/user/%.o: Userland/%.c
 	@mkdir -p $(dir $@)
@@ -119,9 +122,11 @@ Build/initrd/bin/$(1): $(patsubst Userland/%.c,Build/user/%.o,$(wildcard Userlan
 endef
 $(foreach p,$(USER_DIRPROGS),$(eval $(call USER_DIRPROG,$(p))))
 
-Image/initrd.tar: $(USER_BINS) $(INITRD_FILES)
+Image/initrd.tar: $(USER_BINS) $(INITRD_FILES) $(FIRMWARE_FILES)
 	@mkdir -p $(dir $@)
 	cp -r Initrd/. Build/initrd/
+	rm -rf Build/initrd/firmware
+	$(if $(FIRMWARE_FILES),mkdir -p Build/initrd/firmware && cp $(FIRMWARE_FILES) Build/initrd/firmware/)
 	tar --format=ustar --owner=0 --group=0 -cf $@ -C Build/initrd .
 
 # ---------------------------------------------------------------------------------------------------------------------

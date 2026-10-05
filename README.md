@@ -58,6 +58,18 @@ Programme: `ifconfig`, `ping`, `nslookup`, `ntp`, `udp`, `netstat` (TCP-Verbindu
 `wget -O - url | less` zeigt die Seite, `-S` die Kopfzeilen der Antwort, `-q` keine Meldungen. Folgt Weiterleitungen,
 versteht Content-Length und "chunked"; nur `http://` (fuer `https://` fehlt TLS).
 
+### WLAN und Bluetooth (Intel AX200, im Aufbau)
+
+Die Firmware kommt aus *linux-firmware* und liegt lokal in `firmware/` (nicht im Repository):
+`iwlwifi-cc-a0-77.ucode` (WLAN) und `ibt-20-1-3.sfi` (Bluetooth). `make` packt sie nach `/firmware` in die initrd,
+so liest der Kernel sie ohne Datentraeger (wie Firmware in der initramfs bei Linux).
+
+Stufe 1 (`Kernel/drivers/net/iwl.c`): die Karte (PCI 8086:2723) wird erkannt, BAR0 eingeblendet und die Kennungen
+gelesen (`CSR_HW_REV`, `CSR_HW_RF_ID`; die Karte wird noch nicht angefasst); die Firmware wird zerlegt (TLV-Format wie
+bei Linux: Laufzeit-Abschnitte fuer LMAC und UMAC, Paging, Faehigkeiten). `wlan` zeigt alles, dazu das
+Bluetooth-Geraet am USB (8087:0029). Naechste Stufen: Firmware laden ("alive"), Netze suchen, offen verbinden, WPA2,
+WLAN im Desktop, dann Bluetooth.
+
 ## Mehrere CPUs (SMP)
 
 Der Kernel startet alle CPUs aus der ACPI-MADT (QEMU: `make run SMP=N`, Standard 4). Threads und Prozesse kommen aus

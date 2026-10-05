@@ -5,6 +5,7 @@
 #include "lib/kprintf.h"
 #include "core/process.h"
 #include "net/net_internal.h"
+#include "drivers/net/iwl.h"
 
 Iface    net_ifs[NET_MAX_DEVICES];
 
@@ -422,6 +423,7 @@ void net_init(void)
         return;
     }
     e1000_probe();
+    iwl_probe(); /* Intel WLAN: Stufe 1, erkennen und Firmware zerlegen */
     if (!net_nif) {
         kprintf("net: keine unterstuetzte Netzwerkkarte gefunden\n");
         return;

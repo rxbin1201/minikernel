@@ -82,6 +82,7 @@ typedef unsigned int       u32;
 #define SYS_FUTEX_WAKE    73
 #define SYS_MMAP_FILE     74
 #define SYS_CLOSEFROM     75
+#define SYS_WLAN          76
 #define ERR_NOENT     (-2)
 #define ERR_IO        (-5)
 #define ERR_EXIST     (-17)
@@ -282,6 +283,19 @@ static inline s64 sys_kill(int pid)                           { return syscall3(
 static inline s64 sys_procinfo(u64 index, ProcInfo *pi)       { return syscall3(SYS_PROCINFO, index, (u64)pi, 0); }
 static inline s64 sys_mountinfo(u64 index, MountInfo *info) { return syscall3(SYS_MOUNTINFO, index, (u64)info, 0); }
 static inline s64 sys_usbinfo(u64 index, UsbInfo *info)      { return syscall3(SYS_USBINFO, index, (u64)info, 0); }
+/* WLAN (Intel AX200, Kernel/drivers/net/iwl.c): Karte, Register, zerlegte Firmware */
+typedef struct {
+    unsigned       present;
+    unsigned char  bus, dev, fn, pad;
+    unsigned short vendor, device, sub_vendor, sub_device;
+    u64            bar;
+    unsigned       hw_rev, rf_id, gp_cntrl, hw_if_config;
+    unsigned       fw_found, fw_api, fw_lmac, fw_umac, fw_paging, fw_bytes, fw_paging_bytes;
+    unsigned       fw_cpus, fw_capa, fw_api_flags, fw_scan_channels, fw_major, fw_minor, fw_local;
+    char           fw_name[64], fw_human[64];
+    char           state[64];
+} WlanInfo;
+static inline s64 sys_wlan_info(WlanInfo *wi)                 { return syscall3(SYS_WLAN, 0, (u64)wi, 0); }
 static inline s64 sys_read(int fd, void *buf, u64 len)        { return syscall3(SYS_READ, fd, (u64)buf, len); }
 static inline s64 sys_close(int fd)                           { return syscall3(SYS_CLOSE, fd, 0, 0); }
 static inline s64 sys_closefrom(int fd)                       { return syscall3(SYS_CLOSEFROM, fd, 0, 0); } /* alle ab fd schliessen */

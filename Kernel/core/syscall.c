@@ -1,4 +1,5 @@
 #include "core/syscall.h"
+#include "drivers/net/iwl.h"
 #include "arch/x86_64/apic.h"
 #include "console/console.h"
 #include "arch/x86_64/cpu.h"
@@ -515,6 +516,19 @@ static void syscall_do(SyscallFrame *f)
             ret = ERR_NOENT;
         else {
             memcpy((void *)f->rsi, &pi, sizeof(pi));
+            ret = 0;
+        }
+        break;
+    }
+    case SYS_WLAN: {
+        WlanInfo wi;
+        if (f->rdi != 0)
+            ret = ERR_INVAL;
+        else if (!process_user_range_ok(process_current(), f->rsi, sizeof(wi), 1))
+            ret = ERR_FAULT;
+        else {
+            iwl_info(&wi);
+            memcpy((void *)f->rsi, &wi, sizeof(wi));
             ret = 0;
         }
         break;
