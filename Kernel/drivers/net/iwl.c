@@ -386,6 +386,8 @@ static int ilog2(uint32_t x)
 #define UREG_LMAC1_CURRENT_PC 0xA05C1C
 #define SB_CPU_2_STATUS       0xA01E34
 #define CSR_UCODE_DRV_GP1     0x054
+#define UMAG_SB_CPU_1_STATUS  0xA038C0
+#define UMAG_SB_CPU_2_STATUS  0xA038C4
 
 /* Zustand der Firmware ins Log: Ladestatus, Befehlszaehler beider Prozessoren, Status der CPUs, Uebergabe-Register */
 static void fw_state(uint32_t ms)
@@ -461,11 +463,25 @@ int iwl_load_fw(void)
     wr(CSR_GP_CNTRL, rd(CSR_GP_CNTRL) | GP_MAC_ACCESS_REQ);
     int access = WAIT_UNTIL((rd(CSR_GP_CNTRL) & (GP_MAC_CLOCK_READY | GP_GOING_TO_SLEEP)) == GP_MAC_CLOCK_READY, 25);
     enable_wfpm(); /* sicherheitshalber noch einmal: der Startbefehl ist ein Peripherie-Register */
+    uint32_t pc_before = prph_rd(UREG_UMAC_CURRENT_PC), init_before = prph_rd(UREG_CPU_INIT_RUN);
     wr(RFH_Q0_FRBDCB_WIDX_TRG, RX_RING & ~7u);
     prph_write(UREG_CPU_INIT_RUN, 1);
+    /* gleich danach: kam alles an, und bewegt sich das ROM? (PC in schneller Folge, 50 ms lang) */
+    uint32_t init_after = prph_rd(UREG_CPU_INIT_RUN), ba_lo = rd(CSR_CTXT_INFO_BA), ba_hi = rd(CSR_CTXT_INFO_BA + 4);
+    uint32_t pcs[10];
+    for (int i = 0; i < 10; i++) {
+        pcs[i] = prph_rd(UREG_UMAC_CURRENT_PC);
+        for (uint64_t t = time_us(); time_us() - t < 5000;) /* aktiv warten: der Zugriff bleibt bestehen */
+            ;
+    }
+    uint32_t umag1 = prph_rd(UMAG_SB_CPU_1_STATUS), umag2 = prph_rd(UMAG_SB_CPU_2_STATUS);
     wr(CSR_GP_CNTRL, rd(CSR_GP_CNTRL) & ~GP_MAC_ACCESS_REQ);
     kprintf("iwl: Firmware gestartet (Context Info %#lx, %d+%d+%d Abschnitte, Zugriff %s)\n", (unsigned long)(uint64_t)ci,
             nsec[0], nsec[1], nsec[2], access ? "ok" : "NICHT bekommen");
+    kprintf("iwl:   CPU_INIT_RUN %#x -> %#x, CTXT_INFO_BA %#x:%#x, UMAG CPU1 %#x CPU2 %#x\n", init_before, init_after, ba_hi,
+            ba_lo, umag1, umag2);
+    kprintf("iwl:   PC UMAC vorher %#x, danach alle 5 ms: %#x %#x %#x %#x %#x %#x %#x %#x %#x %#x\n", pc_before, pcs[0], pcs[1],
+            pcs[2], pcs[3], pcs[4], pcs[5], pcs[6], pcs[7], pcs[8], pcs[9]);
 
     /* auf ALIVE warten: der Status zaehlt die gefuellten Empfangspuffer. Alle 250 ms ins Log, was die Karte tut */
     uint64_t t0 = time_us(), next_dump = 0;
