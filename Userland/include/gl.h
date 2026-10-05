@@ -32,6 +32,8 @@ typedef unsigned       GLbitfield;
 typedef unsigned char  GLubyte;
 typedef unsigned char  GLboolean;
 typedef void           GLvoid;
+typedef long           GLsizeiptr;
+typedef long           GLintptr;
 
 #define GL_FALSE               0
 #define GL_TRUE                1
@@ -77,6 +79,21 @@ typedef void           GLvoid;
 #define GL_AMBIENT             0x1200
 #define GL_DIFFUSE             0x1201
 #define GL_POSITION            0x1203
+#define GL_BYTE                0x1400
+#define GL_UNSIGNED_SHORT      0x1403
+#define GL_UNSIGNED_INT        0x1405
+#define GL_FLOAT               0x1406
+#define GL_VERTEX_ARRAY        0x8074
+#define GL_NORMAL_ARRAY        0x8075
+#define GL_COLOR_ARRAY         0x8076
+#define GL_TEXTURE_COORD_ARRAY 0x8078
+#define GL_ARRAY_BUFFER        0x8892
+#define GL_ELEMENT_ARRAY_BUFFER 0x8893
+#define GL_STATIC_DRAW         0x88E4
+#define GL_DYNAMIC_DRAW        0x88E8
+#define GL_STREAM_DRAW         0x88E0
+#define GL_WRITE_ONLY          0x88B9
+#define GL_READ_WRITE          0x88BA
 
 /* ---------- Fenster ---------- */
 int  gl_open(int w, int h, const char *title); /* 0 = ok */
@@ -134,6 +151,25 @@ void glTexImage2D(GLenum target, GLint level, GLint internal, GLsizei w, GLsizei
 void glTexParameteri(GLenum target, GLenum pname, GLint param);
 
 void glLightfv(GLenum light, GLenum pname, const GLfloat *v);
+
+/* Puffer (OpenGL 1.5) und Vertex-Arrays: Ecken und Indizes bleiben im Speicher (fuer die GPU angemeldet), gezeichnet
+ * wird mit glDrawArrays/glDrawElements. Arrays: Positionen (2-4 float), Textur (1-4 float), Normalen (3 float),
+ * Farben (3-4 float oder 4 GL_UNSIGNED_BYTE); mit gebundenem GL_ARRAY_BUFFER ist der Zeiger ein Abstand darin. */
+void  glGenBuffers(GLsizei n, GLuint *ids);
+void  glDeleteBuffers(GLsizei n, const GLuint *ids);
+void  glBindBuffer(GLenum target, GLuint id);   /* GL_ARRAY_BUFFER, GL_ELEMENT_ARRAY_BUFFER; 0 = keiner */
+void  glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usage);
+void  glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvoid *data);
+void *glMapBuffer(GLenum target, GLenum access);
+GLboolean glUnmapBuffer(GLenum target);
+void  glVertexPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *p);
+void  glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *p);
+void  glNormalPointer(GLenum type, GLsizei stride, const GLvoid *p);
+void  glColorPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *p);
+void  glEnableClientState(GLenum cap);         /* GL_VERTEX_ARRAY, GL_TEXTURE_COORD_ARRAY, GL_NORMAL_ARRAY, ... */
+void  glDisableClientState(GLenum cap);
+void  glDrawArrays(GLenum mode, GLint first, GLsizei count);
+void  glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indices); /* GL_UNSIGNED_BYTE/SHORT/INT */
 
 /* Rechenhilfen (die libc hat keine Mathefunktionen) */
 float gl_sinf(float x);

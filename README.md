@@ -250,7 +250,19 @@ sys_munmap((void *)d, groesse);
   (`GPU3D_KEEP_ALPHA`, der Desktop liest es als Deckung), `GL_DST_ALPHA` ist also immer 1.
   `gldemo`: Pfeiltasten (oder w/s) fahren die Kamera vor und zurueck, `c` schaltet das Weglassen der Rueckseiten um,
   `b` den grossen Wuerfel aus Glas (erst die hinteren, dann die vorderen Seiten, ohne Tiefe zu schreiben).
-  Selbsttest `gltest` (22 Pruefungen mit der CPU). Noch nicht: Mip-Stufen
+  **Puffer und Vertex-Arrays** (OpenGL 1.5: `glGenBuffers`, `glBindBuffer`, `glBufferData`/`SubData`, `glMapBuffer`,
+  `glVertexPointer`/`TexCoord`/`Normal`/`ColorPointer`, `glDrawArrays`, `glDrawElements` mit 8-, 16- oder 32-Bit-
+  Indizes): ein Puffer ist geteilter Speicher, fuer die GPU als Flaeche angemeldet (4 KiB je Zeile, bis 64 MiB), und
+  bleibt ueber viele Bilder. `SYS_GPUCOMP 9` (`Gpu3dDrawVB`) schickt nur Zustand, Anfang und Abstand je Attribut: der
+  Kernel stellt `VERTEX_BUFFERS` (je Attribut einer, feste Werte als Puffer mit Zeilenlaenge 0), `VERTEX_ELEMENTS`
+  und `INDEX_BUFFER` ein, die GPU holt Ecken und Indizes selbst (Liste, Streifen, Faecher). Groessen begrenzen das
+  Lesen auf die Flaechen des Programms. Abschneiden macht die GPU dabei nicht: `gl.c` prueft vorher den Kasten um die
+  benutzten Ecken (kleinster/groesster Index und Kasten zwischengespeichert, bis sich der Puffer aendert) - ganz
+  ausserhalb faellt die Zeichnung weg, ganz innerhalb geht sie direkt an die GPU, sonst (und fuer Ecken im
+  Programmspeicher, Vierecke, andere Formate) setzt die Bibliothek die Dreiecke zusammen und schneidet ab.
+  `gldemo`: drei Ringe mit je 2304 Dreiecken aus Puffern, `v` wechselt zum Vergleich auf `glBegin`/`glEnd`.
+  Selbsttest `gltest` (28 Pruefungen mit der CPU, Puffer und Arrays muessen pixelgenau dasselbe Bild ergeben wie
+  `glBegin`/`glEnd`). Noch nicht: Mip-Stufen, Auftraege ohne Warten
 - **Zusammensetzen auf der GPU** (`igd_comp.c`, `SYS_GPUCOMP`; Desktop: `gpu.c`): Bildschirmbild, Hintergrund,
   Fensterbilder und Schatten liegen in geteiltem Speicher, den der Kernel fest in die GGTT einblendet (eigener Bereich,
   Referenz auf das shm-Objekt, solange angemeldet). Je Bild schickt der Desktop alle geaenderten Rechtecke als eine

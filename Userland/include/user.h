@@ -357,6 +357,32 @@ typedef struct {
     const float   *verts;                       /* je Eckpunkt x, y, z, u, v, nx, ny, nz, r, g, b, a */
 } Gpu3dDraw;
 static inline s64 sys_gpu3d(const Gpu3dDraw *d)               { return syscall3(SYS_GPUCOMP, 8, (u64)d, 0); }
+/* 3D aus Puffern (SYS_GPUCOMP 9): Eckpunkte und Indizes liegen in angemeldeten Flaechen (geteilter Speicher, bleibt
+ * ueber viele Bilder) statt im Auftrag. Je Attribut (0 Position, 1 Textur u, v, 2 Normale, 3 Farbe) ein Puffer mit
+ * Anfang und Abstand je Eckpunkt oder surf = 0: fester Wert aus value. Fehlende Komponenten: Position z = 0,
+ * Textur v = 0, Farbe a = 1. Die GPU liest nur innerhalb der Flaechen (dahinter 0). Kein Abschneiden an der nahen
+ * Ebene - das prueft gl.c vorher (Kasten um die Eckpunkte). */
+#define GPU3D_F_FLOAT1  1
+#define GPU3D_F_FLOAT2  2
+#define GPU3D_F_FLOAT3  3
+#define GPU3D_F_FLOAT4  4
+#define GPU3D_F_UBYTE4N 5               /* 4 Byte r, g, b, a: 0-255 = 0.0-1.0 */
+#define GPU3D_PRIM_TRIANGLES 4
+#define GPU3D_PRIM_STRIP     5
+#define GPU3D_PRIM_FAN       6
+typedef struct {
+    unsigned short surf, format;        /* Flaeche (0 = fester Wert), GPU3D_F_* */
+    unsigned       offset, stride;      /* Bytes, Vielfache von 4; stride hoechstens 2048 */
+} Gpu3dAttr;
+typedef struct {
+    Gpu3dDraw      d;                   /* wie bei sys_gpu3d, nvert und verts unbenutzt */
+    Gpu3dAttr      attr[4];
+    float          value[4][4];
+    unsigned short index_surf, index_size; /* 0 = ohne Indizes; sonst Bytes je Index (1, 2, 4) */
+    unsigned       index_offset;
+    unsigned       prim, first, count;  /* GPU3D_PRIM_*; erster Index (bzw. Eckpunkt), Anzahl */
+} Gpu3dDrawVB;
+static inline s64 sys_gpu3d_vb(const Gpu3dDrawVB *d)          { return syscall3(SYS_GPUCOMP, 9, (u64)d, 0); }
 /* Benannte Dienste: anmelden, abmelden, verbinden (fds: lesen, schreiben), annehmen (fds: lesen, schreiben, PID;
  * ERR_AGAIN = niemand wartet). Damit finden Programme aus dem Terminal den Desktop. */
 static inline s64 sys_service_register(const char *name)     { return syscall3(SYS_SERVICE, 0, (u64)name, 0); }

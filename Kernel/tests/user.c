@@ -606,7 +606,7 @@ void test_graphics(void)
 
     /* gltest: kleines OpenGL mit der CPU - Abschneiden an nah/fern/Schutzstreifen, Rueckseiten weglassen, Mischen */
     pid = process_spawn("/bin/gltest", "gltest", 0);
-    check("gltest (3D: Abschneiden an der nahen Ebene, Rueckseiten, Mischen)",
+    check("gltest (3D: Abschneiden, Rueckseiten, Mischen, Puffer und Vertex-Arrays)",
           pid > 0 && process_wait(pid, 0, &code, &faulted, 30000) == 0 && code == 0 && !faulted);
     if (pid > 0 && code != 0)
         kprintf("  gltest: Pruefung %d fehlgeschlagen\n", code);

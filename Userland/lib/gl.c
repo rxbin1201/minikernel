@@ -471,25 +471,31 @@ static void base_draw(Gpu3dDraw *d)
     d->h = G.h;
 }
 
+/* Auftrag mit dem Zustand der gesammelten Dreiecke (Ziel, Textur, Tests, Matrix, Licht) */
+static void state_draw(Gpu3dDraw *d)
+{
+    base_draw(d);
+    const Tex *t = &tex[G.bs.tex];
+    d->tex = (unsigned short)t->surf;
+    d->tex_w = (unsigned short)t->w;
+    d->tex_h = (unsigned short)t->h;
+    d->flags = (unsigned short)((G.bs.depth ? GPU3D_DEPTH : 0) | (t->linear ? GPU3D_LINEAR : 0) | G.bs.cull |
+                                (G.bs.blend ? GPU3D_BLEND : 0) | (G.bs.depth && !G.bs.zwrite ? GPU3D_NO_DEPTH_WRITE : 0) |
+                                GPU3D_KEEP_ALPHA);
+    d->blend = (unsigned short)G.bs.blend;
+    memcpy(d->m, G.bs.m, sizeof(d->m));
+    memcpy(d->light, G.bs.l, sizeof(d->light));
+    d->ambient = G.bs.amb;
+    d->diffuse = G.bs.dif;
+}
+
 static void flush(void)
 {
     if (!G.bn)
         return;
     if (G.gpu) {
         Gpu3dDraw d;
-        base_draw(&d);
-        const Tex *t = &tex[G.bs.tex];
-        d.tex = (unsigned short)t->surf;
-        d.tex_w = (unsigned short)t->w;
-        d.tex_h = (unsigned short)t->h;
-        d.flags = (unsigned short)((G.bs.depth ? GPU3D_DEPTH : 0) | (t->linear ? GPU3D_LINEAR : 0) | G.bs.cull |
-                                   (G.bs.blend ? GPU3D_BLEND : 0) | (G.bs.depth && !G.bs.zwrite ? GPU3D_NO_DEPTH_WRITE : 0) |
-                                   GPU3D_KEEP_ALPHA);
-        d.blend = (unsigned short)G.bs.blend;
-        memcpy(d.m, G.bs.m, sizeof(d.m));
-        memcpy(d.light, G.bs.l, sizeof(d.light));
-        d.ambient = G.bs.amb;
-        d.diffuse = G.bs.dif;
+        state_draw(&d);
         d.nvert = (unsigned)G.bn;
         d.verts = &G.bv[0][0];
         s64 r = sys_gpu3d(&d);
@@ -603,10 +609,10 @@ static int clip_plane(float (*v)[VF], float (*dv)[NPLANE], int n, int k, float (
     return m;
 }
 
-static void tri(int a, int b, int c)
+static void tri_v(const float *p0, const float *p1, const float *p2)
 {
     static float v[2][CLIPV][VF], dv[2][CLIPV][NPLANE];
-    const float *p[3] = {G.pv[a], G.pv[b], G.pv[c]};
+    const float *p[3] = {p0, p1, p2};
     int clip = 0;
     for (int k = 0; k < 3; k++)
         plane_dist(p[k], dv[0][k]);
@@ -631,6 +637,47 @@ static void tri(int a, int b, int c)
         }
     for (int i = 2; i < n; i++)
         emit(v[cur][0], v[cur][i - 1], v[cur][i]);
+}
+
+static void tri(int a, int b, int c)
+{
+    tri_v(G.pv[a], G.pv[b], G.pv[c]);
+}
+
+/* Dreiecke einer Grundform aus n Ecken: t(a, b, c) mit den Nummern der Ecken (Streifen abwechselnd gedreht, damit
+ * alle denselben Umlaufsinn haben) */
+static void prims(GLenum mode, int n, void (*t)(int, int, int))
+{
+    switch (mode) {
+    case GL_TRIANGLES:
+        for (int i = 0; i + 2 < n; i += 3)
+            t(i, i + 1, i + 2);
+        break;
+    case GL_TRIANGLE_STRIP:
+        for (int i = 2; i < n; i++)
+            if (i & 1)
+                t(i - 1, i - 2, i);
+            else
+                t(i - 2, i - 1, i);
+        break;
+    case GL_TRIANGLE_FAN:
+    case GL_POLYGON:
+        for (int i = 2; i < n; i++)
+            t(0, i - 1, i);
+        break;
+    case GL_QUADS:
+        for (int i = 0; i + 3 < n; i += 4) {
+            t(i, i + 1, i + 2);
+            t(i, i + 2, i + 3);
+        }
+        break;
+    case GL_QUAD_STRIP:
+        for (int i = 0; i + 3 < n; i += 2) {
+            t(i, i + 1, i + 3);
+            t(i, i + 3, i + 2);
+        }
+        break;
+    }
 }
 
 /* ---------- Fenster ---------- */
@@ -710,10 +757,13 @@ int gl_open(int w, int h, const char *title)
     return 0;
 }
 
+static void bufs_free(void);
+
 void gl_close(void)
 {
     if (!G.open)
         return;
+    bufs_free();
     for (int i = 1; i < NTEX; i++)
         if (tex[i].used) {
             tex_free(&tex[i]);
@@ -958,38 +1008,8 @@ void glBegin(GLenum mode)
 
 void glEnd(void)
 {
-    int n = G.pn;
     cur_state();
-    switch (G.prim) {
-    case GL_TRIANGLES:
-        for (int i = 0; i + 2 < n; i += 3)
-            tri(i, i + 1, i + 2);
-        break;
-    case GL_TRIANGLE_STRIP:
-        for (int i = 2; i < n; i++)
-            if (i & 1)
-                tri(i - 1, i - 2, i);
-            else
-                tri(i - 2, i - 1, i);
-        break;
-    case GL_TRIANGLE_FAN:
-    case GL_POLYGON:
-        for (int i = 2; i < n; i++)
-            tri(0, i - 1, i);
-        break;
-    case GL_QUADS:
-        for (int i = 0; i + 3 < n; i += 4) {
-            tri(i, i + 1, i + 2);
-            tri(i, i + 2, i + 3);
-        }
-        break;
-    case GL_QUAD_STRIP:
-        for (int i = 0; i + 3 < n; i += 2) {
-            tri(i, i + 1, i + 3);
-            tri(i, i + 3, i + 2);
-        }
-        break;
-    }
+    prims(G.prim, G.pn, tri);
     G.pn = 0;
 }
 
@@ -1116,4 +1136,475 @@ void glLightfv(GLenum light, GLenum pname, const GLfloat *v)
     } else if (pname == GL_DIFFUSE) {
         G.dif = v[0];
     }
+}
+
+/* ---------- Puffer und Vertex-Arrays ----------
+ *
+ * Ein Puffer ist geteilter Speicher (ganze Seiten), fuer die GPU als Flaeche angemeldet (1024 Pixel = 4 KiB je Zeile).
+ * Er bleibt ueber viele Bilder; glDrawArrays/glDrawElements schicken nur noch den Zustand, Anfang und Abstand je
+ * Attribut (SYS_GPUCOMP 9) - die GPU liest Ecken und Indizes selbst. Das Abschneiden an der nahen Ebene macht die
+ * GPU dabei nicht: vorher wird der Kasten um die benutzten Ecken geprueft (pos_box, zwischengespeichert, solange
+ * sich der Puffer nicht aendert). Ganz ausserhalb: nichts zeichnen. Ganz innerhalb von nah, fern und Schutzstreifen:
+ * direkt auf der GPU. Sonst - und fuer alles, was die GPU so nicht kann (Ecken im Programmspeicher, Vierecke, andere
+ * Formate) - setzt die Bibliothek die Dreiecke zusammen wie bei glBegin/glEnd. Die CPU rastert immer selbst. */
+
+typedef struct {
+    int      used, surf;
+    unsigned char      *data;
+    u64      size, cap;         /* benutzt (glBufferData), angelegt (Seiten) */
+    unsigned shm;
+    u32      gen;               /* Zaehler der Aenderungen: Zwischenergebnisse unten gelten nur fuer einen Stand */
+    struct { u32 gen, valid; u64 off; int count, isz; u32 lo, hi; } ir;          /* Indizes: kleinster, groesster */
+    struct { u32 gen, valid; u64 off; int stride, n; u32 lo, hi; float box[6]; } bb; /* Kasten der Positionen */
+} Buf;
+
+static Buf   *bufs;
+static GLuint nbufs;            /* Eintraege in bufs (Nummer 0 bleibt frei) */
+
+enum { A_POS, A_TEX, A_NRM, A_COL };
+typedef struct {
+    int    on, size, stride;
+    GLenum type;
+    u64    ptr;                 /* Adresse, mit Puffer: Abstand darin */
+    GLuint buf;
+} Arr;
+
+static Arr    arr[4];
+static GLuint array_buf, elem_buf;
+
+static Buf *buf_get(GLuint id)
+{
+    return id && id < nbufs && bufs[id].used ? &bufs[id] : 0;
+}
+
+static void buf_release(Buf *b)
+{
+    if (b->surf)
+        sys_gpucomp(2, (u64)b->surf, 0);
+    if (b->data)
+        sys_shm_unmap(b->data);
+    b->surf = 0;
+    b->data = 0;
+    b->size = b->cap = 0;
+    b->gen++;
+}
+
+static void bufs_free(void)
+{
+    for (GLuint i = 1; i < nbufs; i++)
+        if (bufs[i].used) {
+            buf_release(&bufs[i]);
+            bufs[i].used = 0;
+        }
+    array_buf = elem_buf = 0;
+    memset(arr, 0, sizeof(arr));
+}
+
+void glGenBuffers(GLsizei n, GLuint *ids)
+{
+    for (int k = 0; k < n; k++) {
+        GLuint id = 1;
+        while (id < nbufs && bufs[id].used)
+            id++;
+        if (id >= nbufs) { /* Tabelle verdoppeln */
+            GLuint nn = nbufs ? nbufs * 2 : 64;
+            Buf *nb = u_malloc((u64)nn * sizeof(Buf));
+            if (!nb) {
+                ids[k] = 0;
+                continue;
+            }
+            memset(nb, 0, (u64)nn * sizeof(Buf));
+            if (bufs) {
+                memcpy(nb, bufs, (u64)nbufs * sizeof(Buf));
+                u_free(bufs);
+            }
+            bufs = nb;
+            nbufs = nn;
+        }
+        memset(&bufs[id], 0, sizeof(Buf));
+        bufs[id].used = 1;
+        ids[k] = id;
+    }
+}
+
+void glDeleteBuffers(GLsizei n, const GLuint *ids)
+{
+    flush();
+    for (int k = 0; k < n; k++) {
+        Buf *b = buf_get(ids[k]);
+        if (!b)
+            continue;
+        buf_release(b);
+        b->used = 0;
+        if (array_buf == ids[k])
+            array_buf = 0;
+        if (elem_buf == ids[k])
+            elem_buf = 0;
+    }
+}
+
+void glBindBuffer(GLenum target, GLuint id)
+{
+    if (id && !buf_get(id))
+        return;
+    if (target == GL_ARRAY_BUFFER)
+        array_buf = id;
+    else if (target == GL_ELEMENT_ARRAY_BUFFER)
+        elem_buf = id;
+}
+
+static Buf *bound(GLenum target)
+{
+    return buf_get(target == GL_ARRAY_BUFFER ? array_buf : target == GL_ELEMENT_ARRAY_BUFFER ? elem_buf : 0);
+}
+
+void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usage)
+{
+    (void)usage;
+    Buf *b = bound(target);
+    if (!b || size < 0)
+        return;
+    if ((u64)size > b->cap || !b->data) { /* neu anlegen: ganze Seiten, fuer die GPU 4 KiB je Zeile */
+        buf_release(b);
+        u64 bytes = ((u64)size + 4095) & ~4095ULL;
+        if (!bytes)
+            bytes = 4096;
+        unsigned id;
+        s64 a = sys_shm_create(bytes, &id);
+        if (a < 0)
+            return;
+        b->data = (unsigned char *)a;
+        b->shm = id;
+        b->cap = bytes;
+        if (G.gpu && bytes / 4096 <= 16384) {
+            s64 r = sys_gpucomp(1, id, 1024 | (bytes / 4096) << 16);
+            b->surf = r > 0 ? (int)r : 0; /* sonst setzt die Bibliothek die Dreiecke zusammen */
+        }
+    }
+    b->size = (u64)size;
+    if (data)
+        memcpy(b->data, data, (u64)size);
+    else
+        memset(b->data, 0, (u64)size);
+    b->gen++;
+}
+
+void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvoid *data)
+{
+    Buf *b = bound(target);
+    if (!b || offset < 0 || size < 0 || (u64)offset + (u64)size > b->size)
+        return;
+    memcpy(b->data + offset, data, (u64)size);
+    b->gen++;
+}
+
+void *glMapBuffer(GLenum target, GLenum access)
+{
+    (void)access;
+    Buf *b = bound(target);
+    if (!b)
+        return 0;
+    b->gen++; /* das Programm schreibt vielleicht hinein */
+    return b->data;
+}
+
+GLboolean glUnmapBuffer(GLenum target)
+{
+    Buf *b = bound(target);
+    if (b)
+        b->gen++;
+    return b != 0;
+}
+
+static void set_arr(int a, int size, GLenum type, GLsizei stride, const GLvoid *p)
+{
+    int ts = type == GL_FLOAT ? 4 : type == GL_UNSIGNED_BYTE && a == A_COL ? 1 : 0;
+    if (!ts || size < 1 || size > 4 || stride < 0)
+        return;
+    Arr *r = &arr[a];
+    r->size = size;
+    r->type = type;
+    r->stride = stride ? stride : size * ts;
+    r->ptr = (u64)p;
+    r->buf = array_buf;
+}
+
+void glVertexPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *p)
+{
+    if (size >= 2)
+        set_arr(A_POS, size, type, stride, p);
+}
+
+void glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *p)
+{
+    set_arr(A_TEX, size, type, stride, p);
+}
+
+void glNormalPointer(GLenum type, GLsizei stride, const GLvoid *p)
+{
+    set_arr(A_NRM, 3, type, stride, p);
+}
+
+void glColorPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *p)
+{
+    if (size >= 3)
+        set_arr(A_COL, size, type, stride, p);
+}
+
+static int client_arr(GLenum cap)
+{
+    return cap == GL_VERTEX_ARRAY ? A_POS : cap == GL_TEXTURE_COORD_ARRAY ? A_TEX : cap == GL_NORMAL_ARRAY ? A_NRM
+         : cap == GL_COLOR_ARRAY ? A_COL : -1;
+}
+
+void glEnableClientState(GLenum cap)
+{
+    int a = client_arr(cap);
+    if (a >= 0)
+        arr[a].on = 1;
+}
+
+void glDisableClientState(GLenum cap)
+{
+    int a = client_arr(cap);
+    if (a >= 0)
+        arr[a].on = 0;
+}
+
+/* Attribut der Ecke i: Zeiger auf die Daten oder 0 (Puffer geloescht oder Ecke dahinter: dann gilt 0) */
+static const unsigned char *arr_at(const Arr *r, u32 i)
+{
+    u64 n = (u64)r->size * (r->type == GL_FLOAT ? 4 : 1), off = r->ptr + (u64)i * (u64)r->stride;
+    if (!r->buf)
+        return (const unsigned char *)off;
+    const Buf *b = buf_get(r->buf);
+    return b && off + n <= b->size ? b->data + off : 0;
+}
+
+/* Ecke i aus den Arrays im Format der Dreiecke (x, y, z, u, v, nx, ny, nz, r, g, b, a); ohne Array der aktuelle Wert */
+static void fetch(u32 i, float *v)
+{
+    static const int dst[4] = {0, 3, 5, 8}, cnt[4] = {3, 2, 3, 4};
+    memcpy(v, G.cur, sizeof(G.cur));
+    for (int a = 0; a < 4; a++) {
+        const Arr *r = &arr[a];
+        if (!r->on)
+            continue;
+        const unsigned char *p = arr_at(r, i);
+        float t[4] = {0, 0, 0, 1};
+        for (int c = 0; p && c < r->size; c++)
+            if (r->type == GL_FLOAT)
+                memcpy(&t[c], p + 4 * c, 4);
+            else
+                t[c] = (float)p[c] * (1.0f / 255);
+        for (int c = 0; c < cnt[a]; c++)
+            v[dst[a] + c] = t[c];
+    }
+}
+
+static struct {
+    const unsigned char *ib;               /* Indizes oder 0 (der Reihe nach ab first) */
+    int       isz, first, noclip;
+} D;
+
+static u32 vidx(int k)
+{
+    if (!D.ib)
+        return (u32)(D.first + k);
+    if (D.isz == 1)
+        return D.ib[k];
+    if (D.isz == 2) {
+        unsigned short v;
+        memcpy(&v, D.ib + 2 * k, 2);
+        return v;
+    }
+    u32 v;
+    memcpy(&v, D.ib + 4 * (u64)k, 4);
+    return v;
+}
+
+static void tri_idx(int a, int b, int c)
+{
+    float va[VF], vb[VF], vc[VF];
+    fetch(vidx(a), va);
+    fetch(vidx(b), vb);
+    fetch(vidx(c), vc);
+    if (D.noclip)
+        emit(va, vb, vc);
+    else
+        tri_v(va, vb, vc);
+}
+
+/* kleinster und groesster Index (zwischengespeichert, solange der Puffer gleich bleibt) */
+static void index_range(Buf *b, u64 off, int count, int isz, u32 *lo, u32 *hi)
+{
+    if (!(b->ir.valid && b->ir.gen == b->gen && b->ir.off == off && b->ir.count == count && b->ir.isz == isz)) {
+        D.ib = b->data + off;
+        D.isz = isz;
+        u32 l = 0xFFFFFFFFu, h = 0;
+        for (int k = 0; k < count; k++) {
+            u32 v = vidx(k);
+            l = v < l ? v : l;
+            h = v > h ? v : h;
+        }
+        b->ir.valid = 1;
+        b->ir.gen = b->gen;
+        b->ir.off = off;
+        b->ir.count = count;
+        b->ir.isz = isz;
+        b->ir.lo = l;
+        b->ir.hi = h;
+    }
+    *lo = b->ir.lo;
+    *hi = b->ir.hi;
+}
+
+/* Kasten (min x, y, z, max x, y, z) um die Positionen der Ecken lo..hi; Ecken hinter dem Pufferende zaehlen als 0 */
+static void pos_box(Buf *b, const Arr *r, u32 lo, u32 hi, float *box)
+{
+    if (!(b->bb.valid && b->bb.gen == b->gen && b->bb.off == r->ptr && b->bb.stride == r->stride &&
+          b->bb.n == r->size && b->bb.lo == lo && b->bb.hi == hi)) {
+        u64 n = (u64)r->size * 4, last = r->ptr + n <= b->size ? (b->size - r->ptr - n) / (u64)r->stride : 0;
+        int zero = r->ptr + n > b->size || hi > last;
+        u32 end = hi > last ? (u32)last : hi;
+        float m[6] = {1e30f, 1e30f, 1e30f, -1e30f, -1e30f, -1e30f};
+        for (u32 i = lo; i <= end && r->ptr + n <= b->size; i++) {
+            float p[3] = {0, 0, 0};
+            memcpy(p, b->data + r->ptr + (u64)i * (u64)r->stride, (u64)(r->size < 3 ? r->size : 3) * 4);
+            for (int c = 0; c < 3; c++) {
+                m[c] = p[c] < m[c] ? p[c] : m[c];
+                m[3 + c] = p[c] > m[3 + c] ? p[c] : m[3 + c];
+            }
+            if (i == 0xFFFFFFFFu)
+                break;
+        }
+        if (zero || m[0] > m[3])
+            for (int c = 0; c < 3; c++) {
+                m[c] = m[c] < 0 ? m[c] : 0;
+                m[3 + c] = m[3 + c] > 0 ? m[3 + c] : 0;
+            }
+        b->bb.valid = 1;
+        b->bb.gen = b->gen;
+        b->bb.off = r->ptr;
+        b->bb.stride = r->stride;
+        b->bb.n = r->size;
+        b->bb.lo = lo;
+        b->bb.hi = hi;
+        memcpy(b->bb.box, m, sizeof(m));
+    }
+    memcpy(box, b->bb.box, sizeof(b->bb.box));
+}
+
+/* 0 = Kasten ganz ausserhalb des Bildes, 1 = ganz innerhalb von nah, fern und Schutzstreifen, 2 = muss abschneiden */
+static int box_test(const float *box)
+{
+    float d[8][NPLANE];
+    for (int k = 0; k < 8; k++) {
+        float p[3] = {box[k & 1 ? 3 : 0], box[k & 2 ? 4 : 1], box[k & 4 ? 5 : 2]};
+        plane_dist(p, d[k]);
+    }
+    int clip = 0;
+    for (int e = 0; e < NPLANE; e++) {
+        int out = 0;
+        for (int k = 0; k < 8; k++)
+            out += d[k][e] < 0;
+        if (out == 8 && e < 6)
+            return 0;
+        if (out && (e < 2 || e >= 6))
+            clip = 1;
+    }
+    return clip ? 2 : 1;
+}
+
+/* direkt auf der GPU: alle Arrays in angemeldeten Puffern, Formate, die die Hardware liest; 1 = gezeichnet */
+static int gpu_draw(GLenum mode, int first, int count, const Buf *ib, u64 ioff, int isz)
+{
+    int prim = mode == GL_TRIANGLES ? GPU3D_PRIM_TRIANGLES : mode == GL_TRIANGLE_STRIP ? GPU3D_PRIM_STRIP
+             : mode == GL_TRIANGLE_FAN ? GPU3D_PRIM_FAN : 0;
+    if (!prim || (isz && !ib->surf))
+        return 0;
+    Gpu3dDrawVB v;
+    memset(&v, 0, sizeof(v));
+    const float *c = G.cur;
+    float val[4][4] = {{0, 0, 0, 1}, {c[3], c[4], 0, 1}, {c[5], c[6], c[7], 0}, {c[8], c[9], c[10], c[11]}};
+    memcpy(v.value, val, sizeof(val));
+    for (int a = 0; a < 4; a++) {
+        const Arr *r = &arr[a];
+        if (!r->on)
+            continue;
+        const Buf *b = buf_get(r->buf);
+        if (!b || !b->surf || (r->ptr & 3) || (r->stride & 3) || r->stride > 2048 || r->ptr >= b->cap)
+            return 0;
+        int fmt = r->type == GL_FLOAT ? r->size : r->size == 4 ? GPU3D_F_UBYTE4N : 0;
+        if (!fmt)
+            return 0;
+        v.attr[a].surf = (unsigned short)b->surf;
+        v.attr[a].format = (unsigned short)fmt;
+        v.attr[a].offset = (unsigned)r->ptr;
+        v.attr[a].stride = (unsigned)r->stride;
+    }
+    flush(); /* gesammelte Dreiecke zuerst (Reihenfolge) */
+    state_draw(&v.d);
+    v.index_surf = (unsigned short)(isz ? ib->surf : 0);
+    v.index_size = (unsigned short)isz;
+    v.index_offset = (unsigned)ioff;
+    v.prim = (unsigned)prim;
+    v.first = isz ? 0 : (unsigned)first;
+    v.count = (unsigned)count;
+    s64 rc = sys_gpu3d_vb(&v);
+    if (rc == -38)
+        gpu_off("keine 3D-Pipeline");
+    return rc >= 0;
+}
+
+static void draw(GLenum mode, int first, int count, int isz, const GLvoid *indices)
+{
+    if (!G.open || count <= 0 || first < 0 || !arr[A_POS].on)
+        return;
+    const unsigned char *ib = 0;
+    Buf *ibuf = 0;
+    u64 ioff = 0;
+    if (isz) {
+        if (elem_buf) {
+            ibuf = buf_get(elem_buf);
+            ioff = (u64)indices;
+            if (!ibuf || ioff % (u64)isz || ioff + (u64)count * (u64)isz > ibuf->size)
+                return;
+            ib = ibuf->data + ioff;
+        } else if (!(ib = indices)) {
+            return;
+        }
+    }
+    cur_state();
+    int vis = 2;
+    Buf *pb = buf_get(arr[A_POS].buf);
+    if (pb && arr[A_POS].buf && (!isz || ibuf)) {
+        u32 lo = (u32)first, hi = (u32)(first + count - 1);
+        if (isz)
+            index_range(ibuf, ioff, count, isz, &lo, &hi);
+        float box[6];
+        pos_box(pb, &arr[A_POS], lo, hi, box);
+        vis = box_test(box);
+    }
+    if (vis == 0)
+        return;
+    if (vis == 1 && G.gpu && gpu_draw(mode, first, count, ibuf, ioff, isz))
+        return;
+    D.ib = ib;
+    D.isz = isz;
+    D.first = first;
+    D.noclip = vis == 1;
+    prims(mode, count, tri_idx);
+}
+
+void glDrawArrays(GLenum mode, GLint first, GLsizei count)
+{
+    draw(mode, first, count, 0, 0);
+}
+
+void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indices)
+{
+    int isz = type == GL_UNSIGNED_BYTE ? 1 : type == GL_UNSIGNED_SHORT ? 2 : type == GL_UNSIGNED_INT ? 4 : 0;
+    if (isz)
+        draw(mode, 0, count, isz, indices);
 }

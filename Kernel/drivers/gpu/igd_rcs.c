@@ -1400,6 +1400,11 @@ out:
 #define PRIMITIVE_3D         (G3D(3, 3, 0x00) | 5)
 #define PRIM_TRILIST         0x04
 #define PRIM_RECTLIST        0x0F
+#define PRIM_TRISTRIP        0x05
+#define PRIM_TRIFAN          0x06
+#define SURF_R32_FLOAT       0x0D8
+#define SURF_R8G8B8A8_UNORM  0x0C7
+#define INDEX_BUFFER         (S3D(0x0A) | 3)
 #define SURF_B8G8R8A8_UNORM  0x0C0
 #define SURF_RGBA32_FLOAT    0x000
 #define SURF_RG32_FLOAT      0x085
@@ -1649,7 +1654,7 @@ static int asm_ps_tex(uint32_t (*k)[4], int mod)
 
 /* Eckpunkte: x, y, u, v (ohne VS) / x, y, r, g, b, a mit / ohne VS / x, y, z, r, g, b, a (ohne VS, mit Tiefe) /
  * Wuerfel fuer den VS: x, y, z, r, g, b, a, Normale x, y, z / texturiert: x, y, z, u, v, Normale x, y, z, r, g, b, a */
-enum { L3_XYUV, L3_VS_XYRGBA, L3_XYRGBA, L3_XYZRGBA, L3_VS_CUBE, L3_VS_TEX };
+enum { L3_XYUV, L3_VS_XYRGBA, L3_XYRGBA, L3_XYZRGBA, L3_VS_CUBE, L3_VS_TEX, L3_VS_VB };
 typedef struct {
     uint32_t        rt_gtt, w, h, pitch; /* Render-Target (Pixel, Zeilenlaenge in Bytes) */
     int             vs;                  /* L3_* */
@@ -1666,11 +1671,70 @@ typedef struct {
     int             no_color;            /* Farbe nicht schreiben (nur Tiefe loeschen) */
     uint32_t        opts;                /* IGD_3D_CULL_*, _BLEND, _NO_DEPTH_WRITE, _KEEP_ALPHA */
     uint32_t        blend;               /* IGD_3D_BLEND: Faktor Quelle | Faktor Ziel << 8 (BLENDFACTOR_*) */
+    const IgdVb3d  *vb;                  /* L3_VS_VB: Eckpunkte aus Puffern der Programme */
 } Draw3d;
 
 static uint32_t vert_size(int layout)
 {
     return layout == L3_XYUV ? 16 : layout == L3_XYZRGBA ? 28 : layout == L3_VS_CUBE ? 40 : layout == L3_VS_TEX ? 48 : 24;
+}
+
+/* Eckpunkte aus Puffern: VERTEX_BUFFERS (0-3 je Attribut, 4 = feste Werte in C_VB mit Zeilenlaenge 0),
+ * VERTEX_ELEMENTS in der Reihenfolge, die asm_vs_tex erwartet (Position x, y, z, 1 / Textur u, v, 0, 1 /
+ * Normale x, y, z, 0 / Farbe r, g, b, a), fehlende Komponenten mit 0 bzw. 1 aufgefuellt; INDEX_BUFFER.
+ * Groessen begrenzen das Lesen: was dahinter laege, liefert die Hardware als 0 */
+static uint32_t vb_state(uint32_t *b, uint32_t k, const Draw3d *d)
+{
+    const IgdVb3d *v = d->vb;
+    uint32_t nbuf = 0, slot[4];
+    for (int a = 0; a < 4; a++)
+        if (v->gtt[a])
+            nbuf++;
+    b[k++] = S3D(0x08) | (4 * (nbuf + 1) - 1);
+    for (int a = 0; a < 4; a++) {
+        slot[a] = v->gtt[a] ? (uint32_t)a : 4;
+        if (!v->gtt[a])
+            continue;
+        b[k++] = ((uint32_t)a << 26) | (d->mocs << 16) | (1u << 14) | v->stride[a];
+        b[k++] = v->gtt[a];
+        b[k++] = 0;
+        b[k++] = v->size[a];
+    }
+    b[k++] = (4u << 26) | (1u << 14) | 0;
+    b[k++] = core_gtt(C_VB);
+    b[k++] = 0;
+    b[k++] = sizeof(v->value);
+    static const uint32_t fill[4][4] = {{VFC_SRC, VFC_SRC, VFC_0, VFC_1F}, {VFC_SRC, VFC_0, VFC_0, VFC_1F},
+                                        {VFC_SRC, VFC_SRC, VFC_SRC, VFC_0}, {VFC_SRC, VFC_SRC, VFC_SRC, VFC_1F}};
+    b[k++] = S3D(0x09) | (2 * 4 - 1);
+    for (int a = 0; a < 4; a++) {
+        uint32_t f = v->format[a], fmt, ncomp, off;
+        if (slot[a] == 4) {
+            fmt = SURF_RGBA32_FLOAT;
+            ncomp = 4;
+            off = 16u * (uint32_t)a;
+        } else {
+            fmt = f == IGD_F_FLOAT1 ? SURF_R32_FLOAT : f == IGD_F_FLOAT2 ? SURF_RG32_FLOAT
+                : f == IGD_F_FLOAT3 ? SURF_RGB32_FLOAT : f == IGD_F_FLOAT4 ? SURF_RGBA32_FLOAT : SURF_R8G8B8A8_UNORM;
+            ncomp = f == IGD_F_UBYTE4N ? 4 : f;
+            off = 0;
+        }
+        if (a == 0 && ncomp > 3)
+            ncomp = 3; /* Position: w ist immer 1 (der Vertex-Shader rechnet mit x, y, z) */
+        uint32_t cc = 0;
+        for (uint32_t c = 0; c < 4; c++)
+            cc |= (c < ncomp ? VFC_SRC : fill[a][c] == VFC_SRC ? VFC_0 : fill[a][c]) << (28 - 4 * c);
+        b[k++] = (slot[a] << 26) | (1u << 25) | (fmt << 16) | off;
+        b[k++] = cc;
+    }
+    if (v->index_type) { /* Format 0 Byte, 1 Wort, 2 Doppelwort */
+        b[k++] = INDEX_BUFFER;
+        b[k++] = ((v->index_type == 1 ? 0u : v->index_type == 2 ? 1u : 2u) << 8) | d->mocs;
+        b[k++] = v->index_gtt;
+        b[k++] = 0;
+        b[k++] = v->index_size;
+    }
+    return k;
 }
 
 /* Zustaende und Batch fuer einen Aufruf */
@@ -1717,8 +1781,13 @@ static uint32_t batch_3d(const Draw3d *d)
     }
     rt[1] = d->mocs << 24;
     uint32_t vsize = vert_size(d->vs);
-    memcpy(core_ptr(C_VB), d->verts, (uint64_t)d->nvert * vsize);
-    igd_clflush((uint64_t)core_ptr(C_VB), (uint64_t)d->nvert * vsize);
+    if (d->vb) { /* nur die festen Werte (Puffer 4, Zeilenlaenge 0: jeder Eckpunkt liest dieselben 4 x vec4) */
+        memcpy(core_ptr(C_VB), d->vb->value, sizeof(d->vb->value));
+        igd_clflush((uint64_t)core_ptr(C_VB), sizeof(d->vb->value));
+    } else {
+        memcpy(core_ptr(C_VB), d->verts, (uint64_t)d->nvert * vsize);
+        igd_clflush((uint64_t)core_ptr(C_VB), (uint64_t)d->nvert * vsize);
+    }
 
     uint32_t *b = core_ptr(C_BATCH), k = 0, base = core_gtt(C_STATE);
     b[k++] = PIPE_CONTROL; /* vor dem Wechsel der Pipeline: alles fertig, Caches leer */
@@ -1792,7 +1861,7 @@ static uint32_t batch_3d(const Draw3d *d)
         b[k++] = 0;
     }
     b[k++] = S3D(0x10) | 7;          /* VS */
-    if (d->vs == L3_VS_XYRGBA || d->vs == L3_VS_CUBE || d->vs == L3_VS_TEX) {
+    if (d->vs == L3_VS_XYRGBA || d->vs == L3_VS_CUBE || d->vs == L3_VS_TEX || d->vs == L3_VS_VB) {
         /* Kernel, Eingaben ab r2 (1 bzw. 2 x 256 Bit = 2 bzw. 4 vec4), 64 Threads, Statistik, SIMD8, an */
         b[k++] = K3_VS;
         b[k++] = 0;
@@ -1819,7 +1888,7 @@ static uint32_t batch_3d(const Draw3d *d)
     b[k++] = 1u << 10;
     b[k++] = 0;
     b[k++] = 0;
-    uint32_t nattr = d->vs == L3_VS_TEX ? 2 : 1; /* Attribute fuer den Pixel-Shader (2: u, v und Farbe) */
+    uint32_t nattr = d->vs == L3_VS_TEX || d->vs == L3_VS_VB ? 2 : 1; /* Attribute fuer den Pixel-Shader (2: u, v und Farbe) */
     b[k++] = S3D(0x1F) | 4;          /* SBE: 1 bzw. 2 Attribute aus dem VUE ab 256 Bit */
     b[k++] = (nattr << 22) | (1u << 29) | (1u << 28) | (1u << 11) | (1u << 5);
     b[k++] = 0;
@@ -1909,12 +1978,16 @@ static uint32_t batch_3d(const Draw3d *d)
     b[k++] = 0;
     b[k++] = ((d->h - 1) << 16) | (d->w - 1);
     b[k++] = 0;
+    uint32_t nelem;
+    if (d->vb) {
+        k = vb_state(b, k, d);
+        nelem = 4;
+    } else {
     b[k++] = S3D(0x08) | 3;          /* VERTEX_BUFFERS: Puffer 0 */
     b[k++] = (0u << 26) | (1u << 14) | vsize;
     b[k++] = core_gtt(C_VB);
     b[k++] = 0;
     b[k++] = d->nvert * vsize;
-    uint32_t nelem;
     if (d->vs == L3_VS_XYRGBA) { /* Eingaben des Vertex-Shaders: Position x, y, 0, 1 und Farbe r, g, b, a */
         nelem = 2;
         b[k++] = S3D(0x09) | (2 * nelem - 1);
@@ -1962,6 +2035,7 @@ static uint32_t batch_3d(const Draw3d *d)
             b[k++] = (VFC_SRC << 28) | (VFC_SRC << 24) | (VFC_SRC << 20) | (VFC_SRC << 16);
         }
     }
+    }
     for (uint32_t e = 0; e < nelem; e++) { /* VF_INSTANCING: nicht instanziert */
         b[k++] = S3D(0x49) | 1;
         b[k++] = e;
@@ -1972,11 +2046,11 @@ static uint32_t batch_3d(const Draw3d *d)
     b[k++] = S3D(0x0C);              /* VF: kein Cut-Index */
     b[k++] = 0;
     b[k++] = S3D(0x4B);              /* VF_TOPOLOGY */
-    b[k++] = d->prim;
-    b[k++] = PRIMITIVE_3D;           /* nvert Eckpunkte, 1 Instanz */
-    b[k++] = 0;
-    b[k++] = d->nvert;
-    b[k++] = 0;
+    b[k++] = d->vb ? d->vb->prim : d->prim;
+    b[k++] = PRIMITIVE_3D;           /* Eckpunkte (der Reihe nach oder ueber Indizes), Anfang, 1 Instanz */
+    b[k++] = d->vb && d->vb->index_type ? 1u << 8 : 0;
+    b[k++] = d->vb ? d->vb->count : d->nvert;
+    b[k++] = d->vb ? d->vb->first : 0;
     b[k++] = 1;
     b[k++] = 0;
     b[k++] = 0;
@@ -2319,7 +2393,7 @@ static int test_3d(void)
     const uint32_t X0 = 16, Y0 = 8, X1 = 176, Y1 = 40, want = 0xFFFF3399u;
     load_kernel(K3_PSCOL, (const uint32_t (*)[4])kbuf, asm_ps_color(kbuf, F_1_0, F_0_2, F_0_6, F_1_0));
     const uint32_t rv[3][4] = {{f32(X1), f32(Y1), F_1_0, F_1_0}, {f32(X0), f32(Y1), 0, F_1_0}, {f32(X0), f32(Y0), 0, 0}};
-    Draw3d r1 = {base << 12, TW, TH, TW * 4, L3_XYUV, PRIM_RECTLIST, 3, K3_PSCOL, &rv[0][0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    Draw3d r1 = {base << 12, TW, TH, TW * 4, L3_XYUV, PRIM_RECTLIST, 3, K3_PSCOL, &rv[0][0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (draw_3d("1. Rechteck ueber die 3D-Pipeline", &r1, 1, stat) != 0) {
         rc = -30;
         goto out_ring;
@@ -2348,7 +2422,7 @@ static int test_3d(void)
         {{f32(192), f32(80), h1, h1}, {f32(128), f32(80), h0, h1}, {f32(128), f32(16), h0, h0}}};
     for (int lin = 0; lin < 2; lin++) {
         Draw3d x1 = {base << 12, TW, TH, TW * 4, L3_XYUV, PRIM_RECTLIST, 3, K3_PSTEX, &xr[lin][0][0], 0, 0,
-                     xbase << 12, XW, XW, XW * 4, lin, 0, 0, 0, 0, 0};
+                     xbase << 12, XW, XW, XW * 4, lin, 0, 0, 0, 0, 0, 0};
         if (draw_3d(lin ? "1b. Textur bilinear" : "1b. Textur, naechster Texel", &x1, 1, stat) != 0) {
             rc = -41;
             goto out_ring;
@@ -2393,7 +2467,7 @@ static int test_3d(void)
     igd_clflush(mem, TPAGES * 4096);
     uint32_t tv[3][6];
     tri_screen(tv, 0, 100, 128, 128);
-    Draw3d t1 = {base << 12, TW, TH, TW * 4, L3_XYRGBA, PRIM_TRILIST, 3, K3_PSINT, &tv[0][0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    Draw3d t1 = {base << 12, TW, TH, TW * 4, L3_XYRGBA, PRIM_TRILIST, 3, K3_PSINT, &tv[0][0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (draw_3d("2. Dreieck mit Farbverlauf", &t1, 1, stat) != 0) {
         rc = -33;
         goto out_ring;
@@ -2409,7 +2483,7 @@ static int test_3d(void)
         px[i] = 0x11111111u;
     igd_clflush(mem, TPAGES * 4096);
     load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_pass(kbuf));
-    Draw3d t2 = {base << 12, TW, TH, TW * 4, L3_VS_XYRGBA, PRIM_TRILIST, 3, K3_PSINT, &tv[0][0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    Draw3d t2 = {base << 12, TW, TH, TW * 4, L3_VS_XYRGBA, PRIM_TRILIST, 3, K3_PSINT, &tv[0][0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (draw_3d("2b. Dreieck durch den Vertex-Shader", &t2, 1, stat) != 0) {
         rc = -35;
         goto out_ring;
@@ -2430,7 +2504,7 @@ static int test_3d(void)
     static uint32_t cv[36][7];
     uint32_t front = 0;
     cube_tris(cv, 5, 3, 160, 128, 128, &front);
-    Draw3d c1 = {base << 12, TW, TH, TW * 4, L3_XYZRGBA, PRIM_TRILIST, 36, K3_PSINT, &cv[0][0], dbase << 12, TW * 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    Draw3d c1 = {base << 12, TW, TH, TW * 4, L3_XYZRGBA, PRIM_TRILIST, 36, K3_PSINT, &cv[0][0], dbase << 12, TW * 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (draw_3d("3. Wuerfel mit Tiefentest", &c1, 1, stat) != 0) {
         rc = -36;
         goto out_ring;
@@ -2454,7 +2528,7 @@ static int test_3d(void)
     igd_clflush(mem, 2 * TPAGES * 4096);
     cube_matrix(vm, vl, 5, 3, 160, 128, 128);
     load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_cube(kbuf, vm, vl));
-    Draw3d c2 = {base << 12, TW, TH, TW * 4, L3_VS_CUBE, PRIM_TRILIST, 36, K3_PSINT, &vcube[0][0], dbase << 12, TW * 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    Draw3d c2 = {base << 12, TW, TH, TW * 4, L3_VS_CUBE, PRIM_TRILIST, 36, K3_PSINT, &vcube[0][0], dbase << 12, TW * 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (draw_3d("3b. Wuerfel mit Vertex-Shader", &c2, 1, stat) != 0) {
         rc = -39;
         goto out_ring;
@@ -2476,7 +2550,7 @@ static int test_3d(void)
     load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_tex(kbuf, vm, vl, F_0_35, F_0_65));
     load_kernel(K3_PSTEXC, (const uint32_t (*)[4])kbuf, asm_ps_tex(kbuf, 1));
     Draw3d c3 = {base << 12, TW, TH, TW * 4, L3_VS_TEX, PRIM_TRILIST, 36, K3_PSTEXC, &tcube[0][0], dbase << 12, TW * 4,
-                 (xbase + XPAGES) << 12, XW, XW, XW * 4, 1, 0, 0, 0, 0, 0};
+                 (xbase + XPAGES) << 12, XW, XW, XW * 4, 1, 0, 0, 0, 0, 0, 0};
     if (draw_3d("3c. Wuerfel mit Textur", &c3, 1, stat) != 0) {
         rc = -43;
         goto out_ring;
@@ -2514,9 +2588,9 @@ static int test_3d(void)
         uint32_t rpitch = igd_scr_stride;
         load_kernel(K3_PSCOL, (const uint32_t (*)[4])kbuf, asm_ps_color(kbuf, F_0_2, F_0_2, F_0_2, F_1_0));
         const uint32_t bg[3][4] = {{f32(DW), f32(DW), 0, 0}, {0, f32(DW), 0, 0}, {0, 0, 0, 0}};
-        Draw3d clear = {rt, DW, DW, rpitch, L3_XYUV, PRIM_RECTLIST, 3, K3_PSCOL, &bg[0][0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        Draw3d clear = {rt, DW, DW, rpitch, L3_XYUV, PRIM_RECTLIST, 3, K3_PSCOL, &bg[0][0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
         Draw3d cube = {rt, DW, DW, rpitch, L3_VS_TEX, PRIM_TRILIST, 36, K3_PSTEXC, &tcube[0][0], abase << 12, DW * 4,
-                       (xbase + XPAGES) << 12, XW, XW, XW * 4, 1, 0, 0, 0, 0, 0}; /* die CPU rechnet je Bild nur die Matrix */
+                       (xbase + XPAGES) << 12, XW, XW, XW * 4, 1, 0, 0, 0, 0, 0, 0}; /* die CPU rechnet je Bild nur die Matrix */
         int vbl = igd_vblank_ok();
         uint64_t t0 = time_us();
         for (int f = 0; f < 240 && rc == 0; f++) {
@@ -2611,18 +2685,19 @@ int igd_rcs_draw3d(const IgdDraw3d *g)
         load_kernel(K3_PSINT, (const uint32_t (*)[4])kbuf, asm_ps_interp(kbuf));
         Draw3d cl = {g->rt_gtt, g->w, g->h, g->pitch, L3_XYZRGBA, PRIM_RECTLIST, 3, K3_PSINT, &cv[0][0],
                      (g->flags & IGD_3D_CLEAR_DEPTH) ? g->depth_gtt : 0, g->depth_pitch, 0, 0, 0, 0, 0, g->mocs, 1,
-                     !(g->flags & IGD_3D_CLEAR_COLOR), 0, 0};
+                     !(g->flags & IGD_3D_CLEAR_COLOR), 0, 0, 0};
         rc = run_3d(&cl);
     }
-    if (rc == 0 && g->nvert) {
+    if (rc == 0 && (g->nvert || (g->vb && g->vb->count))) {
         load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_tex(kbuf, g->m, g->l, g->amb, g->dif));
         load_kernel(K3_PSTEXC, (const uint32_t (*)[4])kbuf, asm_ps_tex(kbuf, 1));
-        Draw3d dr = {g->rt_gtt, g->w, g->h, g->pitch, L3_VS_TEX, PRIM_TRILIST, g->nvert, K3_PSTEXC, g->verts,
+        Draw3d dr = {g->rt_gtt, g->w, g->h, g->pitch, g->vb ? L3_VS_VB : L3_VS_TEX, PRIM_TRILIST, g->nvert, K3_PSTEXC,
+                     g->verts,
                      (g->flags & IGD_3D_DEPTH) ? g->depth_gtt : 0, g->depth_pitch, g->tex_gtt, g->tex_w, g->tex_h,
                      g->tex_pitch, (g->flags & IGD_3D_LINEAR) != 0, g->mocs, 0, 0,
                      g->flags & (IGD_3D_CULL_BACK | IGD_3D_CULL_FRONT | IGD_3D_BLEND | IGD_3D_NO_DEPTH_WRITE |
                                  IGD_3D_KEEP_ALPHA),
-                     g->blend};
+                     g->blend, g->vb};
         rc = run_3d(&dr);
     }
     igd_forcewake_put();

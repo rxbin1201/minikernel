@@ -2,7 +2,8 @@
 #include "gl.h"
 
 /* Prueft das kleine OpenGL (gl.c) mit der CPU: Abschneiden an der nahen und fernen Ebene und am Schutzstreifen,
- * Rueckseiten weglassen (glCullFace, glFrontFace), Mischen (glBlendFunc, glDepthMask). Zeichnet bildschirmfuellend (ausserhalb des Desktops) und liest
+ * Rueckseiten weglassen (glCullFace, glFrontFace), Mischen (glBlendFunc, glDepthMask), Puffer und Vertex-Arrays
+ * (glDrawArrays, glDrawElements: dasselbe Bild wie mit glBegin/glEnd). Zeichnet bildschirmfuellend (ausserhalb des Desktops) und liest
  * die Pixel zurueck. Exit-Code 0 = alles in Ordnung, sonst die Nummer der ersten fehlgeschlagenen Pruefung. */
 
 static int failed, checks, W, H;
@@ -51,8 +52,19 @@ static u32 checksum(void)
 }
 
 /* Bild loeschen, Kamera im Ursprung (Blick nach -z), nahe Ebene 1, ferne 10 */
+static void arrays_off(void)
+{
+    glDisableClientState(GL_VERTEX_ARRAY);
+    glDisableClientState(GL_COLOR_ARRAY);
+    glDisableClientState(GL_NORMAL_ARRAY);
+    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+}
+
 static void frame(void)
 {
+    arrays_off();
     glDisable(GL_BLEND);
     glBlendFunc(GL_ONE, GL_ZERO);
     glDepthMask(GL_TRUE);
@@ -93,6 +105,71 @@ static void cube(void)
     }
     glEnd();
     glFinish();
+}
+
+/* derselbe Wuerfel als Arrays: 24 Ecken (Position, Farbe), 36 Indizes wie glBegin(GL_QUADS) sie zerlegt */
+static float kv[24][3], kc[24][4];
+static unsigned short ci16[36];
+static unsigned ci32[36];
+static unsigned char ci8[36];
+
+static void cube_arrays(void)
+{
+    static const float v[8][3] = {{-1, -1, -1}, {1, -1, -1}, {1, 1, -1}, {-1, 1, -1},
+                                  {-1, -1, 1},  {1, -1, 1},  {1, 1, 1},  {-1, 1, 1}};
+    static const int f[6][4] = {{4, 5, 6, 7}, {1, 0, 3, 2}, {5, 1, 2, 6}, {0, 4, 7, 3}, {7, 6, 2, 3}, {0, 1, 5, 4}};
+    static const float col[6][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {1, 1, 0}, {1, 0, 1}, {0, 1, 1}};
+    for (int i = 0; i < 6; i++) {
+        for (int k = 0; k < 4; k++) {
+            memcpy(kv[i * 4 + k], v[f[i][k]], sizeof(kv[0]));
+            memcpy(kc[i * 4 + k], col[i], sizeof(col[0]));
+            kc[i * 4 + k][3] = 1;
+        }
+        static const int q[6] = {0, 1, 2, 0, 2, 3};
+        for (int t = 0; t < 6; t++)
+            ci16[i * 6 + t] = (unsigned short)(i * 4 + q[t]);
+    }
+    for (int i = 0; i < 36; i++) {
+        ci32[i] = ci16[i];
+        ci8[i] = (unsigned char)ci16[i];
+    }
+}
+
+/* gedrehter Wuerfel mit Tiefentest; how: 0 glBegin, 1 Puffer + Indizes (16 Bit), 2 Arrays im Programmspeicher,
+ * 3 Puffer + Indizes (8 Bit, im Programmspeicher), 4 Puffer + Indizes (32 Bit, Puffer) */
+static GLuint vbo[3];
+
+static u32 draw_cube(int how, float dist)
+{
+    frame();
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glTranslatef(0, 0, -dist);
+    glRotatef(30, 1, 1, 0);
+    glRotatef(20, 0, 1, 0);
+    if (how == 0) {
+        cube();
+        return checksum();
+    }
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableClientState(GL_COLOR_ARRAY);
+    if (how == 2) {
+        glVertexPointer(3, GL_FLOAT, 0, kv);
+        glColorPointer(4, GL_FLOAT, 0, kc);
+        glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_SHORT, ci16);
+    } else {
+        glBindBuffer(GL_ARRAY_BUFFER, vbo[0]);
+        glVertexPointer(3, GL_FLOAT, 0, 0);
+        glColorPointer(4, GL_FLOAT, 0, (const void *)sizeof(kv));
+        if (how == 3) {
+            glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_BYTE, ci8);
+        } else {
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, vbo[how == 1 ? 1 : 2]);
+            glDrawElements(GL_TRIANGLES, 36, how == 1 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT, 0);
+        }
+    }
+    glFinish();
+    return checksum();
 }
 
 void _start(void)
@@ -276,6 +353,87 @@ void _start(void)
         tri(bk[0], bk[1], bk[2]);
         check(21 + mask, px(W / 2, H / 2) == (mask ? 0xFF0000u : 0x00FF00u));
     }
+
+    /* 11. Puffer und Vertex-Arrays: jedes Mal genau dasselbe Bild wie mit glBegin/glEnd */
+    cube_arrays();
+    glGenBuffers(3, vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo[0]);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(kv) + sizeof(kc), 0, GL_STATIC_DRAW);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(kv), kv);
+    glBufferSubData(GL_ARRAY_BUFFER, sizeof(kv), sizeof(kc), kc);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, vbo[1]);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(ci16), ci16, GL_STATIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, vbo[2]);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(ci32), ci32, GL_STATIC_DRAW);
+    u32 ref = draw_cube(0, 5);
+    int all = lit() > 1000;
+    for (int how = 1; how <= 4; how++)
+        all &= draw_cube(how, 5) == ref;
+    check(23, all);
+    /* zweimal hintereinander (Zwischenspeicher fuer Indizes und Kasten) und nah dran (Kasten ragt ueber die nahe
+     * Ebene: Dreiecke werden zusammengesetzt und abgeschnitten) */
+    check(24, draw_cube(1, 5) == ref && draw_cube(1, 1.5f) == draw_cube(0, 1.5f));
+    /* hinter der Kamera: nichts */
+    draw_cube(1, -5);
+    check(25, lit() == 0);
+    /* Puffer geaendert: alle Ecken nach (0, 0, 0) - Kasten wird neu berechnet, nichts mehr zu sehen */
+    static float zero[24][3];
+    glBindBuffer(GL_ARRAY_BUFFER, vbo[0]);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(zero), zero);
+    draw_cube(1, 5);
+    int gone = lit() == 0;
+    glBindBuffer(GL_ARRAY_BUFFER, vbo[0]);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(kv), kv);
+    check(26, gone && draw_cube(1, 5) == ref);
+
+    /* 12. Streifen und Faecher mit glDrawArrays wie mit glBegin; Farben als 4 Byte */
+    static const float sv[6][3] = {{-2, -1, -4}, {-2, 1, -4}, {0, -1, -4}, {0, 1, -4}, {2, -1, -4}, {2, 1, -4}};
+    static const unsigned char sc[6][4] = {{255, 0, 0, 255}, {0, 255, 0, 255}, {0, 0, 255, 255},
+                                           {255, 255, 0, 255}, {0, 255, 255, 255}, {255, 0, 255, 255}};
+    static const GLenum modes[2] = {GL_TRIANGLE_STRIP, GL_TRIANGLE_FAN};
+    all = 1;
+    for (int m = 0; m < 2; m++) {
+        frame();
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_FRONT_AND_BACK);
+        glDisable(GL_CULL_FACE);
+        glBegin(modes[m]);
+        for (int i = 0; i < 6; i++) {
+            glColor4ub(sc[i][0], sc[i][1], sc[i][2], sc[i][3]);
+            glVertex3fv(sv[i]);
+        }
+        glEnd();
+        glFinish();
+        u32 a = checksum();
+        int n = lit();
+        frame();
+        glBindBuffer(GL_ARRAY_BUFFER, vbo[0]);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(sv) + sizeof(sc), 0, GL_DYNAMIC_DRAW);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(sv), sv);
+        glBufferSubData(GL_ARRAY_BUFFER, sizeof(sv), sizeof(sc), sc);
+        glEnableClientState(GL_VERTEX_ARRAY);
+        glEnableClientState(GL_COLOR_ARRAY);
+        glVertexPointer(3, GL_FLOAT, 0, 0);
+        glColorPointer(4, GL_UNSIGNED_BYTE, 0, (const void *)sizeof(sv));
+        glDrawArrays(modes[m], 0, 6);
+        glFinish();
+        all &= n > 1000 && checksum() == a;
+    }
+    check(27, all);
+
+    /* 13. Index hinter dem Pufferende: kein Absturz, die Ecke gilt als (0, 0, 0) */
+    static const unsigned short bad[3] = {0, 1, 60000};
+    frame();
+    glBindBuffer(GL_ARRAY_BUFFER, vbo[0]);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(sv), sv, GL_STATIC_DRAW);
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glVertexPointer(3, GL_FLOAT, 0, 0);
+    glTranslatef(0, 0, -1);
+    glDrawElements(GL_TRIANGLES, 3, GL_UNSIGNED_SHORT, bad);
+    glFinish();
+    check(28, 1);
+    glDeleteBuffers(3, vbo);
+    arrays_off();
 
     gl_close();
     printf("gltest: %d Pruefungen, %s\n", checks, failed ? "FEHLER" : "alle in Ordnung");
