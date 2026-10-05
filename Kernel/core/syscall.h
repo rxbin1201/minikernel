@@ -136,6 +136,7 @@ typedef struct {
 #define ERR_NOSPC     (-28)
 #define ERR_ROFS      (-30)
 #define ERR_PIPE      (-32)
+#define ERR_NAMETOOLONG (-36) /* Pfad laenger als VFS_PATH_MAX (1023 Zeichen) */
 #define ERR_NOSYS     (-38)
 #define ERR_NOTEMPTY  (-39)
 #define ERR_NETUNREACH  (-101)

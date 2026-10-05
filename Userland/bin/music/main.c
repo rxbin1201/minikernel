@@ -29,7 +29,7 @@ typedef struct {
     int  scanned; /* Tags und Laenge gelesen */
 } Track;
 
-static char   folder[256] = "/disk";
+static char   folder[PATH_MAX] = "/disk";
 static Track *tracks;
 static int    ntracks, sel = -1, scroll;
 
@@ -193,7 +193,7 @@ static void scan_track(int i)
 {
     Track *t = &tracks[i];
     t->scanned = 1;
-    char p[512];
+    char p[PATH_MAX];
     if (track_path(i, p, sizeof(p)))
         return;
     s64 fd = sys_open(p, O_RDONLY);
@@ -599,7 +599,7 @@ static void start_track(int i, int autoplay)
     stop_file();
     cur = i;
     sel = i;
-    char p[512];
+    char p[PATH_MAX];
     if (i < 0 || i >= ntracks || track_path(i, p, sizeof(p)) || (pfd = (int)sys_open(p, O_RDONLY)) < 0) {
         say("Datei nicht lesbar");
         return;

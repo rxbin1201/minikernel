@@ -181,7 +181,7 @@ int resolve_command(const char *name, char *path, int max)
         }
         return -1;
     }
-    char pathv[256];
+    char pathv[PATH_MAX];
     snprintf(pathv, sizeof(pathv), "%s", var_get("PATH"));
     for (char *d = pathv; d;) {
         char *next = strchr(d, ':');
@@ -216,7 +216,7 @@ static int is_script(const char *path)
 /* Programm starten (im Kindprozess). Kehrt nicht zurueck. */
 static void exec_external(int argc, char **argv)
 {
-    char path[512];
+    char path[PATH_MAX];
     static char cmdline[CMD_MAX]; /* im Kindprozess, kurz vor exec: statisch statt auf dem Stack */
     if (resolve_command(argv[0], path, sizeof(path)) != 0) {
         fprintf(2, "%ssh: %s: Befehl nicht gefunden%s\n", ERRC, argv[0], RSTC);

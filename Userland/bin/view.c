@@ -5,7 +5,7 @@
  *   im selben Ordner, Mausrad zoomt, Ziehen mit der Maus verschiebt, Esc oder q beendet.
  *   Unter dem Desktop im Fenster (Groesse passend zum Bild, aenderbar), sonst im Vollbild. */
 
-static char   dir[256], files[64][128];
+static char   dir[PATH_MAX], files[64][256];
 static int    nfiles, cur;
 static Surface img;
 static char   err[96];

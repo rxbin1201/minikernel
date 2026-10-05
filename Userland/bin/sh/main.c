@@ -75,7 +75,7 @@ void _start(int argc, char **argv)
 
     SB acc = {0}; /* bisher eingegebene Zeilen eines noch unvollstaendigen Befehls (if ... fi ueber mehrere Zeilen) */
     for (;;) {
-        char cwd[128], prompt[200], line[LINE_MAX];
+        char cwd[PATH_MAX], prompt[PATH_MAX + 64], line[LINE_MAX];
         if (!acc.len) {
             reap_jobs();
             if (sys_getcwd(cwd, sizeof(cwd)) < 0)

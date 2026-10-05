@@ -27,7 +27,7 @@ static int   top, left;       /* erste sichtbare Zeile, erste sichtbare Spalte *
 static int   sel;             /* Markierung aktiv: von (ay, ax) bis zum Cursor */
 static int   ay, ax;
 static int   modified, crlf, trailing_nl = 1;
-static char  filename[256];
+static char  filename[PATH_MAX];
 static int   rows = 25, cols = 80, cell_w = 8, cell_h = 16;
 static char  msg[200];
 static int   msg_err;

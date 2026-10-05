@@ -38,7 +38,7 @@ static void visit(const char *path, const char *name, int is_dir, int depth)
         return;
     DirEnt ent;
     for (u64 i = 0; sys_readdir(path, i, &ent) == 0; i++) {
-        char child[512];
+        char child[PATH_MAX];
         join_path(child, sizeof(child), path, ent.name);
         visit(child, ent.name, (int)ent.is_dir, depth + 1);
     }

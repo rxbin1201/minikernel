@@ -3,9 +3,9 @@
 
 /* Prueft, dass die frueheren festen Grenzen weg sind und die neuen Obergrenzen (nur gegen Ausreisser) greifen:
  * offene Deskriptoren (frueher 32, jetzt 1024), Threads (16 -> 1024), gleichzeitige Prozesse (64 -> 4096), der Stack
- * (64 KiB -> waechst bis 8 MiB), Datei-Einblendungen (32 -> 1024), geteilter Speicher (80 -> 1024) und Kommandozeilen
- * (16 Woerter / 512 Byte -> 256 / 4 KiB). Exit-Code 0 = alles in Ordnung, sonst die Nummer der ersten
- * fehlgeschlagenen Pruefung. */
+ * (64 KiB -> waechst bis 8 MiB), Datei-Einblendungen (32 -> 1024), geteilter Speicher (80 -> 1024), Kommandozeilen
+ * (16 Woerter / 512 Byte -> 256 / 4 KiB) und Pfade (128 -> 1023 Zeichen; laengere werden abgelehnt, nicht gekuerzt).
+ * Exit-Code 0 = alles in Ordnung, sonst die Nummer der ersten fehlgeschlagenen Pruefung. */
 
 static int failed, checks;
 
@@ -171,6 +171,57 @@ void _start(int argc, char **argv)
     pid = sys_spawn("/bin/limittest", cmd);
     code = -1;
     check(14, len > 3000 && pid > 0 && sys_wait((int)pid, &code) == 0 && code == 0);
+
+    /* 8. Pfade: vier Ordner mit je 240 Zeichen auf der FAT-Platte (Pfad gut 1000 Zeichen, frueher hoechstens 127) */
+    static char d[4][PATH_MAX], file[PATH_MAX], file2[PATH_MAX], cwd[PATH_MAX], name[241];
+    for (int i = 0; i < 240; i++)
+        name[i] = (char)('a' + i % 26);
+    name[240] = 0;
+    snprintf(d[0], PATH_MAX, "/disk/%s", name);
+    for (int i = 1; i < 4; i++) {
+        name[0] = (char)('0' + i); /* jede Ebene ein anderer Name */
+        snprintf(d[i], PATH_MAX, "%s/%s", d[i - 1], name);
+    }
+    ok = 1;
+    for (int i = 0; i < 4; i++)
+        ok = ok && sys_mkdir(d[i]) == 0;
+    snprintf(file, PATH_MAX, "%s/datei.txt", d[3]);
+    printf("[limittest] Pfad mit %d Zeichen\n", (int)strlen(file));
+    s64 w = ok ? sys_open(file, O_WRONLY | O_CREAT | O_TRUNC) : -1;
+    ok = ok && w >= 0 && sys_write((int)w, "tief", 4) == 4;
+    if (w >= 0)
+        sys_close((int)w);
+    Stat st;
+    check(15, ok && strlen(file) > 900 && sys_stat(file, &st) == 0 && st.size == 4);
+    /* relativ aus dem tiefen Ordner, getcwd liefert den ganzen Pfad, umbenennen, auflisten */
+    char got[8] = "";
+    ok = sys_chdir(d[3]) == 0 && sys_getcwd(cwd, sizeof(cwd)) > 900 && strcmp(cwd, d[3]) == 0;
+    s64 r = ok ? sys_open("datei.txt", O_RDONLY) : -1;
+    ok = ok && r >= 0 && sys_read((int)r, got, 4) == 4 && memcmp(got, "tief", 4) == 0;
+    if (r >= 0)
+        sys_close((int)r);
+    snprintf(file2, PATH_MAX, "%s/neu.txt", d[3]);
+    DirEnt de;
+    ok = ok && sys_rename(file, file2) == 0 && sys_readdir(d[3], 0, &de) == 0 && strcmp(de.name, "neu.txt") == 0;
+    check(16, ok);
+    /* genau an der Grenze: 1023 Zeichen gehen (die Datei gibt es nur nicht), 1024 werden abgelehnt statt gekuerzt */
+    static char edge[PATH_MAX + 8];
+    int l = snprintf(edge, sizeof(edge), "%s/", d[3]);
+    while (l < PATH_MAX - 1)
+        edge[l++] = 'x';
+    edge[l] = 0;
+    check(17, strlen(edge) == PATH_MAX - 1 && sys_stat(edge, &st) == ERR_NOENT);
+    edge[l++] = 'x';
+    edge[l] = 0;
+    check(18, sys_stat(edge, &st) == ERR_NAMETOOLONG && sys_open(edge, O_WRONLY | O_CREAT) == ERR_NAMETOOLONG);
+    /* relativ zu einem langen Arbeitsverzeichnis zu lang: ebenfalls abgelehnt */
+    check(19, sys_open("../../../../../disk/../disk/" "0123456789012345678901234567890123456789", O_RDONLY) == ERR_NOENT &&
+                  sys_stat(edge + strlen(d[3]) - 8, &st) == ERR_NAMETOOLONG);
+    sys_chdir("/disk");
+    sys_unlink(file2);
+    for (int i = 3; i >= 0; i--)
+        sys_unlink(d[i]);
+    check(20, sys_stat(d[0], &st) == ERR_NOENT);
 
     if (!failed)
         printf("[limittest] alle %d Pruefungen OK\n", checks);

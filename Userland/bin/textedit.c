@@ -25,7 +25,7 @@ static int   cy, cx;          /* Cursor: Zeile, Byte in der Zeile */
 static int   ay, ax, sel;     /* Anker der Markierung; sel = 1: von (ay, ax) bis zum Cursor ist markiert */
 static int   top, left;       /* erste sichtbare Zeile und Spalte */
 static int   want_col = -1;   /* Spalte, die Hoch/Runter halten moechte */
-static char  path[256];
+static char  path[PATH_MAX];
 static int   modified, focus = 1;
 static u64   saved_hash;      /* Pruefwert des zuletzt gesicherten/geladenen Textes: Rueckgaengig bis dorthin = unveraendert */
 static char  status[160];

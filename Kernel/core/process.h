@@ -90,7 +90,7 @@ int process_info(unsigned index, ProcInfo *out);
 /* Zugriff auf User-Speicher des aktuellen Prozesses (laufen im Adressraum des Prozesses). */
 int process_user_range_ok(const Process *p, uint64_t ptr, uint64_t len, int write); /* write: loest Copy-on-Write auf */
 int process_cow_fault(Process *p, uint64_t addr); /* Schreibfehler auf einer Copy-on-Write-Seite behoben? (1 = ja) */
-int process_copy_string(const Process *p, uint64_t uptr, char *dst, size_t max); /* Laenge oder -1 */
+int process_copy_string(const Process *p, uint64_t uptr, char *dst, size_t max); /* Laenge; -1 Fehler, -2 zu lang */
 
 /* Pfad aus dem User-Speicher holen und relativ zum Arbeitsverzeichnis zu einem absoluten, normalisierten Pfad machen */
 int  process_path(Process *p, uint64_t upath, char out[VFS_PATH_MAX]);

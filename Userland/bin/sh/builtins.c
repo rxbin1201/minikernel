@@ -231,7 +231,7 @@ int run_builtin(int argc, char **argv)
         return r < 0;
     }
     if (strcmp(name, "pwd") == 0) {
-        char cwd[256];
+        char cwd[PATH_MAX];
         sys_getcwd(cwd, sizeof(cwd));
         printf("%s\n", cwd);
         return 0;
@@ -313,7 +313,7 @@ int run_builtin(int argc, char **argv)
     if (strcmp(name, "type") == 0) {
         int rc = 0;
         for (int i = 1; i < argc; i++) {
-            char path[512];
+            char path[PATH_MAX];
             if (func_find(argv[i]))
                 printf("%s ist eine Funktion\n", argv[i]);
             else if (is_builtin(argv[i]))

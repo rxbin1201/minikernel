@@ -26,10 +26,10 @@ typedef struct {
 #define MAXHIST   16
 #define MAXPLACES 10
 
-static char dir[256] = "/disk";
+static char dir[PATH_MAX] = "/disk";
 static Ent *ents;
 static int  nent, scroll, cur = -1, anchor = -1, focus = 1;
-static char back_hist[MAXHIST][256], fwd_hist[MAXHIST][256];
+static char back_hist[MAXHIST][PATH_MAX], fwd_hist[MAXHIST][PATH_MAX];
 static int  nback, nfwd;
 static char status[200];
 static s64  status_t;
@@ -139,6 +139,7 @@ static const char *errtext(s64 r)
     static char buf[48];
     switch (r) {
     case ERR_ROFS: return "Dieser Ort ist schreibgesch\xC3\xBCtzt";
+    case ERR_NAMETOOLONG: return "Der Pfad ist zu lang (h\xC3\xB6" "chstens 1023 Zeichen)";
     case ERR_EXIST: return "Es gibt schon ein Objekt mit diesem Namen";
     case ERR_NOSPC: return "Kein Platz mehr auf dem Datentr\xC3\xA4ger";
     case ERR_NOTEMPTY: return "Der Ordner ist nicht leer";
@@ -159,7 +160,7 @@ static struct {
     int          tid;
     char        *paths;            /* Pfade, durch 0 getrennt */
     int          n, move;
-    char         target[256];
+    char         target[PATH_MAX];
     volatile int items_done, cancel, finished;
     volatile u64 bytes;            /* bisher kopiert */
     s64          err;
@@ -232,7 +233,7 @@ static s64 copy_tree(const char *src, const char *dst, int depth)
     char (*names)[256];
     int n = list_names(src, &names);
     for (int i = 0; i < n && r == 0; i++) {
-        char a[512], b[512];
+        char a[PATH_MAX], b[PATH_MAX];
         if (join(a, sizeof(a), src, names[i]) || join(b, sizeof(b), dst, names[i]))
             r = ERR_INVAL;
         else
@@ -252,7 +253,7 @@ static s64 delete_tree(const char *p, int depth)
         char (*names)[256];
         int n = list_names(p, &names);
         for (int i = 0; i < n && r == 0; i++) {
-            char a[512];
+            char a[PATH_MAX];
             r = join(a, sizeof(a), p, names[i]) ? ERR_INVAL : delete_tree(a, depth + 1);
         }
         u_free(names);
@@ -279,7 +280,7 @@ static s64 move_path(const char *src, const char *dst)
 /* freier Name im Ordner d: "name", sonst "name Kopie.ext", "name Kopie 2.ext" ... */
 static void unique(const char *d, const char *name, int copy, char *out, size_t max)
 {
-    char p[512];
+    char p[PATH_MAX];
     if (!copy && join(p, sizeof(p), d, name) == 0 && !exists(p)) {
         snprintf(out, max, "%s", name);
         return;
@@ -429,7 +430,7 @@ static void go(const char *p, int remember)
             memmove(back_hist, back_hist + 1, sizeof(back_hist[0]) * (MAXHIST - 1));
             nback--;
         }
-        snprintf(back_hist[nback++], 256, "%s", dir);
+        snprintf(back_hist[nback++], sizeof(back_hist[0]), "%s", dir);
         nfwd = 0;
     }
     snprintf(dir, sizeof(dir), "%s", p);
@@ -446,8 +447,8 @@ static void go_back(void)
 {
     if (!nback)
         return;
-    snprintf(fwd_hist[nfwd < MAXHIST ? nfwd++ : MAXHIST - 1], 256, "%s", dir);
-    char p[256];
+    snprintf(fwd_hist[nfwd < MAXHIST ? nfwd++ : MAXHIST - 1], sizeof(fwd_hist[0]), "%s", dir);
+    char p[PATH_MAX];
     snprintf(p, sizeof(p), "%s", back_hist[--nback]);
     go(p, 0);
 }
@@ -456,8 +457,8 @@ static void go_forward(void)
 {
     if (!nfwd)
         return;
-    snprintf(back_hist[nback < MAXHIST ? nback++ : MAXHIST - 1], 256, "%s", dir);
-    char p[256];
+    snprintf(back_hist[nback < MAXHIST ? nback++ : MAXHIST - 1], sizeof(back_hist[0]), "%s", dir);
+    char p[PATH_MAX];
     snprintf(p, sizeof(p), "%s", fwd_hist[--nfwd]);
     go(p, 0);
 }
@@ -466,7 +467,7 @@ static void go_up(void)
 {
     if (!dir[0] || strcmp(dir, "/") == 0)
         return;
-    char p[256], from[256];
+    char p[PATH_MAX], from[PATH_MAX];
     snprintf(from, sizeof(from), "%s", base_of(dir));
     parent_of(dir, p, sizeof(p));
     go(p, 1);
@@ -487,7 +488,7 @@ static void open_entry(int i)
 {
     if (i < 0 || i >= nent)
         return;
-    char p[512];
+    char p[PATH_MAX];
     if (join(p, sizeof(p), dir, ents[i].name))
         return;
     if (ents[i].is_dir)
@@ -522,13 +523,13 @@ static void clip_put(int cut)
     int n = nsel();
     if (!n)
         return;
-    u64 cap = 16 + (u64)n * 520, len = 0;
+    u64 cap = 16 + (u64)n * (PATH_MAX + 1), len = 0;
     char *t = u_malloc(cap);
     if (cut)
         len += (u64)snprintf(t, cap, "#verschieben\n");
     for (int i = 0; i < nent; i++)
         if (ents[i].sel) {
-            char p[512];
+            char p[PATH_MAX];
             if (join(p, sizeof(p), dir, ents[i].name) == 0)
                 len += (u64)snprintf(t + len, cap - len, "%s\n", p);
         }
@@ -577,7 +578,7 @@ static void *transfer_run(void *arg)
     for (int i = 0; i < job.n && !job.cancel; i++, p += strlen(p) + 1) {
         while (!*p)
             p++;
-        char parent[256], name[256], dst[512];
+        char parent[PATH_MAX], name[256], dst[PATH_MAX];
         parent_of(p, parent, sizeof(parent));
         if (!(job.move && strcmp(parent, job.target) == 0)) { /* sonst liegt es schon dort */
             unique(job.target, base_of(p), !job.move && strcmp(parent, job.target) == 0, name, sizeof(name));
@@ -682,9 +683,9 @@ static void paste(void)
 static char *selected_paths(int *n)
 {
     *n = nsel();
-    char *t = u_malloc((u64)*n * 520 + 1), *p = t;
+    char *t = u_malloc((u64)*n * (PATH_MAX + 8) + 1), *p = t;
     for (int i = 0; i < nent; i++)
-        if (ents[i].sel && join(p, 512, dir, ents[i].name) == 0)
+        if (ents[i].sel && join(p, PATH_MAX, dir, ents[i].name) == 0)
             p += strlen(p) + 1;
     *p = 0;
     return t;
@@ -710,7 +711,7 @@ static void drop_on(const char *target, int copy)
 
 static void new_textfile(void)
 {
-    char name[256], p[512];
+    char name[256], p[PATH_MAX];
     unique(dir, "Neue Datei.txt", 0, name, sizeof(name));
     if (join(p, sizeof(p), dir, name))
         return;
@@ -763,7 +764,7 @@ static void dialog_ok(void)
             i++;
         if (i == nent || !field[0] || strchr(field, '/') || strcmp(field, ents[i].name) == 0)
             return;
-        char a[512], b[512];
+        char a[PATH_MAX], b[PATH_MAX];
         if (join(a, sizeof(a), dir, ents[i].name) || join(b, sizeof(b), dir, field))
             return;
         s64 r = exists(b) && strcasecmp(field, ents[i].name) != 0 ? ERR_EXIST : sys_rename(a, b);
@@ -776,7 +777,7 @@ static void dialog_ok(void)
             if (strcmp(ents[k].name, field) == 0)
                 select_only(k);
     } else if (kind == D_NEWFOLDER) {
-        char p[512];
+        char p[PATH_MAX];
         if (!field[0] || strchr(field, '/') || join(p, sizeof(p), dir, field))
             return;
         s64 r = exists(p) ? ERR_EXIST : sys_mkdir(p);
@@ -837,7 +838,7 @@ static void action(int a)
     case M_NEWFILE: new_textfile(); break;
     case M_OPENTAB:
         if (cur >= 0 && cur < nent && ents[cur].is_dir) {
-            char p[512];
+            char p[PATH_MAX];
             if (!join(p, sizeof(p), dir, ents[cur].name))
                 tab_new(p);
         }
@@ -1081,14 +1082,14 @@ static void big_folder(Surface *s, const char *name, int x, int y, int sz)
 /* ---------- Seitenleiste: Schnellzugriff (Ordner der Platte), Orte mit aufklappbaren Unterordnern ---------- */
 
 typedef struct {
-    char label[48], path[256];
+    char label[48], path[PATH_MAX];
     int  depth, icon, place, open; /* icon: 0 Stern, 1 Ordner, 2.. Ort (2 + Art); place: Index in places oder -1 */
 } Node;
 static Node nodes[64];
 static int  nnodes, qa_open = 1, place_open[MAXPLACES];
 
 /* Ordner der Platte (fuer Schnellzugriff und die grossen Ordner) */
-static char quick[8][256];
+static char quick[8][PATH_MAX];
 static int  nquick;
 
 static void load_quick(void)
@@ -1097,7 +1098,7 @@ static void load_quick(void)
     DirEnt de;
     for (u64 i = 0; nquick < 8 && sys_readdir("/disk", i, &de) == 0; i++)
         if (de.is_dir && de.name[0] != '.')
-            join(quick[nquick++], 256, "/disk", de.name);
+            join(quick[nquick++], sizeof(quick[0]), "/disk", de.name);
 }
 
 static void node_add(const char *label, const char *path, int depth, int icon, int place, int open)
@@ -1128,7 +1129,7 @@ static void build_side(void)
         int n = 0;
         for (u64 i = 0; n < 12 && sys_readdir(places[p].path, i, &de) == 0; i++)
             if (de.is_dir && de.name[0] != '.') {
-                char full[256];
+                char full[PATH_MAX];
                 join(full, sizeof(full), places[p].path, de.name);
                 node_add(de.name, full, 1, 1, -1, 0);
                 n++;
@@ -1151,7 +1152,7 @@ static int side_selected(void) /* Knoten des aktuellen Ordners: genau, sonst der
 /* ---------- Schnellzugriff: alles unter /disk einmal durchsehen (fuer "Zuletzt geaendert" und die Suche) ---------- */
 
 typedef struct {
-    char path[256];
+    char path[PATH_MAX];
     u64  mtime, size;
     int  is_dir;
 } Found;
@@ -1174,7 +1175,7 @@ static void scan(const char *d, int depth)
         f->is_dir = (int)de.is_dir;
         nfound++;
         if (de.is_dir && depth < 3) {
-            char sub[256];
+            char sub[PATH_MAX];
             snprintf(sub, sizeof(sub), "%s", f->path);
             scan(sub, depth + 1);
         }
@@ -1300,8 +1301,8 @@ static void when_str(u64 t, char *out, int max)
 
 #define MAXTABS 8
 typedef struct {
-    char dir[256];
-    char back[MAXHIST][256], fwd[MAXHIST][256];
+    char dir[PATH_MAX];
+    char back[MAXHIST][PATH_MAX], fwd[MAXHIST][PATH_MAX];
     int  nback, nfwd, scroll;
 } Tab;
 static Tab *tabs[MAXTABS];
@@ -1597,16 +1598,16 @@ static void draw_tabs(Surface *s, int W)
 }
 
 /* Pfade der Pfadleiste (beim Zeichnen gemerkt) */
-static char crumb_path[16][256];
+static char crumb_path[16][PATH_MAX];
 static void crumb_paths_set(int i, const char *p)
 {
     if (i >= 0 && i < 16)
-        snprintf(crumb_path[i], 256, "%s", p);
+        snprintf(crumb_path[i], sizeof(crumb_path[0]), "%s", p);
 }
 
 static void draw_crumbs(Surface *s, int x, int y, int w, int h)
 {
-    char seg[16][64], segp[16][256];
+    char seg[16][64], segp[16][PATH_MAX];
     int n = 0;
     if (!dir[0]) {
         snprintf(seg[0], 64, "Schnellzugriff");
@@ -1616,10 +1617,10 @@ static void draw_crumbs(Surface *s, int x, int y, int w, int h)
         int cp = current_place();
         const char *root = cp >= 0 ? places[cp].path : "/";
         snprintf(seg[0], 64, "%s", cp >= 0 ? places[cp].label : "System");
-        snprintf(segp[0], 256, "%s", root);
+        snprintf(segp[0], sizeof(segp[0]), "%s", root);
         n = 1;
         const char *r = dir + strlen(root);
-        char acc[256];
+        char acc[PATH_MAX];
         snprintf(acc, sizeof(acc), "%s", root);
         while (*r && n < 16) {
             while (*r == '/')
@@ -1634,11 +1635,11 @@ static void draw_crumbs(Surface *s, int x, int y, int w, int h)
             }
             name[l] = 0;
             r += l;
-            char next[256];
+            char next[PATH_MAX];
             join(next, sizeof(next), acc, name);
             snprintf(acc, sizeof(acc), "%s", next);
             snprintf(seg[n], 64, "%s", name);
-            snprintf(segp[n], 256, "%s", acc);
+            snprintf(segp[n], sizeof(segp[0]), "%s", acc);
             n++;
         }
     }
@@ -1728,7 +1729,7 @@ static void recent_row(Surface *s, int idx, int kind, const Found *f, int x, int
     const char *name = base_of(f->path);
     int isz = U(30);
     entry_icon(s, name, f->is_dir, x + U(14), y + (rh - isz) / 2, isz);
-    char where[300], parent[256], t[40];
+    char where[PATH_MAX + 64], parent[PATH_MAX], t[40];
     parent_of(f->path, parent, sizeof(parent));
     path_label(parent, where, sizeof(where));
     when_str(f->mtime, t, sizeof(t));
@@ -1891,7 +1892,7 @@ static void draw(void)
     int fy = H - foot_h();
     gfx_fill(s, sw, fy, W - sw, foot_h(), 0xFAFAFC);
     gfx_fill(s, sw, fy, W - sw, 1, 0xE5E5EA);
-    char t[300];
+    char t[PATH_MAX + 100];
     if (job.active) {
         char b[24];
         fmt_size(job.bytes, b, sizeof(b));
@@ -2226,7 +2227,7 @@ static void side_click(int i, int chev)
         place_open[n->place] = 1;
         build_side();
     }
-    char p[256];
+    char p[PATH_MAX];
     snprintf(p, sizeof(p), "%s", n->path);
     go(p, 1);
 }
@@ -2260,7 +2261,7 @@ static void click(Event *e, s64 *last_click, int *last_i)
         case H_FWD: go_forward(); return;
         case H_UP: if (dir[0]) go_up(); return;
         case H_CRUMB: {
-            char p[256];
+            char p[PATH_MAX];
             snprintf(p, sizeof(p), "%s", crumb_path[h->idx]);
             if (strcmp(p, dir) != 0)
                 go(p, 1);
@@ -2273,7 +2274,7 @@ static void click(Event *e, s64 *last_click, int *last_i)
         case H_TILE: {
             const char *p = tile_path(h->idx);
             if (p) {
-                char q[256];
+                char q[PATH_MAX];
                 snprintf(q, sizeof(q), "%s", p);
                 go(q, 1);
             }
@@ -2333,7 +2334,7 @@ static int side_node_at(int px, int py)
 
 void _start(int argc, char **argv)
 {
-    char start[256] = "";
+    char start[PATH_MAX] = "";
     if (argc > 1)
         snprintf(start, sizeof(start), "%s", argv[1]);
     ui_setup(0);
@@ -2454,7 +2455,7 @@ void _start(int argc, char **argv)
                 }
             } else if (e.type == EV_UP) {
                 if (drag_active) {
-                    char target[512] = "";
+                    char target[PATH_MAX] = "";
                     if (drop_row >= 0)
                         join(target, sizeof(target), dir, ents[drop_row].name);
                     else if (drop_place >= 0)

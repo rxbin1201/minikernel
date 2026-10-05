@@ -1083,13 +1083,18 @@ int process_info(unsigned index, ProcInfo *out)
 
 /* ---------- Pfade und Arbeitsverzeichnis ---------- */
 
+/* Die Puffer (3 KiB) liegen auf dem Heap: der Kernel-Stack hat nur 16 KiB, und der Aufrufer haelt meist schon ein
+ * oder zwei Pfade darauf */
 int process_path(Process *p, uint64_t upath, char out[VFS_PATH_MAX])
 {
-    char raw[VFS_PATH_MAX];
-    if (process_copy_string(p, upath, raw, sizeof(raw)) < 0)
-        return ERR_FAULT;
-
-    char joined[2 * VFS_PATH_MAX];
+    char *raw = kmalloc(3 * VFS_PATH_MAX), *joined = raw + VFS_PATH_MAX;
+    if (!raw)
+        return ERR_NOMEM;
+    int r = process_copy_string(p, upath, raw, VFS_PATH_MAX);
+    if (r < 0) {
+        kfree(raw);
+        return r == -2 ? ERR_NAMETOOLONG : ERR_FAULT;
+    }
     size_t n = 0;
     if (raw[0] != '/') { /* relativ: Arbeitsverzeichnis voranstellen */
         size_t c = strlen(p->cwd);
@@ -1097,10 +1102,10 @@ int process_path(Process *p, uint64_t upath, char out[VFS_PATH_MAX])
         n = c;
         joined[n++] = '/';
     }
-    size_t r = strlen(raw);
-    memcpy(joined + n, raw, r + 1);
-    vfs_normalize(joined, out, VFS_PATH_MAX);
-    return 0;
+    memcpy(joined + n, raw, (size_t)r + 1);
+    r = vfs_normalize(joined, out, VFS_PATH_MAX) == 0 ? 0 : ERR_NAMETOOLONG;
+    kfree(raw);
+    return r;
 }
 
 int process_chdir(Process *p, const char *abs_path)
@@ -1159,7 +1164,7 @@ int process_copy_string(const Process *p, uint64_t uptr, char *dst, size_t max)
         if (!dst[i])
             return (int)i;
     }
-    return -1; /* zu lang */
+    return -2; /* zu lang */
 }
 
 /* ---------- Ausblenden bei mehreren Threads ----------

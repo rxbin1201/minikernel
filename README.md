@@ -114,10 +114,14 @@ gibt es nur noch gegen Ausreisser - ein Programm, das endlos Dateien oeffnet, so
 | Kommandozeile | 16 Woerter, 512 Byte | 256 Woerter, 4 KiB (Shell: Eingabezeile 2048 Zeichen) |
 | Pipe in der Shell / Hintergrund-Jobs | 16 / 8 | 64 / 64 |
 | Kernel-Threads im System | 4096 | 65536 |
+| Pfadlaenge | 127 Zeichen (laengere still gekuerzt) | 1023 Zeichen, laengere: `ERR_NAMETOOLONG` |
 
 Prozess-Eintraege und Thread-Bloecke werden nie freigegeben, sondern wiederverwendet: so koennen Interrupts (Strg+C)
-die Listen ohne BKL durchgehen. Selbsttest: `limittest` (14 Pruefungen, u.a. genau 1024 offene Dateien und Threads,
-100 Prozesse gleichzeitig, 4 MiB Stack).
+die Listen ohne BKL durchgehen. Pfade: `VFS_PATH_MAX` (Kernel) und `PATH_MAX` (Userland, `user.h`) sind 1024; die
+initrd speichert ihre Knoten weiter mit 256 Zeichen (mehr kann tar nicht). Frueher liess `vfs_normalize` zu lange
+Teile stillschweigend weg - ein zu langer Pfad konnte so auf eine andere Datei zeigen. Selbsttest: `limittest`
+(20 Pruefungen, u.a. genau 1024 offene Dateien und Threads, 100 Prozesse gleichzeitig, 4 MiB Stack, ein Pfad mit gut
+1000 Zeichen auf FAT, 1023 Zeichen erlaubt, 1024 abgelehnt).
 
 ### fork mit Copy-on-Write
 

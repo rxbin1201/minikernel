@@ -20,7 +20,7 @@ static const int sizes[4] = {1, 3, 7, 15};
 static Surface canvas, undo;
 static int     tool = T_PEN, size_i = 1, filled;
 static u32     color = 0x000000, back = 0xFFFFFF;
-static char    path[256] = "/disk/BILD.BMP";
+static char    path[PATH_MAX] = "/disk/BILD.BMP";
 static char    msg[120];
 static int     modified, quit_armed;
 static int     W, H;

@@ -8,10 +8,12 @@ static unsigned node_count;
 static VfsNode  root_node = {"/", 1, 0, 0};
 
 /* Normalisiert `in` zu "/a/b": ohne "./", ohne doppelte und abschliessende '/', ".." nimmt die letzte Komponente
- * weg (an der Wurzel bleibt es die Wurzel). Leerer Pfad -> "/". */
-void vfs_normalize(const char *in, char *out, size_t max)
+ * weg (an der Wurzel bleibt es die Wurzel). Leerer Pfad -> "/". Zu lang: -1 (frueher fiel die Komponente
+ * stillschweigend weg - ein zu langer Pfad konnte so auf eine ganz andere Datei zeigen). */
+int vfs_normalize(const char *in, char *out, size_t max)
 {
     size_t n = 0;
+    int too_long = 0;
     while (*in) {
         while (*in == '/')
             in++;
@@ -34,11 +36,14 @@ void vfs_normalize(const char *in, char *out, size_t max)
             out[n++] = '/';
             memcpy(out + n, start, len);
             n += len;
+        } else {
+            too_long = 1;
         }
     }
     if (n == 0)
         out[n++] = '/';
     out[n] = 0;
+    return too_long ? -1 : 0;
 }
 
 #define normalize vfs_normalize
@@ -64,7 +69,7 @@ static unsigned scan(const uint8_t *tar, uint64_t size, VfsNode *out)
         char type = h[156];
 
         /* Name = prefix + "/" + name (ustar) */
-        char full[VFS_PATH_MAX * 2];
+        char full[VFS_NODE_PATH * 2];
         size_t n = 0;
         if (memcmp(h + 257, "ustar", 5) == 0 && h[345]) {
             for (int i = 0; i < 155 && h[345 + i] && n < sizeof(full) - 2; i++)
@@ -75,12 +80,12 @@ static unsigned scan(const uint8_t *tar, uint64_t size, VfsNode *out)
             full[n++] = h[i];
         full[n] = 0;
 
-        char path[VFS_PATH_MAX];
-        normalize(full, path, sizeof(path));
+        char path[VFS_NODE_PATH];
+        int fits = normalize(full, path, sizeof(path)) == 0;
 
         int is_dir = type == '5';
         int is_file = type == '0' || type == 0;
-        if ((is_dir || is_file) && !(path[0] == '/' && path[1] == 0)) {
+        if (fits && (is_dir || is_file) && !(path[0] == '/' && path[1] == 0)) {
             if (out) {
                 VfsNode *node = &out[count];
                 memcpy(node->path, path, strlen(path) + 1);
@@ -114,8 +119,9 @@ int vfs_count(void)
 
 const VfsNode *vfs_lookup(const char *path)
 {
-    char norm[VFS_PATH_MAX];
-    normalize(path, norm, sizeof(norm));
+    char norm[VFS_NODE_PATH];
+    if (normalize(path, norm, sizeof(norm)) != 0)
+        return 0; /* laenger als jeder Pfad in der initrd */
     if (norm[0] == '/' && norm[1] == 0)
         return &root_node;
     for (unsigned i = 0; i < node_count; i++)
@@ -135,8 +141,9 @@ const char *vfs_basename(const char *path)
 
 const VfsNode *vfs_readdir(const char *dir, unsigned index)
 {
-    char norm[VFS_PATH_MAX];
-    normalize(dir, norm, sizeof(norm));
+    char norm[VFS_NODE_PATH];
+    if (normalize(dir, norm, sizeof(norm)) != 0)
+        return 0;
     size_t dlen = strlen(norm);
     if (dlen == 1)
         dlen = 0; /* Wurzel: Praefix ist leer, Kinder beginnen direkt mit '/' */
