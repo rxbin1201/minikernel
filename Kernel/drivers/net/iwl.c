@@ -334,6 +334,7 @@ typedef struct __attribute__((packed)) {
     uint16_t mac_id, version, size, reserved;
 } CtxtVersion;
 
+/* Layout wie struct iwl_context_info in Linux (iwl-context-info.h) */
 typedef struct {
     CtxtVersion version;
     uint32_t    control_flags, control_reserved;
@@ -344,20 +345,19 @@ typedef struct {
     uint32_t    reserved1[4];
     uint64_t    core_dump_addr;
     uint32_t    core_dump_size, dump_reserved;
-    uint32_t    reserved2[4];
-    uint64_t    pnvm_addr;
-    uint32_t    pnvm_size, pnvm_reserved;
-    uint32_t    reserved3[16];
     uint64_t    early_debug_addr;
     uint32_t    early_debug_size, edbg_reserved;
-    uint32_t    reserved4[16];
+    uint64_t    pnvm_addr;
+    uint32_t    pnvm_size, pnvm_reserved;
+    uint32_t    reserved2[16];
     uint64_t    umac_img[64], lmac_img[64], virtual_img[64];
-    uint32_t    reserved5[16];
+    uint32_t    reserved3[16];
 } CtxtInfo;
 _Static_assert(__builtin_offsetof(CtxtInfo, free_rbd_addr) == 24, "Context Info: Empfang");
 _Static_assert(__builtin_offsetof(CtxtInfo, cmd_queue_addr) == 48, "Context Info: Befehle");
-_Static_assert(__builtin_offsetof(CtxtInfo, umac_img) == 272, "Context Info: Abschnitte");
-_Static_assert(sizeof(CtxtInfo) == 1872, "Context Info: Groesse");
+_Static_assert(__builtin_offsetof(CtxtInfo, core_dump_addr) == 80, "Context Info: Speicherauszug");
+_Static_assert(__builtin_offsetof(CtxtInfo, umac_img) == 192, "Context Info: Abschnitte");
+_Static_assert(sizeof(CtxtInfo) == 1792, "Context Info: Groesse");
 
 #define CTXT_TFD_FORMAT_LONG (1u << 8)
 #define CTXT_RB_CB_SIZE_POS  4
@@ -531,26 +531,27 @@ int iwl_load_fw(void)
     ci->cmd_queue_size = (uint8_t)(ilog2(CMD_RING) - 3);
 
     iommu_check();
-    info.ltr_before = rd(CSR_LTR_LONG_VAL_AD);
-    wr(CSR_LTR_LONG_VAL_AD, LTR_250US);
-    info.ltr_after = rd(CSR_LTR_LONG_VAL_AD);
-    kprintf("iwl: LTR %#x -> %#x\n", info.ltr_before, info.ltr_after);
 
     /* Status-Bits der Karte loeschen (1 schreiben), um danach zu sehen, ob ihre DMA-Zugriffe abgewiesen wurden */
     pci_write32(&pdev, 0x04, (pci_read32(&pdev, 0x04) & 0xFFFF) | 0xF9000000u);
 
-    /* Adresse uebergeben, freie Puffer melden, starten */
+    /* Start wie bei Linux (iwl_trans_pcie_gen2_start_fw): Handshake-Bits loeschen, Schattenregister, Adresse der
+     * Context Info, LTR, dann den inneren Prozessor starten. Die freien Empfangspuffer meldet Linux erst, wenn sich
+     * die Firmware per Interrupt meldet - den Empfang richtet sie selbst ein */
     wr(CSR_UCODE_DRV_GP1_CLR, GP1_SW_RFKILL | GP1_CMD_BLOCKED);
-    wr(CSR_MAC_SHADOW_REG_CTRL, rd(CSR_MAC_SHADOW_REG_CTRL) | 0x800FFFFFu);
     wr(CSR_INT, 0xFFFFFFFFu);
     wr(CSR_FH_INT_STATUS, 0xFFFFFFFFu);
+    wr(CSR_MAC_SHADOW_REG_CTRL, rd(CSR_MAC_SHADOW_REG_CTRL) | 0x800FFFFFu);
     wr(CSR_CTXT_INFO_BA, (uint32_t)(uint64_t)ci);
     wr(CSR_CTXT_INFO_BA + 4, (uint32_t)((uint64_t)ci >> 32));
+    info.ltr_before = rd(CSR_LTR_LONG_VAL_AD);
+    wr(CSR_LTR_LONG_VAL_AD, LTR_250US);
+    info.ltr_after = rd(CSR_LTR_LONG_VAL_AD);
+    kprintf("iwl: LTR %#x -> %#x\n", info.ltr_before, info.ltr_after);
     wr(CSR_GP_CNTRL, rd(CSR_GP_CNTRL) | GP_MAC_ACCESS_REQ);
     int access = WAIT_UNTIL((rd(CSR_GP_CNTRL) & (GP_MAC_CLOCK_READY | GP_GOING_TO_SLEEP)) == GP_MAC_CLOCK_READY, 25);
     enable_wfpm(); /* sicherheitshalber noch einmal: der Startbefehl ist ein Peripherie-Register */
     uint32_t pc_before = prph_rd(UREG_UMAC_CURRENT_PC), init_before = prph_rd(UREG_CPU_INIT_RUN);
-    wr(RFH_Q0_FRBDCB_WIDX_TRG, RX_RING & ~7u);
     prph_write(UREG_CPU_INIT_RUN, 1);
     /* gleich danach: kam alles an, und bewegt sich das ROM? (PC in schneller Folge, 50 ms lang) */
     uint32_t init_after = prph_rd(UREG_CPU_INIT_RUN), ba_lo = rd(CSR_CTXT_INFO_BA), ba_hi = rd(CSR_CTXT_INFO_BA + 4);
@@ -569,19 +570,29 @@ int iwl_load_fw(void)
     kprintf("iwl:   PC UMAC vorher %#x, danach alle 5 ms: %#x %#x %#x %#x %#x %#x %#x %#x %#x %#x\n", pc_before, pcs[0], pcs[1],
             pcs[2], pcs[3], pcs[4], pcs[5], pcs[6], pcs[7], pcs[8], pcs[9]);
 
-    /* auf ALIVE warten: der Status zaehlt die gefuellten Empfangspuffer. Alle 250 ms ins Log, was die Karte tut */
+    /* auf ALIVE warten: der Status zaehlt die gefuellten Empfangspuffer. Alle 250 ms ins Log, was die Karte tut.
+     * Beim ersten Interrupt (sonst nach 500 ms) die freien Puffer melden: Schreibzeiger auf ein Vielfaches von 8,
+     * hoechstens Ringgroesse - 8 (64 waere wieder 0 = Ring leer) */
     uint64_t t0 = time_us(), next_dump = 0;
     uint32_t last_int = 0;
+    int stocked = 0;
     while (time_us() - t0 < 2000000) {
+        uint32_t ms = (uint32_t)((time_us() - t0) / 1000);
         if (time_us() - t0 >= next_dump) {
             next_dump += 250000;
-            fw_state((uint32_t)((time_us() - t0) / 1000));
+            fw_state(ms);
         }
-        uint32_t ci_int = rd(CSR_INT);
+        uint32_t ci_int = rd(CSR_INT), fh_int = rd(CSR_FH_INT_STATUS);
         if (ci_int != last_int) {
-            kprintf("iwl:   nach %u ms: CSR_INT %#x, FH_INT %#x, Status %u\n", (uint32_t)((time_us() - t0) / 1000), ci_int,
-                    rd(CSR_FH_INT_STATUS), *(volatile uint16_t *)status);
+            kprintf("iwl:   nach %u ms: CSR_INT %#x, FH_INT %#x, Status %u\n", ms, ci_int, fh_int,
+                    *(volatile uint16_t *)status);
             last_int = ci_int;
+        }
+        if (!stocked && (ci_int || fh_int || ms >= 500)) {
+            wr(RFH_Q0_FRBDCB_WIDX_TRG, (RX_RING - 1) & ~7u);
+            stocked = 1;
+            kprintf("iwl:   nach %u ms: %u freie Empfangspuffer gemeldet (%s)\n", ms, (RX_RING - 1) & ~7u,
+                    ci_int || fh_int ? "nach Interrupt" : "ohne Interrupt");
         }
         if (*(volatile uint16_t *)status) {
             info.load_alive = 1;
