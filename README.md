@@ -94,6 +94,10 @@ thread_join(t, &ergebnis);               // wartet aufs Ende und gibt den Stack 
 
 `ps` zeigt die Threads je Prozess (Spalte THR). Der Selbsttest `threadtest` prueft das alles (22 Pruefungen).
 
+Threads nutzen: `gl.c` (die CPU zeichnet mit einem Thread je CPU, hoechstens 4, jeder nimmt jede n-te Bildzeile -
+`gldemo -cpu` in QEMU etwa 2,7-mal schneller) und `files` (Kopieren und Verschieben laufen im Hintergrund, die
+Fusszeile zeigt den Fortschritt, Esc bricht ab).
+
 ### fork mit Copy-on-Write
 
 `fork` kopiert die Seiten nicht mehr, sondern blendet dieselben Frames im Kind ein und macht beschreibbare Seiten in
@@ -110,7 +114,8 @@ anderen CPUs ihren TLB leeren. Selbsttest: `cowtest` (11 Pruefungen).
 ### Dateien einblenden (mmap auf Dateien)
 
 `sys_mmap_file(fd, laenge, offset, schreibbar)` blendet eine Datei in den Speicher ein: das Programm greift einfach
-ueber einen Zeiger darauf zu, gelesen wird erst, wenn es eine Seite anfasst (Seitenfehler, `process.c: vma_fault`).
+ueber einen Zeiger darauf zu, gelesen wird erst, wenn es eine Seite anfasst (Seitenfehler, `process.c: vma_fault`;
+jeder Fehler laedt bis zu 64 KiB am Stueck, soweit die Seiten noch fehlen).
 So geht das Einblenden auch bei grossen Dateien sofort, und Teile, die nie gebraucht werden, werden nie gelesen:
 
 ```c
@@ -123,11 +128,14 @@ sys_munmap((void *)d, groesse);
 
 - **Privat:** mit `schreibbar` darf das Programm hineinschreiben, die Datei bleibt unveraendert (wie `MAP_PRIVATE`).
   Nur lesbare Einblendungen beenden das Programm beim Schreiben. Hinter dem Dateiende stehen Nullen.
+- Genutzt von `play` und `music` (MP3: der Decoder liest direkt aus der Datei, ohne Puffer und Umkopieren; `play`
+  gibt Gespieltes wieder frei), den Schriften (`ttf.c`: nur gebrauchte Tabellen und Zeichen kommen in den Speicher)
+  und `bmp_load` (`view`, `paint`).
 - Bis zu 32 Einblendungen je Prozess; jede hat ihre eigene Dateiposition (der Deskriptor darf geschlossen werden).
   `munmap` nimmt auch Teile heraus, `fork` vererbt sie (das Kind laedt fehlende Seiten selbst), `exec` und das
   Programmende raeumen auf. Liest der Kernel aus einer Einblendung (z.B. `write` aus ihr), laedt
   `process_user_range_ok` die Seiten vorher.
-- In QEMU ohne KVM: einblenden und eine Seite lesen etwa 0,4 ms, dieselbe Datei (2 MiB) ganz lesen etwa 15 ms.
+- In QEMU ohne KVM: einblenden und der erste Zugriff etwa 3 ms, dieselbe Datei (2 MiB) ganz lesen etwa 15 ms.
   Selbsttest: `mmaptest` (23 Pruefungen).
 
 ## Intel-Grafik (Gen9: Skylake bis Comet Lake, z.B. UHD Graphics 630)

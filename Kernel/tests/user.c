@@ -155,6 +155,27 @@ void test_user(BootInfo *info)
           pid > 0 && process_wait(pid, 0, &code, &faulted, 60000) == 0 && code == 0 && !faulted);
     if (pid > 0 && code != 0)
         kprintf("  mmaptest: Pruefung %d fehlgeschlagen\n", code);
+    /* MP3 dekodieren (play liest die eingeblendete Datei): 3 s Stereo, 44,1 kHz, zwei Sinustoene */
+    {
+        void *wav = 0;
+        uint64_t wsize = 0, sum = 0, loud = 0;
+        int ok = run_user("/bin/play", "play -w /disk/TON.WAV /share/ton.mp3", &code, &faulted) == 0 && code == 0 &&
+                 fs_read_file("/disk/TON.WAV", &wav, &wsize) == 0 && wsize > 44;
+        if (ok) {
+            const int16_t *smp = (const int16_t *)((const uint8_t *)wav + 44);
+            uint64_t n = (wsize - 44) / 2;
+            for (uint64_t i = 0; i < n; i++) {
+                sum = sum * 31 + (uint16_t)smp[i];
+                loud += smp[i] > 2000 || smp[i] < -2000; /* ffmpeg-Sinus: Spitze etwa 4096 */
+            }
+            uint64_t frames = n / 2;
+            kprintf("  play -w: %lu Abtastwerte je Kanal, Pruefsumme %#lx\n", (unsigned long)frames, (unsigned long)sum);
+            ok = frames > 3 * 44100 - 3000 && frames < 3 * 44100 + 3000 && loud > n / 4;
+        }
+        kfree(wav);
+        fs_unlink("/disk/TON.WAV");
+        check("play: MP3 in WAV umwandeln (eingeblendete Datei)", ok);
+    }
 
     /* Die Shell: Befehle tippen (Tastatur-Injektion), die Ergebnisse stehen danach als Dateien auf /disk.
      * Prueft Pipes, Umleitungen, Anfuehrungszeichen, relative Pfade, Verlauf (Pfeil hoch) und Ctrl-C. */

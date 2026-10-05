@@ -1255,39 +1255,56 @@ int64_t process_mmap_file(Process *p, int fd, uint64_t len, uint64_t offset, int
     return (int64_t)base;
 }
 
-/* Laedt die Seite bei va aus ihrer Datei. 1 = eingeblendet, 0 = keine Datei-Seite (oder Schreiben auf eine nur
- * lesbare Einblendung), -1 = kein Speicher. Hinter dem Dateiende stehen Nullen. Mit BKL; das Lesen kann schlafen -
- * danach wird nachgesehen, ob die Seite inzwischen ein anderer Thread geladen oder ausgeblendet hat. */
+#define READAHEAD 16 /* Seiten je Seitenfehler (64 KiB am Stueck): weniger Fehler, und das FAT liest vorwaerts */
+
+/* Laedt die Seite bei va aus ihrer Datei, dazu die folgenden noch fehlenden Seiten der Einblendung (bis READAHEAD).
+ * 1 = eingeblendet, 0 = keine Datei-Seite (oder Schreiben auf eine nur lesbare Einblendung), -1 = kein Speicher.
+ * Hinter dem Dateiende stehen Nullen. Mit BKL; das Lesen kann schlafen - danach wird nachgesehen, ob Seiten
+ * inzwischen ein anderer Thread geladen oder ausgeblendet hat. */
 static int vma_fault(Process *p, uint64_t va, int write)
 {
     va &= ~(PAGE - 1);
     Vma *v = vma_find(p, va);
     if (!v || (write && !v->writable))
         return 0;
-    uint64_t frame = pmm_alloc_frame();
-    if (!frame)
+    uint64_t frames[READAHEAD];
+    int n = 0;
+    for (; n < READAHEAD && va + (uint64_t)n * PAGE < v->end; n++) {
+        if (n && as_translate(p->as, va + (uint64_t)n * PAGE, 0, 0))
+            break; /* schon da: hier endet das Stueck */
+        if (!(frames[n] = pmm_alloc_frame()))
+            break;
+        memset((void *)frames[n], 0, PAGE);
+    }
+    if (!n)
         return -1;
-    memset((void *)frame, 0, PAGE);
     FsFile f = v->file; /* Kopie: ein anderer Thread koennte waehrenddessen dieselbe Datei lesen */
     uint64_t off = v->offset + (va - v->start);
     if (fs_seek(&f, (int64_t)off, 0) == (int64_t)off) /* hinter dem Ende geht seek nicht: dann Nullen */
-        for (uint64_t got = 0; got < PAGE;) {
-            int64_t n = fs_read(&f, (uint8_t *)frame + got, PAGE - got);
-            if (n <= 0)
-                break;
-            got += (uint64_t)n;
+        for (int k = 0; k < n; k++) {
+            uint64_t got = 0;
+            while (got < PAGE) {
+                int64_t r = fs_read(&f, (uint8_t *)frames[k] + got, PAGE - got);
+                if (r <= 0)
+                    break;
+                got += (uint64_t)r;
+            }
+            if (got < PAGE)
+                break; /* Dateiende: der Rest bleibt Nullen */
         }
     v = vma_find(p, va); /* waehrend des Lesens ausgeblendet? */
-    if (!v || as_translate(p->as, va, 0, 0)) {
-        pmm_free_frame(frame);
-        return v ? 1 : 0;
+    if (v)
+        v->file = f; /* behaelt den Cluster-Cache: der naechste Zugriff dahinter muss die Kette nicht von vorn ablaufen */
+    int ok = 0;
+    for (int k = 0; k < n; k++) {
+        uint64_t a = va + (uint64_t)k * PAGE;
+        if (!v || a >= v->end || as_translate(p->as, a, 0, 0) ||
+            as_map(p->as, a, frames[k], PAGE_USER | PAGE_NX | (v->writable ? PAGE_WRITE : 0)) != 0)
+            pmm_free_frame(frames[k]);
+        if (k == 0)
+            ok = v && as_translate(p->as, va, 0, 0);
     }
-    v->file = f; /* behaelt den Cluster-Cache: der naechste Zugriff dahinter muss die Kette nicht von vorn ablaufen */
-    if (as_map(p->as, va, frame, PAGE_USER | PAGE_NX | (v->writable ? PAGE_WRITE : 0)) != 0) {
-        pmm_free_frame(frame);
-        return -1;
-    }
-    return 1;
+    return ok ? 1 : (v ? -1 : 0);
 }
 
 int process_file_fault(Process *p, uint64_t addr, int write)

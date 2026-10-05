@@ -1,6 +1,7 @@
 #include "gl.h"
 #include "gfx.h"
 #include "malloc.h"
+#include "thread.h"
 #include "user.h"
 
 /* Kleines OpenGL (siehe gl.h). Die Bibliothek sammelt Dreiecke mit gleichem Zustand (Matrix, Licht, Textur, Tiefentest)
@@ -9,7 +10,11 @@
  * Farbe und Textur perspektivisch richtig interpoliert, Tiefe "kleiner").
  *
  * Matrizen: Zeile fuer Zeile (m[zeile * 4 + spalte]), wirken auf Spaltenvektoren - wie OpenGL, das sie spaltenweise
- * speichert. Die fertige Matrix ist Bildbereich * Projektion * Modell: sie bringt eine Ecke direkt auf Pixel. */
+ * speichert. Die fertige Matrix ist Bildbereich * Projektion * Modell: sie bringt eine Ecke direkt auf Pixel.
+ *
+ * Die CPU zeichnet mit mehreren Threads (einer je CPU, hoechstens 4): jeder rastert alle Dreiecke eines Stapels, aber
+ * nur jede n-te Bildzeile (Zeile y gehoert Thread y mod n - so bekommt jeder gleich viel von jedem Dreieck). Keiner
+ * schreibt dieselben Pixel wie ein anderer, Sperren braucht es nicht. Die Ecken rechnet vorher der aufrufende Thread. */
 
 #define VF    12                /* float je Eckpunkt: x, y, z, u, v, nx, ny, nz, r, g, b, a */
 #define BATCH GPU3D_MAX_VERT
@@ -225,8 +230,8 @@ static void sample(const Tex *t, float u, float v, float *c)
         c[i] = (q[0][i] * (1 - ax) + q[1][i] * ax) * (1 - ay) + (q[2][i] * (1 - ax) + q[3][i] * ax) * ay;
 }
 
-/* s[k]: x, y, z (Bildschirm), 1/W, dann u, v, r, g, b, a jeweils mal 1/W */
-static void raster(float s[3][10], const Tex *t)
+/* s[k]: x, y, z (Bildschirm), 1/W, dann u, v, r, g, b, a jeweils mal 1/W. Nur die Zeilen y mit y % step == first. */
+static void raster(float s[3][10], const Tex *t, int first, int step)
 {
     float x0 = s[0][0], y0 = s[0][1], x1 = s[1][0], y1 = s[1][1], x2 = s[2][0], y2 = s[2][1];
     float area = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
@@ -242,7 +247,8 @@ static void raster(float s[3][10], const Tex *t)
         return;
     int ax = lo_x < 0 ? 0 : floori(lo_x), bx = hi_x > (float)(G.w - 1) ? G.w - 1 : floori(hi_x);
     int ay = lo_y < 0 ? 0 : floori(lo_y), by = hi_y > (float)(G.h - 1) ? G.h - 1 : floori(hi_y);
-    for (int y = ay; y <= by; y++) {
+    ay += ((first - ay) % step + step) % step; /* erste eigene Zeile */
+    for (int y = ay; y <= by; y += step) {
         float py = (float)y + 0.5f;
         for (int x = ax; x <= bx; x++) {
             float px = (float)x + 0.5f;
@@ -269,12 +275,95 @@ static void raster(float s[3][10], const Tex *t)
     }
 }
 
+/* ---------- Mehrere Threads ---------- */
+
+#define MAX_WORKERS 4
+
+static float      tris[BATCH / 3][3][10]; /* fertig umgerechnete Dreiecke des Stapels */
+static int        ntris;
+static const Tex *job_tex;
+static int        job_clear;              /* 0 = Dreiecke rastern, sonst Loeschen: Bit 0 Farbe, Bit 1 Tiefe */
+static int        nbands = 1;             /* Streifen = Threads (der aufrufende eingeschlossen) */
+static volatile u32 job_gen, job_left;    /* Futex: neuer Auftrag, Streifen noch in Arbeit */
+static int        workers_tried;
+
+static void band_rows(int b, int *y0, int *y1)
+{
+    *y0 = G.h * b / nbands;
+    *y1 = G.h * (b + 1) / nbands;
+}
+
+static void do_band(int b)
+{
+    int y0, y1;
+    band_rows(b, &y0, &y1);
+    if (job_clear) {
+        for (u64 i = (u64)y0 * (u64)G.w; i < (u64)y1 * (u64)G.w; i++) {
+            if (job_clear & 1)
+                G.px[i] = G.clear_color;
+            if (job_clear & 2)
+                G.zb[i] = G.clear_depth;
+        }
+        return;
+    }
+    for (int i = 0; i < ntris; i++)
+        raster(tris[i], job_tex, b, nbands);
+}
+
+static void *worker(void *arg)
+{
+    int b = (int)(u64)arg;
+    u32 seen = 0;
+    for (;;) {
+        u32 g;
+        while ((g = __atomic_load_n(&job_gen, __ATOMIC_ACQUIRE)) == seen)
+            sys_futex_wait(&job_gen, seen, 0);
+        seen = g;
+        do_band(b);
+        if (__atomic_sub_fetch(&job_left, 1, __ATOMIC_ACQ_REL) == 0)
+            sys_futex_wake(&job_left, 1);
+    }
+    return 0;
+}
+
+/* Beim ersten Zeichnen auf der CPU: je weitere CPU ein Thread (bis 4 Streifen) */
+static void start_workers(void)
+{
+    workers_tried = 1;
+    CpuInfo ci;
+    int cpus = 0;
+    while (cpus < 16 && sys_cpuinfo((u64)cpus, &ci) == 0)
+        cpus++;
+    int want = cpus < MAX_WORKERS ? cpus : MAX_WORKERS;
+    int n = 1;
+    while (n < want && thread_create(worker, (void *)(u64)n) > 0)
+        n++;
+    nbands = n;
+}
+
+/* Auftrag auf alle Streifen verteilen; der aufrufende Thread nimmt Streifen 0 und wartet auf die anderen */
+static void run_job(void)
+{
+    if (!workers_tried)
+        start_workers();
+    if (nbands > 1) {
+        __atomic_store_n(&job_left, (u32)(nbands - 1), __ATOMIC_RELEASE);
+        __atomic_add_fetch(&job_gen, 1, __ATOMIC_ACQ_REL);
+        sys_futex_wake(&job_gen, (u32)(nbands - 1));
+    }
+    do_band(0);
+    u32 left;
+    while ((left = __atomic_load_n(&job_left, __ATOMIC_ACQUIRE)) != 0 && nbands > 1)
+        sys_futex_wait(&job_left, left, 0);
+}
+
 static void cpu_draw(void)
 {
     const Tex *t = &tex[G.bs.tex];
     const float *m = G.bs.m;
+    ntris = 0;
     for (int i = 0; i + 2 < G.bn; i += 3) {
-        float s[3][10];
+        float (*s)[10] = tris[ntris];
         int ok = 1;
         for (int k = 0; k < 3; k++) {
             const float *p = G.bv[i + k];
@@ -298,8 +387,13 @@ static void cpu_draw(void)
             s[k][9] = p[11] * iw;
         }
         if (ok)
-            raster(s, t);
+            ntris++;
     }
+    if (!ntris)
+        return;
+    job_tex = t;
+    job_clear = 0;
+    run_job();
 }
 
 /* ---------- Abgeben ---------- */
@@ -512,12 +606,8 @@ void glClear(GLbitfield mask)
             return;
         gpu_off(r == -38 ? "keine 3D-Pipeline" : "die GPU lehnt das Loeschen ab");
     }
-    for (int i = 0; i < G.w * G.h; i++) {
-        if (c)
-            G.px[i] = G.clear_color;
-        if (z)
-            G.zb[i] = G.clear_depth;
-    }
+    job_clear = (c ? 1 : 0) | (z ? 2 : 0);
+    run_job();
 }
 
 void glEnable(GLenum cap)

@@ -46,6 +46,8 @@ struct Font {
 
 Font *font_ui, *font_bold, *font_mono;
 
+/* Die Schrift wird eingeblendet, nicht gelesen: stb_truetype braucht nur ihre Tabellen und die Zeichen, die ein
+ * Programm wirklich zeichnet - nur diese Seiten kommen in den Speicher (sonst je Fensterprogramm die ganzen Dateien) */
 Font *font_load(const char *path)
 {
     Stat st;
@@ -54,15 +56,13 @@ Font *font_load(const char *path)
     s64 fd = sys_open(path, O_RDONLY);
     if (fd < 0)
         return 0;
-    Font *f = u_malloc(sizeof(Font));
-    unsigned char *d = u_malloc(st.size);
-    u64 got = 0;
-    s64 r;
-    while (f && d && got < st.size && (r = sys_read((int)fd, d + got, st.size - got)) > 0)
-        got += (u64)r;
+    s64 m = sys_mmap_file((int)fd, st.size, 0, 0);
     sys_close((int)fd);
-    if (!f || !d || got != st.size || !stbtt_InitFont(&f->info, d, stbtt_GetFontOffsetForIndex(d, 0))) {
-        u_free(d);
+    Font *f = m > 0 ? u_malloc(sizeof(Font)) : 0;
+    unsigned char *d = (unsigned char *)m;
+    if (!f || !stbtt_InitFont(&f->info, d, stbtt_GetFontOffsetForIndex(d, 0))) {
+        if (m > 0)
+            sys_munmap(d, st.size);
         u_free(f);
         return 0;
     }

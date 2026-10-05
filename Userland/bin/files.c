@@ -1,5 +1,6 @@
 #include "gfx.h"
 #include "malloc.h"
+#include "thread.h"
 #include "ui.h"
 
 /* files [ordner]: Dateien verwalten (Fenster mit aenderbarer Groesse).
@@ -151,6 +152,20 @@ static const char *errtext(s64 r)
  * Dateioperationen
  * ------------------------------------------------------------------------------------------------------------------- */
 
+/* Kopieren und Verschieben laufen in einem eigenen Thread (transfer), die Oberflaeche zeigt derweil den Fortschritt
+ * und nimmt Esc zum Abbrechen an. Der Thread fasst nur diese Felder und das Dateisystem an. */
+static struct {
+    int          active;           /* ein Auftrag laeuft (nur der Hauptthread aendert das) */
+    int          tid;
+    char        *paths;            /* Pfade, durch 0 getrennt */
+    int          n, move;
+    char         target[256];
+    volatile int items_done, cancel, finished;
+    volatile u64 bytes;            /* bisher kopiert */
+    s64          err;
+    int          done;             /* erfolgreich uebertragene Objekte */
+} job;
+
 static s64 copy_file(const char *src, const char *dst)
 {
     s64 in = sys_open(src, O_RDONLY);
@@ -163,14 +178,22 @@ static s64 copy_file(const char *src, const char *dst)
     }
     char *buf = u_malloc(65536);
     s64 r, rc = 0;
-    while ((r = sys_read((int)in, buf, 65536)) > 0)
+    while ((r = sys_read((int)in, buf, 65536)) > 0) {
         if ((rc = write_all((int)out, buf, (size_t)r)) != 0)
             break;
+        __atomic_add_fetch(&job.bytes, (u64)r, __ATOMIC_RELAXED);
+        if (job.cancel) { /* Esc: abbrechen */
+            rc = ERR_INTR;
+            break;
+        }
+    }
     if (r < 0)
         rc = r;
     u_free(buf);
     sys_close((int)in);
     sys_close((int)out);
+    if (rc != 0)
+        sys_unlink(dst); /* keine halbe Kopie liegen lassen */
     return rc;
 }
 
@@ -546,38 +569,95 @@ static int clip_paths(char **text, int *cut)
     return count;
 }
 
-/* Dateien/Ordner (Pfade, durch 0 getrennt, n Stueck ab p) nach target: verschieben oder kopieren */
-static void transfer(const char *p, int n, const char *target, int move)
+/* Der Auftrag selbst (im eigenen Thread, ohne Thread nacheinander im Hauptthread) */
+static void *transfer_run(void *arg)
 {
-    busy(move ? "Verschiebe \xE2\x80\xA6" : "Kopiere \xE2\x80\xA6");
-    int done = 0;
-    s64 err = 0;
-    for (int i = 0; i < n; i++, p += strlen(p) + 1) {
+    (void)arg;
+    const char *p = job.paths;
+    for (int i = 0; i < job.n && !job.cancel; i++, p += strlen(p) + 1) {
         while (!*p)
             p++;
         char parent[256], name[256], dst[512];
         parent_of(p, parent, sizeof(parent));
-        if (move && strcmp(parent, target) == 0)
-            continue; /* liegt schon dort */
-        unique(target, base_of(p), !move && strcmp(parent, target) == 0, name, sizeof(name));
-        if (join(dst, sizeof(dst), target, name)) {
-            err = ERR_INVAL;
-            continue;
+        if (!(job.move && strcmp(parent, job.target) == 0)) { /* sonst liegt es schon dort */
+            unique(job.target, base_of(p), !job.move && strcmp(parent, job.target) == 0, name, sizeof(name));
+            s64 r = join(dst, sizeof(dst), job.target, name) ? ERR_INVAL
+                  : job.move ? move_path(p, dst) : copy_tree(p, dst, 0);
+            if (r == 0)
+                job.done++;
+            else
+                job.err = r;
         }
-        s64 r = move ? move_path(p, dst) : copy_tree(p, dst, 0);
-        if (r == 0)
-            done++;
-        else
-            err = r;
+        job.items_done = i + 1;
     }
+    __atomic_store_n(&job.finished, 1, __ATOMIC_RELEASE);
+    return 0;
+}
+
+/* Fertig: Ordner neu laden, Ergebnis melden */
+static void transfer_finish(void)
+{
+    if (job.tid > 0)
+        thread_join(job.tid, 0);
+    job.active = 0;
+    u_free(job.paths);
     load(1);
-    if (err) {
-        say("%s", errtext(err));
+    if (job.cancel) {
+        char m[64];
+        snprintf(m, sizeof(m), "Abgebrochen nach %d %s", job.done, job.done == 1 ? "Objekt" : "Objekten");
+        say("%s", m);
+    } else if (job.err) {
+        say("%s", errtext(job.err));
     } else {
         char m[64];
-        snprintf(m, sizeof(m), "%d %s %s", done, done == 1 ? "Objekt" : "Objekte", move ? "verschoben" : "kopiert");
+        snprintf(m, sizeof(m), "%d %s %s", job.done, job.done == 1 ? "Objekt" : "Objekte", job.move ? "verschoben" : "kopiert");
         say("%s", m);
     }
+}
+
+/* Dateien/Ordner (Pfade, durch 0 getrennt, n Stueck ab p) nach target: verschieben oder kopieren - im Hintergrund */
+static void transfer(const char *p, int n, const char *target, int move)
+{
+    if (job.active) {
+        say("%s", "Es l\xC3\xA4uft schon ein Kopiervorgang (Esc bricht ihn ab)");
+        return;
+    }
+    const char *q = p; /* Liste kopieren: der Aufrufer gibt seine frei */
+    for (int i = 0; i < n; i++, q += strlen(q) + 1)
+        while (!*q)
+            q++;
+    u64 len = (u64)(q - p);
+    char *copy = u_malloc(len + 1);
+    if (!copy) {
+        say("%s", "Kein Speicher");
+        return;
+    }
+    memcpy(copy, p, len);
+    copy[len] = 0;
+    memset(&job, 0, sizeof(job));
+    job.paths = copy;
+    job.n = n;
+    job.move = move;
+    snprintf(job.target, sizeof(job.target), "%s", target);
+    job.active = 1;
+    busy(move ? "Verschiebe \xE2\x80\xA6" : "Kopiere \xE2\x80\xA6");
+    job.tid = thread_create(transfer_run, 0);
+    if (job.tid < 0) { /* kein Thread: dann eben hier und jetzt */
+        transfer_run(0);
+        transfer_finish();
+    }
+}
+
+static void draw(void);
+
+/* Aus der Ereignisschleife: Fortschritt zeigen, am Ende abschliessen */
+static void job_poll(void)
+{
+    if (!job.active)
+        return;
+    if (__atomic_load_n(&job.finished, __ATOMIC_ACQUIRE))
+        transfer_finish();
+    draw();
 }
 
 static void paste(void)
@@ -1812,7 +1892,14 @@ static void draw(void)
     gfx_fill(s, sw, fy, W - sw, foot_h(), 0xFAFAFC);
     gfx_fill(s, sw, fy, W - sw, 1, 0xE5E5EA);
     char t[300];
-    if (status[0] && sys_time_us() - status_t < 6000000) {
+    if (job.active) {
+        char b[24];
+        fmt_size(job.bytes, b, sizeof(b));
+        snprintf(t, sizeof(t), "%s \xE2\x80\xA6  %d von %d  \xC2\xB7  %s  \xC2\xB7  Esc: abbrechen",
+                 job.move ? "Verschiebe" : "Kopiere", job.items_done, job.n, b);
+        int bw = (W - sw) * (job.items_done * 4 + 1) / (job.n * 4 + 1); /* Balken nach erledigten Objekten */
+        gfx_fill(s, sw, fy, bw, 2, 0x0A84FF);
+    } else if (status[0] && sys_time_us() - status_t < 6000000) {
         snprintf(t, sizeof(t), "%s", status);
     } else if (!dir[0]) {
         snprintf(t, sizeof(t), query[0] ? "%d Treffer auf der Platte" : "%d Dateien und Ordner auf der Platte",
@@ -2263,7 +2350,13 @@ void _start(int argc, char **argv)
     int last_i = -1;
     for (;;) {
         Event e;
-        if (!gfx_wait(&e, 500)) {
+        int got = gfx_wait(&e, job.active ? 100 : 500);
+        job_poll(); /* Kopieren im Hintergrund: Fortschritt, Abschluss */
+        if (got && job.active && e.type == EV_KEY && e.key == 0x1B && !dialog && !nmenu) {
+            job.cancel = 1;
+            continue;
+        }
+        if (!got) {
             if (status[0] && sys_time_us() - status_t > 6000000) { /* Meldung ist alt: wieder die Uebersicht */
                 status[0] = 0;
                 draw();

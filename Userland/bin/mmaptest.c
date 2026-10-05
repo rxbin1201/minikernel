@@ -178,7 +178,7 @@ void _start(int argc, char **argv)
     sys_close(pp[0]);
     sys_close(pp[1]);
 
-    /* 11. erst beim Zugriff gelesen: eine Seite anfassen geht viel schneller als die Datei ganz zu lesen */
+    /* 11. erst beim Zugriff gelesen: der erste Zugriff (laedt 64 KiB) geht viel schneller als die Datei ganz zu lesen */
     s64 t0 = sys_time_us();
     s64 one = sys_mmap_file((int)fd, SIZE, 0, 0);
     volatile unsigned char x = ((const unsigned char *)one)[100]; /* erste Seite: ohne die Cluster-Kette abzulaufen */
@@ -194,8 +194,8 @@ void _start(int argc, char **argv)
         got += (u64)n;
     }
     s64 read_us = sys_time_us() - t0;
-    printf("[mmaptest] einblenden + eine Seite: %d us, ganze Datei lesen (2 MiB): %d us\n", (int)map_us, (int)read_us);
-    check(22, one > 0 && got == SIZE && map_us * 4 < read_us);
+    printf("[mmaptest] einblenden + erster Zugriff: %d us, ganze Datei lesen (2 MiB): %d us\n", (int)map_us, (int)read_us);
+    check(22, one > 0 && got == SIZE && map_us * 3 < read_us);
 
     /* 12. Datei aus der initrd (sich selbst): ELF-Kopf */
     s64 self = sys_open("/bin/mmaptest", O_RDONLY);
