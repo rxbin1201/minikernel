@@ -414,48 +414,68 @@ static void run_job(void)
         sys_futex_wait(&job_left, left, 0);
 }
 
-static void cpu_draw(void)
+/* Ecke umrechnen: P = X, Y, Z, W (Zeilen der Matrix mal Ecke); s = x, y, z auf dem Bildschirm, 1/W, dann u, v,
+ * r, g, b, a jeweils mal 1/W (Farbe mal Helligkeit). 0 = hinter der Kamera (W zu klein, s ungueltig) */
+static int project(const float *p, float *s, float *P)
 {
-    const Tex *t = &tex[G.bs.tex];
     const float *m = G.bs.m;
-    ntris = 0;
-    for (int i = 0; i + 2 < G.bn; i += 3) {
-        float (*s)[10] = tris[ntris];
-        int ok = 1;
-        for (int k = 0; k < 3; k++) {
-            const float *p = G.bv[i + k];
-            float P[4];
-            for (int r = 0; r < 4; r++)
-                P[r] = m[r * 4] * p[0] + m[r * 4 + 1] * p[1] + m[r * 4 + 2] * p[2] + m[r * 4 + 3];
-            if (P[3] <= 1e-6f) {
-                ok = 0;
-                break;
-            }
-            float iw = 1.0f / P[3];
-            float br = G.bs.amb + G.bs.dif * sat(p[5] * G.bs.l[0] + p[6] * G.bs.l[1] + p[7] * G.bs.l[2]);
-            s[k][0] = P[0] * iw;
-            s[k][1] = P[1] * iw;
-            s[k][2] = P[2] * iw;
-            s[k][3] = iw;
-            s[k][4] = p[3] * iw;
-            s[k][5] = p[4] * iw;
-            for (int c = 0; c < 3; c++)
-                s[k][6 + c] = p[8 + c] * br * iw;
-            s[k][9] = p[11] * iw;
-        }
-        if (ok && G.bs.cull) { /* Flaeche > 0: auf dem Bildschirm (y nach unten) im Uhrzeigersinn = Rueckseite */
-            float area = (s[1][0] - s[0][0]) * (s[2][1] - s[0][1]) - (s[1][1] - s[0][1]) * (s[2][0] - s[0][0]);
-            if (G.bs.cull & (area > 0 ? GPU3D_CULL_BACK : GPU3D_CULL_FRONT))
-                ok = 0;
-        }
-        if (ok)
-            ntris++;
-    }
+    for (int r = 0; r < 4; r++)
+        P[r] = m[r * 4] * p[0] + m[r * 4 + 1] * p[1] + m[r * 4 + 2] * p[2] + m[r * 4 + 3];
+    if (P[3] <= 1e-6f)
+        return 0;
+    float iw = 1.0f / P[3];
+    float br = G.bs.amb + G.bs.dif * sat(p[5] * G.bs.l[0] + p[6] * G.bs.l[1] + p[7] * G.bs.l[2]);
+    s[0] = P[0] * iw;
+    s[1] = P[1] * iw;
+    s[2] = P[2] * iw;
+    s[3] = iw;
+    s[4] = p[3] * iw;
+    s[5] = p[4] * iw;
+    for (int c = 0; c < 3; c++)
+        s[6 + c] = p[8 + c] * br * iw;
+    s[9] = p[11] * iw;
+    return 1;
+}
+
+/* gesammelte Dreiecke der CPU rastern */
+static void tris_run(void)
+{
     if (!ntris)
         return;
-    job_tex = t;
+    job_tex = &tex[G.bs.tex];
     job_clear = 0;
     run_job();
+    ntris = 0;
+}
+
+/* umgerechnetes Dreieck sammeln (Rueckseiten weg); ist der Stapel voll, wird gerastert */
+static void tris_add(const float *a, const float *b, const float *c)
+{
+    if (G.bs.cull) { /* Flaeche > 0: auf dem Bildschirm (y nach unten) im Uhrzeigersinn = Rueckseite */
+        float area = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+        if (G.bs.cull & (area > 0 ? GPU3D_CULL_BACK : GPU3D_CULL_FRONT))
+            return;
+    }
+    memcpy(tris[ntris][0], a, sizeof(tris[0][0]));
+    memcpy(tris[ntris][1], b, sizeof(tris[0][0]));
+    memcpy(tris[ntris][2], c, sizeof(tris[0][0]));
+    if (++ntris == BATCH / 3)
+        tris_run();
+}
+
+/* Dreiecke in Objektkoordinaten (abgeschnitten) umrechnen und rastern */
+static void emit_cpu(const float *a, const float *b, const float *c)
+{
+    float s[3][10], P[4];
+    if (project(a, s[0], P) && project(b, s[1], P) && project(c, s[2], P))
+        tris_add(s[0], s[1], s[2]);
+}
+
+static void cpu_draw(void)
+{
+    for (int i = 0; i + 2 < G.bn; i += 3)
+        emit_cpu(G.bv[i], G.bv[i + 1], G.bv[i + 2]);
+    tris_run();
 }
 
 /* ---------- Abgeben ---------- */
@@ -565,15 +585,15 @@ static void emit(const float *a, const float *b, const float *c)
     memcpy(G.bv[G.bn++], c, sizeof(G.pv[0]));
 }
 
+/* wohin abgeschnittene Dreiecke gehen: in den Stapel (emit) oder bei glDrawArrays/-Elements auf der CPU gleich
+ * umgerechnet zum Rastern (emit_cpu) */
+static void (*sink)(const float *, const float *, const float *) = emit;
+
 /* Abstaende einer Ecke zu den Ebenen: 0 nah, 1 fern, 2-5 Bildraender (links, rechts, oben, unten), 6-9 dieselben mit
  * Schutzstreifen. >= 0 = innen */
 #define NPLANE 10
-static void plane_dist(const float *p, float *d)
+static void dist_from(const float *P, float *d)
 {
-    const float *m = G.bs.m;
-    float P[4];
-    for (int r = 0; r < 4; r++)
-        P[r] = m[r * 4] * p[0] + m[r * 4 + 1] * p[1] + m[r * 4 + 2] * p[2] + m[r * 4 + 3];
     float w = (float)G.w, h = (float)G.h;
     d[0] = P[2];
     d[1] = P[3] - P[2];
@@ -583,6 +603,29 @@ static void plane_dist(const float *p, float *d)
     d[5] = h * P[3] - P[1];
     for (int i = 0; i < 4; i++)
         d[6 + i] = d[2 + i] + GUARD * P[3];
+}
+
+static void plane_dist(const float *p, float *d)
+{
+    const float *m = G.bs.m;
+    float P[4];
+    for (int r = 0; r < 4; r++)
+        P[r] = m[r * 4] * p[0] + m[r * 4 + 1] * p[1] + m[r * 4 + 2] * p[2] + m[r * 4 + 3];
+    dist_from(P, d);
+}
+
+/* Bit e: ausserhalb von Ebene e. Bits 0-5 (nah, fern, Bildraender): alle drei Ecken draussen = Dreieck weg;
+ * Bits 0, 1, 6-9 (nah, fern, Schutzstreifen): abschneiden */
+#define OUT_REJECT 0x03F
+#define OUT_CLIP   0x3C3
+static unsigned outcode(const float *P)
+{
+    float d[NPLANE];
+    dist_from(P, d);
+    unsigned o = 0;
+    for (int e = 0; e < NPLANE; e++)
+        o |= (unsigned)(d[e] < 0) << e;
+    return o;
 }
 
 /* Vieleck v[0..n) an Ebene k abschneiden (Sutherland-Hodgman), Ergebnis nach o; Anzahl der Ecken */
@@ -624,7 +667,7 @@ static void tri_v(const float *p0, const float *p1, const float *p2)
             clip |= 1 << e;             /* ragt ueber nah, fern oder den Schutzstreifen */
     }
     if (!clip) {
-        emit(p[0], p[1], p[2]);
+        sink(p[0], p[1], p[2]);
         return;
     }
     for (int k = 0; k < 3; k++)
@@ -636,7 +679,7 @@ static void tri_v(const float *p0, const float *p1, const float *p2)
             cur ^= 1;
         }
     for (int i = 2; i < n; i++)
-        emit(v[cur][0], v[cur][i - 1], v[cur][i]);
+        sink(v[cur][0], v[cur][i - 1], v[cur][i]);
 }
 
 static void tri(int a, int b, int c)
@@ -1557,6 +1600,66 @@ static int gpu_draw(GLenum mode, int first, int count, const Buf *ib, u64 ioff, 
     return rc >= 0;
 }
 
+/* CPU: die benutzten Ecken lo..hi einmal umrechnen (bei Indizes gehoert jede Ecke meist zu mehreren Dreiecken),
+ * dann die Dreiecke daraus zusammensetzen; nur die, die abgeschnitten werden muessen, gehen den Weg ueber tri_v */
+static float    (*xs)[10];
+static unsigned *xoc;
+static u32       xcap, xlo;
+
+static void tri_cpu(int a, int b, int c)
+{
+    u32 i[3] = {vidx(a) - xlo, vidx(b) - xlo, vidx(c) - xlo};
+    unsigned oa = xoc[i[0]], ob = xoc[i[1]], oc = xoc[i[2]];
+    if (oa & ob & oc & OUT_REJECT)
+        return;
+    if ((oa | ob | oc) & OUT_CLIP) {
+        float v[3][VF];
+        for (int k = 0; k < 3; k++)
+            fetch(i[k] + xlo, v[k]);
+        tri_v(v[0], v[1], v[2]);
+        return;
+    }
+    tris_add(xs[i[0]], xs[i[1]], xs[i[2]]);
+}
+
+static int cpu_arrays(GLenum mode, int count, u32 lo, u32 hi)
+{
+    u64 n = (u64)hi - lo + 1;
+    if (n > 4 * (u64)count + 64)
+        return 0; /* viele Ecken, die gar nicht benutzt werden */
+    if (n > xcap) {
+        float (*ns)[10] = u_malloc(n * sizeof(xs[0]));
+        unsigned *no = u_malloc(n * sizeof(xoc[0]));
+        if (!ns || !no) {
+            if (ns)
+                u_free(ns);
+            if (no)
+                u_free(no);
+            return 0;
+        }
+        if (xs) {
+            u_free(xs);
+            u_free(xoc);
+        }
+        xs = ns;
+        xoc = no;
+        xcap = (u32)n;
+    }
+    flush(); /* gesammelte Dreiecke zuerst (Reihenfolge) */
+    for (u64 k = 0; k < n; k++) {
+        float v[VF], P[4];
+        fetch(lo + (u32)k, v);
+        project(v, xs[k], P);
+        xoc[k] = outcode(P);
+    }
+    xlo = lo;
+    sink = emit_cpu;
+    prims(mode, count, tri_cpu);
+    sink = emit;
+    tris_run();
+    return 1;
+}
+
 static void draw(GLenum mode, int first, int count, int isz, const GLvoid *indices)
 {
     if (!G.open || count <= 0 || first < 0 || !arr[A_POS].on)
@@ -1576,12 +1679,23 @@ static void draw(GLenum mode, int first, int count, int isz, const GLvoid *indic
         }
     }
     cur_state();
+    u32 lo = (u32)first, hi = (u32)(first + count - 1);
+    if (ibuf) {
+        index_range(ibuf, ioff, count, isz, &lo, &hi);
+    } else if (isz) { /* Indizes im Programmspeicher: jedes Mal durchsehen */
+        D.ib = ib;
+        D.isz = isz;
+        lo = 0xFFFFFFFFu;
+        hi = 0;
+        for (int k = 0; k < count; k++) {
+            u32 v = vidx(k);
+            lo = v < lo ? v : lo;
+            hi = v > hi ? v : hi;
+        }
+    }
     int vis = 2;
     Buf *pb = buf_get(arr[A_POS].buf);
     if (pb && arr[A_POS].buf && (!isz || ibuf)) {
-        u32 lo = (u32)first, hi = (u32)(first + count - 1);
-        if (isz)
-            index_range(ibuf, ioff, count, isz, &lo, &hi);
         float box[6];
         pos_box(pb, &arr[A_POS], lo, hi, box);
         vis = box_test(box);
@@ -1594,6 +1708,8 @@ static void draw(GLenum mode, int first, int count, int isz, const GLvoid *indic
     D.isz = isz;
     D.first = first;
     D.noclip = vis == 1;
+    if (!G.gpu && cpu_arrays(mode, count, lo, hi))
+        return;
     prims(mode, count, tri_idx);
 }
 

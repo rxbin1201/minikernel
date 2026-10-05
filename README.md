@@ -260,6 +260,10 @@ sys_munmap((void *)d, groesse);
   benutzten Ecken (kleinster/groesster Index und Kasten zwischengespeichert, bis sich der Puffer aendert) - ganz
   ausserhalb faellt die Zeichnung weg, ganz innerhalb geht sie direkt an die GPU, sonst (und fuer Ecken im
   Programmspeicher, Vierecke, andere Formate) setzt die Bibliothek die Dreiecke zusammen und schneidet ab.
+  Auf der CPU rechnet `glDrawArrays`/`glDrawElements` jede benutzte Ecke nur einmal um (bei Indizes gehoert sie meist
+  zu mehreren Dreiecken) und merkt sich, ausserhalb welcher Ebenen sie liegt; die Dreiecke entstehen direkt aus den
+  umgerechneten Ecken, nur abzuschneidende gehen ueber `tri_v`. In QEMU: Ringe aus Puffern etwa 25 % schneller als
+  mit `glBegin` (Ecken umrechnen halb so lang).
   `gldemo`: drei Ringe mit je 2304 Dreiecken aus Puffern, `v` wechselt zum Vergleich auf `glBegin`/`glEnd`.
   Selbsttest `gltest` (28 Pruefungen mit der CPU, Puffer und Arrays muessen pixelgenau dasselbe Bild ergeben wie
   `glBegin`/`glEnd`). Noch nicht: Mip-Stufen, Auftraege ohne Warten
