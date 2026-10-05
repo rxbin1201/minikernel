@@ -21,14 +21,19 @@
 #define CSR_GP_CNTRL         0x024
 #define CSR_HW_REV           0x028
 #define CSR_HW_RF_ID         0x09C
+#define CSR_INT_             0x008
 #define PRPH_RADDR           0x448 /* Peripherie-Register lesen: Adresse (24 Bit, mit 3 << 24), dann Wert aus PRPH_RDAT */
 #define PRPH_RDAT            0x450
+#define PRPH_WADDR_          0x444 /* Peripherie-Register schreiben: Adresse, dann Wert nach PRPH_WDAT */
+#define PRPH_WDAT_           0x44C
 /* Bits in CSR_GP_CNTRL */
 #define GP_MAC_CLOCK_READY   (1u << 0)
 #define GP_INIT_DONE         (1u << 2)
 #define GP_MAC_ACCESS_REQ    (1u << 3)
 #define GP_GOING_TO_SLEEP    (1u << 4)
-#define CNVI_AUX_MISC_CHIP   0xA200B0
+#define CNVI_AUX_MISC_CHIP   0xA200B0 /* Kennung des CNVi (liest Linux auch bei der AX200) */
+#define WFPM_CTRL_REG        0xA03030 /* Bit 31 ENABLE_WFPM: erst damit sind die Peripherie-Register erreichbar */
+#define ENABLE_WFPM          (1u << 31)
 #define CSR_RESET            0x020
 #define RESET_SW             (1u << 7)
 /* Bits in CSR_HW_IF_CONFIG_REG */
@@ -67,6 +72,26 @@ static uint32_t rd(uint32_t off)
 static void wr(uint32_t off, uint32_t v)
 {
     *(volatile uint32_t *)(regs + off) = v;
+}
+
+static uint32_t prph_rd(uint32_t addr)
+{
+    wr(PRPH_RADDR, (addr & 0xFFFFFF) | (3u << 24));
+    return rd(PRPH_RDAT);
+}
+
+static void prph_wr(uint32_t addr, uint32_t val)
+{
+    wr(PRPH_WADDR_, (addr & 0xFFFFFF) | (3u << 24));
+    wr(PRPH_WDAT_, val);
+}
+
+/* mit Zugriff: Peripherie-Register einschalten (WFPM); liefert WFPM_CTRL_REG vorher */
+static uint32_t enable_wfpm(void)
+{
+    uint32_t v = prph_rd(WFPM_CTRL_REG);
+    prph_wr(WFPM_CTRL_REG, v | ENABLE_WFPM);
+    return v;
 }
 
 static uint32_t le32(const uint8_t *p)
@@ -251,12 +276,15 @@ int iwl_wake_test(void)
     info.wake_us = (uint32_t)(time_us() - t0);
     info.gp_after = rd(CSR_GP_CNTRL);
     if (info.wake_access) {
-        wr(PRPH_RADDR, (CNVI_AUX_MISC_CHIP & 0xFFFFFF) | (3u << 24)); /* nur bei integriertem CNVi, nicht AX200 */
-        info.cnvi_id = rd(PRPH_RDAT);
-        wr(PRPH_RADDR, (UREG_UCODE_LOAD_STATUS & 0xFFFFFF) | (3u << 24));
-        info.prph_load = rd(PRPH_RDAT);
-        wr(PRPH_RADDR, (SB_CPU_1_STATUS & 0xFFFFFF) | (3u << 24));
-        info.prph_cpu1 = rd(PRPH_RDAT);
+        uint32_t int0 = rd(CSR_INT_);
+        info.wfpm_before = enable_wfpm();
+        info.wfpm_after = prph_rd(WFPM_CTRL_REG);
+        info.cnvi_id = prph_rd(CNVI_AUX_MISC_CHIP);
+        info.prph_load = prph_rd(UREG_UCODE_LOAD_STATUS);
+        info.prph_cpu1 = prph_rd(SB_CPU_1_STATUS);
+        info.int_after = rd(CSR_INT_);
+        kprintf("iwl: 5 WFPM_CTRL %#x -> %#x, CSR_INT %#x -> %#x\n", info.wfpm_before, info.wfpm_after, int0,
+                info.int_after);
     }
     wr(CSR_GP_CNTRL, rd(CSR_GP_CNTRL) & ~GP_MAC_ACCESS_REQ);
     kprintf("iwl: bereit %s (HW_IF_CONFIG %#x), Aufwecken %s nach %u us, GP_CNTRL %#x, LOAD_STATUS %#x, CPU1_STATUS "
@@ -408,6 +436,7 @@ int iwl_load_fw(void)
     wr(CSR_CTXT_INFO_BA + 4, (uint32_t)((uint64_t)ci >> 32));
     wr(CSR_GP_CNTRL, rd(CSR_GP_CNTRL) | GP_MAC_ACCESS_REQ);
     int access = WAIT_UNTIL((rd(CSR_GP_CNTRL) & (GP_MAC_CLOCK_READY | GP_GOING_TO_SLEEP)) == GP_MAC_CLOCK_READY, 25);
+    enable_wfpm(); /* sicherheitshalber noch einmal: der Startbefehl ist ein Peripherie-Register */
     wr(RFH_Q0_FRBDCB_WIDX_TRG, RX_RING & ~7u);
     prph_write(UREG_CPU_INIT_RUN, 1);
     wr(CSR_GP_CNTRL, rd(CSR_GP_CNTRL) & ~GP_MAC_ACCESS_REQ);

@@ -297,6 +297,7 @@ typedef struct {
     unsigned       wake_done, wake_clock, wake_access, wake_us, gp_after, cnvi_id;
     unsigned       wake_ready, hwif_after, prph_load, prph_cpu1;
     unsigned       load_done, load_alive, load_ms, load_int, load_status, reset_before, reset_after;
+    unsigned       wfpm_before, wfpm_after, int_after;
     unsigned       alive_len, alive_cmd, alive_group, alive_status;
 } WlanInfo;
 static inline s64 sys_wlan_info(WlanInfo *wi)                 { return syscall3(SYS_WLAN, 0, (u64)wi, 0); }

@@ -28,6 +28,7 @@ typedef struct {
     /* Stufe 2b (SYS_WLAN 2, "wlan load"): Firmware laden, auf die erste Nachricht warten */
     uint32_t load_done, load_alive, load_ms, load_int, load_status;
     uint32_t reset_before, reset_after;       /* CSR_RESET vor und nach dem Freigeben des inneren Prozessors */
+    uint32_t wfpm_before, wfpm_after, int_after; /* WFPM_CTRL_REG vor/nach ENABLE_WFPM, CSR_INT nach den Lesezugriffen */
     uint32_t alive_len, alive_cmd, alive_group, alive_status; /* erste Nachricht; ALIVE: Befehl 1, Status 0xCAFE */
 } WlanInfo;
 

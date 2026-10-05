@@ -43,8 +43,10 @@ void _start(int argc, char **argv)
         printf("CSR_RESET: %#010x -> %#010x (inneren Prozessor freigegeben)\n", wi.reset_before, wi.reset_after);
         printf("Zugriff:   %s nach %u us\n", wi.wake_access ? "bekommen" : "NICHT bekommen", wi.wake_us);
         printf("GP_CNTRL:  %#010x danach\n", wi.gp_after);
+        printf("WFPM_CTRL: %#010x -> %#010x (Bit 31: Peripherie-Register ein)\n", wi.wfpm_before, wi.wfpm_after);
         printf("Ladestatus der Firmware: %#010x   Status CPU 1: %#010x\n", wi.prph_load, wi.prph_cpu1);
-        printf("CNVI-ID:   %#010x (gibt es nur bei integriertem CNVi, bei der AX200 nicht)\n", wi.cnvi_id);
+        printf("CNVI-ID:   %#010x\n", wi.cnvi_id);
+        printf("CSR_INT:   %#010x nach den Lesezugriffen (Bit 29 = Hardware-Fehler)\n", wi.int_after);
         sys_exit(r == 0 ? 0 : 1);
     }
     if (sys_wlan_info(&wi) != 0) {
