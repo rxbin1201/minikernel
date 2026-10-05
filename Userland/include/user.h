@@ -302,6 +302,7 @@ typedef struct {
     unsigned       dmar_found, dmar_flags, iommu_units, iommu_active, iommu_off; /* IOMMU (VT-d) vor dem Start */
     unsigned       iommu_gsts[4], iommu_pmen[4];
     unsigned       ltr_before, ltr_after;
+    unsigned       pci_cmd, bridges_fixed;
 } WlanInfo;
 static inline s64 sys_wlan_info(WlanInfo *wi)                 { return syscall3(SYS_WLAN, 0, (u64)wi, 0); }
 static inline s64 sys_wlan_wake(void)                         { return syscall3(SYS_WLAN, 1, 0, 0); }

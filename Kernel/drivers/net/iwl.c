@@ -64,6 +64,7 @@ static struct {
 } sec[3][MAX_SEC];
 static int nsec[3];
 static volatile uint8_t *regs;
+static PciDevice pdev;
 
 static uint32_t rd(uint32_t off)
 {
@@ -209,12 +210,16 @@ void iwl_probe(void)
         return;
     }
     pci_enable(&pci, 0, 1, 1);
+    info.bridges_fixed = (uint32_t)pci_enable_upstream(&pci);
+    info.pci_cmd = pci_read32(&pci, 0x04);
     pci_set_driver(&pci, "iwl");
+    pdev = pci;
     regs = (volatile uint8_t *)info.bar;
     info.hw_if_config = rd(CSR_HW_IF_CONFIG_REG);
     info.gp_cntrl = rd(CSR_GP_CNTRL);
     info.hw_rev = rd(CSR_HW_REV);
     info.rf_id = rd(CSR_HW_RF_ID);
+    kprintf("iwl: PCI Kommando/Status %#x, %u Bruecke(n) fuer DMA freigeschaltet\n", info.pci_cmd, info.bridges_fixed);
     kprintf("iwl: HW_REV %#x (Typ %#x, Schritt %u), RF_ID %#x, GP_CNTRL %#x, HW_IF_CONFIG %#x\n", info.hw_rev,
             (info.hw_rev >> 4) & 0xFFF, (info.hw_rev >> 2) & 3, info.rf_id, info.gp_cntrl, info.hw_if_config);
     if (!info.state[0])
@@ -531,6 +536,9 @@ int iwl_load_fw(void)
     info.ltr_after = rd(CSR_LTR_LONG_VAL_AD);
     kprintf("iwl: LTR %#x -> %#x\n", info.ltr_before, info.ltr_after);
 
+    /* Status-Bits der Karte loeschen (1 schreiben), um danach zu sehen, ob ihre DMA-Zugriffe abgewiesen wurden */
+    pci_write32(&pdev, 0x04, (pci_read32(&pdev, 0x04) & 0xFFFF) | 0xF9000000u);
+
     /* Adresse uebergeben, freie Puffer melden, starten */
     wr(CSR_UCODE_DRV_GP1_CLR, GP1_SW_RFKILL | GP1_CMD_BLOCKED);
     wr(CSR_MAC_SHADOW_REG_CTRL, rd(CSR_MAC_SHADOW_REG_CTRL) | 0x800FFFFFu);
@@ -583,6 +591,11 @@ int iwl_load_fw(void)
     }
     info.load_ms = (uint32_t)((time_us() - t0) / 1000);
     fw_state(info.load_ms);
+    uint32_t pst = pci_read32(&pdev, 0x04) >> 16;
+    info.pci_cmd = pci_read32(&pdev, 0x04);
+    kprintf("iwl:   PCI-Status danach %#x%s%s%s%s\n", pst, pst & (1u << 13) ? ", DMA abgewiesen (Master Abort)" : "",
+            pst & (1u << 12) ? ", Target Abort empfangen" : "", pst & (1u << 14) ? ", Systemfehler gemeldet" : "",
+            pst & (1u << 15) ? ", Paritaetsfehler" : "");
     info.load_int = rd(CSR_INT);
     info.load_status = *(volatile uint16_t *)status;
     if (!info.load_alive) {

@@ -71,6 +71,7 @@ void _start(int argc, char **argv)
         printf("  HW_REV:    %#010x  Typ %#x = %s, Schritt %c\n", wi.hw_rev, (wi.hw_rev >> 4) & 0xFFF, hw_type(wi.hw_rev),
                'A' + ((wi.hw_rev >> 2) & 3));
         printf("  RF_ID:     %#010x\n", wi.rf_id);
+        printf("  PCI:       Kommando/Status %#010x, %u Bruecke(n) fuer DMA freigeschaltet\n", wi.pci_cmd, wi.bridges_fixed);
         printf("  GP_CNTRL:  %#010x   HW_IF_CONFIG: %#010x\n", wi.gp_cntrl, wi.hw_if_config);
     } else {
         printf("  Karte:     keine Intel AX200 (8086:2723) gefunden\n");

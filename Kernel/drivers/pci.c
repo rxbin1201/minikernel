@@ -44,6 +44,34 @@ void pci_enable(const PciDevice *d, int io, int mem, int bus_master)
     pci_write32(d, 0x04, cmd);
 }
 
+int pci_enable_upstream(const PciDevice *d)
+{
+    int changed = 0;
+    uint8_t bus = d->bus;
+    for (int depth = 0; bus != 0 && depth < 8; depth++) {
+        const PciDevice *br = 0;
+        for (int i = 0; i < device_count && !br; i++) {
+            const PciDevice *e = &devices[i];
+            if (e->class_code == 0x06 && (e->subclass == 0x04 || e->subclass == 0x09) &&
+                ((pci_read32(e, 0x18) >> 8) & 0xFF) == bus)
+                br = e;
+        }
+        if (!br) {
+            kprintf("pci: keine Bruecke zu Bus %02x gefunden\n", bus);
+            break;
+        }
+        uint32_t cmd = pci_read32(br, 0x04) & 0xFFFF;
+        if ((cmd & 6) != 6) {
+            pci_write32(br, 0x04, cmd | 6);
+            changed++;
+        }
+        kprintf("pci: Bruecke %02x:%02x.%u (%04x:%04x) zu Bus %02x: Kommando %#x -> %#x\n", br->bus, br->dev, br->fn,
+                br->vendor, br->device, bus, cmd, pci_read32(br, 0x04) & 0xFFFF);
+        bus = br->bus;
+    }
+    return changed;
+}
+
 static void add_function(uint8_t bus, uint8_t dev, uint8_t fn, uint32_t id)
 {
     if (device_count >= PCI_MAX_DEVICES)

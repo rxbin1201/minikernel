@@ -36,6 +36,7 @@ typedef struct {
     uint32_t dmar_found, dmar_flags, iommu_units, iommu_active, iommu_off;
     uint32_t iommu_gsts[4], iommu_pmen[4];
     uint32_t ltr_before, ltr_after;
+    uint32_t pci_cmd, bridges_fixed;          /* PCI Kommando/Status der Karte, Bruecken mit neu gesetztem Bus-Master */
 } WlanInfo;
 
 void iwl_probe(void);

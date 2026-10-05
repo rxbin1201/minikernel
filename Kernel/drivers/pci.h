@@ -40,6 +40,10 @@ void     pci_write32(const PciDevice *d, uint8_t offset, uint32_t value);
 /* Aktiviert I/O-Zugriff (io), Memory-Zugriff (mem) und Bus-Mastering (DMA) des Geraets. */
 void pci_enable(const PciDevice *d, int io, int mem, int bus_master);
 
+/* Speicher und Bus-Master auf allen Bruecken zwischen Bus 0 und dem Geraet einschalten - sonst kommt DMA eines
+ * Geraets hinter einer Bruecke (PCIe-Steckplatz) nicht im RAM an. Gibt die Zahl der geaenderten Bruecken zurueck. */
+int pci_enable_upstream(const PciDevice *d);
+
 /* Vermerkt, welcher Treiber das Geraet benutzt (fuer lspci) */
 void pci_set_driver(const PciDevice *d, const char *name);
 
