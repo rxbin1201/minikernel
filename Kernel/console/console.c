@@ -1,6 +1,8 @@
 #include "console/console.h"
 #include "arch/x86_64/cpu.h"
 #include "console/font.h"
+#include "console/splash.h"
+#include "arch/x86_64/apic.h"
 #include "drivers/gpu/igd.h"
 #include "mm/heap.h"
 #include "lib/kprintf.h"
@@ -30,6 +32,9 @@ typedef struct {
 static volatile uint32_t *fb;
 static uint32_t *shadow;        /* gleiche Zeilenlaenge (pitch) wie der Framebuffer, oder NULL */
 static volatile int gfx_mode;   /* ein Programm zeichnet selbst: die Konsole schreibt nur noch ins Abbild */
+static volatile int splash;     /* Startanimation laeuft (splash.c): ebenso nur ins Abbild */
+static uint64_t     splash_t0;  /* Beginn (ms; 0 = vor dem Timer) */
+#define FB_OFF (gfx_mode || splash) /* nicht in den Framebuffer schreiben */
 static uint32_t     gfx_owner;  /* PID dieses Programms */
 static uint32_t pitch;          /* Pixel pro Zeile */
 static uint32_t width_px, height_px;
@@ -82,7 +87,7 @@ static void cursor_hide(void)
             igd_cursor_move(cur_x, cur_y, 0);
         return;
     }
-    if (!cur_drawn || !shadow || gfx_mode)
+    if (!cur_drawn || !shadow || FB_OFF)
         return;
     for (uint32_t y = 0; y < CUR_H * cur_s; y++) {
         int32_t py = cur_y + (int32_t)y;
@@ -103,10 +108,10 @@ static void cursor_show(void)
 {
     if (igd_cursor_available()) {
         if (!gfx_mode)
-            igd_cursor_move(cur_x, cur_y, cur_wanted);
+            igd_cursor_move(cur_x, cur_y, cur_wanted && !splash);
         return;
     }
-    if (!cur_wanted || !shadow || gfx_mode)
+    if (!cur_wanted || !shadow || FB_OFF)
         return;
     cur_s = cur_pct ? (cur_pct + 50) / 100 : scale; /* Pixel-Pfeil: ganze Vielfache */
     if (cur_s < 1)
@@ -170,6 +175,10 @@ int console_gfx_acquire(uint32_t pid)
     cursor_hide();
     gfx_mode = 1;
     gfx_owner = pid;
+    if (splash) { /* das Programm zeichnet jetzt; die Startmeldungen kommen nicht mehr auf den Bildschirm (dmesg) */
+        splash = 0;
+        console_clear();
+    }
     irq_restore(f);
     return 0;
 }
@@ -215,12 +224,48 @@ void console_gfx_blit(const uint32_t *src, uint32_t src_pitch, int x, int y, int
 /* Framebuffer komplett aus dem Abbild neu schreiben (z.B. nachdem ein Treiber-Test direkt hineingezeichnet hat) */
 void console_repaint(void)
 {
-    if (!fb || !shadow || gfx_mode)
+    if (!fb || !shadow || FB_OFF)
         return;
     uint64_t f = irq_save();
     memmove((void *)fb, shadow, (uint64_t)height_px * pitch * sizeof(uint32_t));
     cursor_show();
     irq_restore(f);
+}
+
+/* ---------- Startanimation ---------- */
+
+void console_splash_start(void)
+{
+    if (!fb || splash)
+        return;
+    uint64_t f = irq_save();
+    cursor_hide();
+    splash = 1;
+    splash_draw(fb, pitch, width_px, height_px);
+    irq_restore(f);
+}
+
+void console_splash_end(int show_log)
+{
+    if (!splash)
+        return;
+    uint64_t f = irq_save();
+    splash = 0;
+    if (gfx_mode) {
+        irq_restore(f);
+        return;
+    }
+    if (show_log && shadow) /* z.B. bei einer Ausnahme: alles zeigen, was bisher kam */
+        memmove((void *)fb, shadow, (uint64_t)height_px * pitch * sizeof(uint32_t));
+    else
+        console_clear();
+    cursor_show();
+    irq_restore(f);
+}
+
+int console_splash_active(void)
+{
+    return splash;
 }
 
 void console_set_tick(void (*hook)(void))
@@ -334,7 +379,7 @@ static void paint(uint32_t col, uint32_t row, uint32_t cp, uint32_t fgc, uint32_
     for (uint32_t y = 0; y < FONT_HEIGHT; y++) {
         for (uint32_t sy = 0; sy < scale; sy++) {
             uint64_t line = base + (uint64_t)(y * scale + sy) * pitch;
-            volatile uint32_t *dst = gfx_mode ? 0 : fb + line; /* Grafikmodus: nur ins Abbild */
+            volatile uint32_t *dst = FB_OFF ? 0 : fb + line; /* Grafikmodus, Startanimation: nur ins Abbild */
             uint32_t *sdst = shadow ? shadow + line : 0;
             for (uint32_t x = 0; x < FONT_WIDTH; x++) {
                 uint32_t px = (g[y] & (0x80 >> x)) ? fgc : bgc;
@@ -377,7 +422,7 @@ static void clear_rows(uint32_t first_row, uint32_t count)
     uint64_t start = (uint64_t)first_row * chh * pitch;
     uint64_t n = view_off ? 0 : (uint64_t)count * chh * pitch; /* im Verlauf: nur die Zellen */
     for (uint64_t i = 0; i < n; i++) {
-        if (!gfx_mode)
+        if (!FB_OFF)
             fb[start + i] = bg;
         if (shadow)
             shadow[start + i] = bg;
@@ -452,7 +497,7 @@ static void scroll(void)
         for (uint64_t i = keep_bytes / 4; i < (uint64_t)rows * chh * pitch; i++)
             shadow[i] = bg;
         /* Ganzes Abbild in den Framebuffer schreiben (64-Bit-Zugriffe, nur schreiben) */
-        if (!gfx_mode)
+        if (!FB_OFF)
             memmove((void *)fb, shadow, (uint64_t)rows * chh * pitch * sizeof(uint32_t));
         if (colors_dirty)
             update_color_idx();
@@ -464,7 +509,8 @@ static void scroll(void)
                 cell->bg = cur_bg_i;
             }
     } else {
-        memmove((void *)fb, (const void *)(fb + shift), keep_bytes);
+        if (!FB_OFF)
+            memmove((void *)fb, (const void *)(fb + shift), keep_bytes);
         clear_rows(rows - k, k);
     }
     cy = rows - k;
@@ -533,7 +579,9 @@ void console_enable_shadow(void)
     const volatile uint64_t *src = (const volatile uint64_t *)fb;
     uint64_t *dst = (uint64_t *)shadow;
     for (uint64_t i = 0; i < bytes / 8; i++)
-        dst[i] = src[i];
+        dst[i] = splash ? ((uint64_t)bg << 32 | bg) : src[i]; /* Startanimation: im Bild steht kein Text */
+    if (splash)
+        render_all();
 
     /* Verlauf anlegen (die bisherigen Textzellen bleiben) */
     hist_cap = HIST_BYTES / (cols * (uint32_t)sizeof(Cell));
@@ -595,7 +643,10 @@ int console_resize(uint32_t w, uint32_t h)
     for (uint64_t i = 0; i < (uint64_t)pitch * height_px; i++)
         shadow[i] = bg;
     render_all();
-    memmove((void *)fb, shadow, (uint64_t)height_px * pitch * sizeof(uint32_t));
+    if (splash)
+        splash_draw(fb, pitch, width_px, height_px);
+    else
+        memmove((void *)fb, shadow, (uint64_t)height_px * pitch * sizeof(uint32_t));
     cursor_show();
     irq_restore(f);
     kfree(old);
@@ -752,6 +803,19 @@ static void console_thread(void *arg)
         }
         if (tick_hook)
             tick_hook();
+        if (splash) { /* Startanimation: etwa 30 Bilder je Sekunde; nach 60 s ohne Programm die Meldungen zeigen */
+            uint64_t now = time_ms();
+            if (!splash_t0)
+                splash_t0 = now;
+            uint64_t f = irq_save();
+            if (splash && !gfx_mode)
+                splash_tick(fb, pitch, width_px, height_px, now - splash_t0);
+            irq_restore(f);
+            if (now - splash_t0 > 60000)
+                console_splash_end(1);
+            event_wait(&console_ev, 33);
+            continue;
+        }
         event_wait(&console_ev, 500);
     }
 }

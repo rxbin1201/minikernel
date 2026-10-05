@@ -217,10 +217,20 @@ static void vformat(Sink *s, const char *fmt, va_list ap)
 
 /* ---- kprintf: Serial + Konsole ---- */
 
-void kputc(char c)
+static int quiet; /* ohne "verbose": Meldungen des Kernels nur seriell und im Log (dmesg), nicht auf den Bildschirm */
+
+int kprintf_quiet(int on)
+{
+    int old = quiet;
+    quiet = on;
+    return old;
+}
+
+static void put_char(char c, int screen)
 {
     static int esc; /* ANSI-Farbfolgen gehen nur an die Konsole, nicht in das serielle Log */
-    console_putc(c);
+    if (screen)
+        console_putc(c);
     if (esc == 0 && c == 0x1B) {
         esc = 1;
         return;
@@ -238,6 +248,16 @@ void kputc(char c)
         serial_putc('\r');
     serial_putc(c);
     klog_putc(c);
+}
+
+void kputc(char c)
+{
+    put_char(c, !quiet);
+}
+
+void kputc_user(char c)
+{
+    put_char(c, 1);
 }
 
 static void put_console(char c, void *ctx)

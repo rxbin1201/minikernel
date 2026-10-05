@@ -491,13 +491,23 @@ Der Bootloader liest `\cmdline.txt` von der EFI-Systempartition (bei QEMU aus `C
 | `scale=1..4` | Schriftvergroesserung der Konsole |
 | `kbd=us\|de\|uk` | Tastaturlayout |
 | `tz=eu\|uk\|utc\|+2\|+5:30` | Zeitzone der Uhr |
-| `init=/bin/...` | erstes Programm statt `/bin/sh` |
+| `init=/bin/...` | erstes Programm statt `/bin/sh` (z.B. `init=/bin/desktop`) |
+| `verbose` | Meldungen von Bootloader und Kernel auf dem Bildschirm statt der Startanimation |
 | `ip=192.168.1.50/24,192.168.1.1[,dns]` | feste Adresse fuer eth0 statt DHCP; `nodhcp`, `nonet`, `nontp` schalten ab |
 | `fsro` | fremde Volumes nur lesbar einbinden |
 | `nosmp`, `cpus=N` | nur die Boot-CPU bzw. hoechstens N CPUs benutzen |
 | `selftest`, `selftest=gruppe,...`, `keep` | Selbsttests (siehe `Kernel/tests/selftest.c`) |
 
 Im laufenden System schreibt `resolution` Grafikmodus und Schriftgroesse in die `cmdline.txt` der Boot-Partition.
+
+**Startanimation:** ohne `verbose` gibt der Bootloader nichts aus, und der Kernel zeigt gleich nach dem Start statt
+seiner Meldungen das Logo auf dunklem Grund mit einem drehenden Punktkreis (`Kernel/console/splash.c`, nur Ganzzahlen,
+kantengeglaettet; etwa 30 Bilder je Sekunde aus dem Konsolen-Thread, nach einem Moduswechsel der Intel-Grafik neu
+gezeichnet). Die Konsole schreibt solange nur in ihr RAM-Abbild. Die Animation endet, sobald das erste Programm den
+Bildschirm nimmt (Desktop: das Bild geht ohne Text direkt in den Desktop ueber) oder etwas in die Konsole schreibt
+(Shell: leere Konsole mit ihrer Begruessung); bei einer Ausnahme im Kernel und nach 60 s ohne Programm erscheinen alle
+Meldungen. Auch danach kommen Meldungen des Kernels nicht auf den Bildschirm (wie `quiet` bei Linux), nur seriell und
+in `dmesg`; Ausgaben der Programme und Abstuerze von Programmen schon. Bei den Selbsttests immer Text.
 
 ## Echte Hardware und VMware
 

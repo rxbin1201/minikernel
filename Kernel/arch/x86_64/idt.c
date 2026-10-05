@@ -1,4 +1,5 @@
 #include "arch/x86_64/idt.h"
+#include "console/console.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/apic.h"
 #include "lib/kprintf.h"
@@ -142,6 +143,7 @@ static void isr_dispatch(InterruptFrame *f)
     /* Ausnahme in Ring 3: nur den Prozess beenden, der Kernel laeuft weiter */
     if ((f->cs & 3) == 3) {
         Process *p = process_current();
+        int was_quiet = kprintf_quiet(0); /* auch ohne "verbose" sichtbar: das Programm ist weg */
         kprintf("\n[Prozess %u '%s'] %s bei RIP=%#lx, Fehlercode %#lx", process_pid(p), process_name(p),
                 f->vector < 32 ? exception_names[f->vector] : "Fehler", f->rip, f->error_code);
         if (f->vector == 14) {
@@ -150,6 +152,7 @@ static void isr_dispatch(InterruptFrame *f)
             kprintf(", Adresse %#lx", cr2);
         }
         kprintf(" -> beendet\n");
+        kprintf_quiet(was_quiet);
         process_fault();
     }
 
@@ -166,6 +169,8 @@ static void isr_dispatch(InterruptFrame *f)
         }
     }
 
+    kprintf_quiet(0);
+    console_splash_end(1); /* Startanimation weg, alle Meldungen zeigen */
     kprintf("\n*** EXCEPTION %lu: %s ***\n", f->vector, f->vector < 32 ? exception_names[f->vector] : "Interrupt");
 
     if (f->vector == 14) {

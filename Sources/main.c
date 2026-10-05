@@ -5,6 +5,10 @@
 #define KERNEL_PATH L"\\kernel.elf"
 #define PAGE_SIZE   4096ULL
 
+/* Meldungen nur mit "verbose" in cmdline.txt (sonst zeigt der Kernel gleich seine Startanimation); Fehler immer */
+static int verbose;
+#define LOG(...) do { if (verbose) Print(__VA_ARGS__); } while (0)
+
 /* Minimaler ELF64-Support */
 #define PT_LOAD 1
 
@@ -68,7 +72,7 @@ static EFI_STATUS load_kernel(EFI_HANDLE image, UINT64 *entry, UINT64 *file_size
         Print(L"Kernel %s nicht gefunden: %r\r\n", KERNEL_PATH, st);
         return st;
     }
-    Print(L"Kernel gefunden\r\n");
+    LOG(L"Kernel gefunden\r\n");
     EFI_FILE_INFO *kfi = LibFileInfo(file);
     if (kfi) {
         *file_size = kfi->FileSize;
@@ -87,7 +91,7 @@ static EFI_STATUS load_kernel(EFI_HANDLE image, UINT64 *entry, UINT64 *file_size
         Print(L"Kein gueltiger x86-64 ELF\r\n");
         return EFI_UNSUPPORTED;
     }
-    Print(L"ELF-Header gueltig, Entry: 0x%lx\r\n", eh.e_entry);
+    LOG(L"ELF-Header gueltig, Entry: 0x%lx\r\n", eh.e_entry);
 
     /* Program Headers lesen */
     UINTN ph_size = (UINTN)eh.e_phnum * sizeof(Elf64_Phdr);
@@ -135,7 +139,7 @@ static EFI_STATUS load_kernel(EFI_HANDLE image, UINT64 *entry, UINT64 *file_size
     uefi_call_wrapper(file->Close, 1, file);
     FreePool(ph);
 
-    Print(L"Kernel geladen @ 0x%lx (%d Seiten)\r\n", lo, pages);
+    LOG(L"Kernel geladen @ 0x%lx (%d Seiten)\r\n", lo, pages);
     *entry = eh.e_entry;
     return EFI_SUCCESS;
 }
@@ -286,7 +290,7 @@ static void select_mode(BootInfo *info)
         }
     }
     info->mode_current = (UINT32)want;
-    Print(L"Grafikmodus: %dx%d (%d verfuegbar)\r\n", info->modes[want].width, info->modes[want].height, (int)n);
+    LOG(L"Grafikmodus: %dx%d (%d verfuegbar)\r\n", info->modes[want].width, info->modes[want].height, (int)n);
 }
 
 static EFI_STATUS get_framebuffer(BootFramebuffer *fb)
@@ -309,19 +313,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     InitializeLib(ImageHandle, SystemTable);
 
     uefi_call_wrapper(ST->ConOut->ClearScreen, 1, ST->ConOut);
-    Print(L"Bootloader gestartet\r\n");
-
-    UINT64 entry;
     static BootInfo info; /* static: bleibt nach ExitBootServices gueltig */
-    UINT64 kernel_size = 0;
-    EFI_STATUS st = load_kernel(ImageHandle, &entry, &kernel_size);
-    info.kernel_size = kernel_size;
-    if (EFI_ERROR(st)) {
-        Print(L"Kernel laden fehlgeschlagen: %r\r\n", st);
-        goto halt;
-    }
 
-    /* Optionale Kommandozeile fuer den Kernel (siehe Kernel/core/cmdline.h); "mode=" wird gleich hier ausgewertet */
+    /* Optionale Kommandozeile fuer den Kernel (siehe Kernel/core/cmdline.h), zuerst: "verbose" schaltet die Meldungen
+     * hier ein, "mode=" wird gleich hier ausgewertet */
     VOID *cmd = NULL;
     UINT64 cmd_size = 0;
     if (!EFI_ERROR(load_module(ImageHandle, L"\\cmdline.txt", &cmd, &cmd_size)) && cmd) {
@@ -331,7 +326,18 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
             info.cmdline[i] = ch < ' ' ? ' ' : ch; /* Zeilenumbrueche usw. werden zu Leerzeichen */
         }
         info.cmdline[n] = 0;
-        Print(L"Kommandozeile geladen (%d Bytes)\r\n", (int)n);
+        const CHAR8 *v = find_option((const CHAR8 *)info.cmdline, "verbose");
+        verbose = v && (*v == 0 || *v == ' ');
+        LOG(L"Bootloader gestartet\r\nKommandozeile geladen (%d Bytes)\r\n", (int)n);
+    }
+
+    UINT64 entry;
+    UINT64 kernel_size = 0;
+    EFI_STATUS st = load_kernel(ImageHandle, &entry, &kernel_size);
+    info.kernel_size = kernel_size;
+    if (EFI_ERROR(st)) {
+        Print(L"Kernel laden fehlgeschlagen: %r\r\n", st);
+        goto halt;
     }
 
     select_mode(&info);
@@ -340,7 +346,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         Print(L"Kein GOP-Framebuffer: %r\r\n", st);
         goto halt;
     }
-    Print(L"Framebuffer: 0x%lx, %dx%d\r\n", info.fb.base, info.fb.width, info.fb.height);
+    LOG(L"Framebuffer: 0x%lx, %dx%d\r\n", info.fb.base, info.fb.width, info.fb.height);
 
     /* Optionales User-Programm; ohne die Datei startet der Kernel trotzdem */
     VOID *module = NULL;
@@ -349,7 +355,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     if (EFI_ERROR(st))
         Print(L"initrd.tar nicht geladen (%r)\r\n", st);
     else
-        Print(L"initrd.tar geladen: %ld Bytes @ 0x%lx\r\n", module_size, (UINT64)(UINTN)module);
+        LOG(L"initrd.tar geladen: %ld Bytes @ 0x%lx\r\n", module_size, (UINT64)(UINTN)module);
     info.module = module;
     info.module_size = module_size;
 
@@ -359,8 +365,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     if (EFI_ERROR(LibGetSystemConfigurationTable(&acpi20, &rsdp)))
         LibGetSystemConfigurationTable(&AcpiTableGuid, &rsdp);
     info.rsdp = rsdp;
-    Print(L"ACPI RSDP: 0x%lx\r\n", (UINT64)(UINTN)rsdp);
-    Print(L"Springe zum Kernel...\r\n");
+    LOG(L"ACPI RSDP: 0x%lx\r\n", (UINT64)(UINTN)rsdp);
+    LOG(L"Springe zum Kernel...\r\n");
 
     /* Memory Map holen und Boot Services beenden. Zwischen GetMemoryMap und
      * ExitBootServices darf nichts mehr allokiert/ausgegeben werden, sonst wird der MapKey ungueltig. */

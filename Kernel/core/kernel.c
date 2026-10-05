@@ -31,6 +31,7 @@
 #include "drivers/gpu/igd.h"
 #include "drivers/sound/hda.h"
 #include "tests/selftest.h"
+#include "lib/string.h"
 
 /* ---------- Datentraeger ---------- */
 
@@ -93,12 +94,28 @@ static void init_storage(BootInfo *info)
     }
 }
 
+/* Steht das Wort (allein oder mit "=...") in der Kommandozeile des Bootloaders? Fuer die Zeit vor cmdline_init */
+static int boot_word(const char *cmd, const char *w)
+{
+    size_t n = strlen(w);
+    for (size_t i = 0; cmd[i]; i++)
+        if ((i == 0 || cmd[i - 1] == ' ') && memcmp(cmd + i, w, n) == 0 &&
+            (cmd[i + n] == 0 || cmd[i + n] == ' ' || cmd[i + n] == '='))
+            return 1;
+    return 0;
+}
+
 /* Aufgerufen von entry.S auf dem eigenen Kernel-Stack. */
 void kmain(BootInfo *info)
 {
     smp_early_init(); /* Per-CPU-Daten der Boot-CPU (GS), Big Kernel Lock */
     serial_init();
     console_init(&info->fb);
+    /* Startanimation statt der Meldungen ("verbose" zeigt sie; bei den Selbsttests immer Text) */
+    if (!boot_word(info->cmdline, "verbose") && !boot_word(info->cmdline, "selftest")) {
+        console_splash_start();
+        kprintf_quiet(1); /* Meldungen nur seriell und in dmesg */
+    }
     kprintf("Kernel gestartet (Framebuffer %ux%u @ %#lx)\n", info->fb.width, info->fb.height, (unsigned long)info->fb.base);
 
     gdt_init(smp_cpu(0));
@@ -131,6 +148,8 @@ void kmain(BootInfo *info)
             video_mode_count(), console_scale(), console_cols(), console_rows());
 
     if (init_interrupts(info) != 0) {
+        kprintf_quiet(0);
+        console_splash_end(1);
         kprintf("Ohne Timer kann der Kernel nicht weiterlaufen, angehalten.\n");
         halt_forever();
     }
@@ -170,6 +189,8 @@ void kmain(BootInfo *info)
             while (process_wait(pid, 0, 0, 0, 3600 * 1000) == -1 && process_poll(pid, 0) == 0)
                 ;
         } else {
+            kprintf_quiet(0);
+            console_splash_end(1);
             kprintf("init '%s' laesst sich nicht starten\n", init);
             thread_sleep_ms(1000);
         }
