@@ -95,10 +95,11 @@ USER_BINS     := $(addprefix Build/initrd/bin/,$(USER_PROGS) $(USER_DIRPROGS))
 USER_SOURCES  := $(wildcard Userland/bin/*.c Userland/bin/*/*.c Userland/lib/*.c)
 USER_LIB_OBJS := $(patsubst Userland/lib/%.c,Build/user/lib/%.o,$(wildcard Userland/lib/*.c))
 USER_LIB      := Build/user/libuser.a
-INITRD_FILES  := $(shell find Initrd -type f 2>/dev/null)
+INITRD_FILES  := $(shell find Initrd -type f ! -name '*:*' 2>/dev/null)
 # Firmware fuer Geraete (z.B. Intel WLAN/Bluetooth, aus linux-firmware): liegt sie in firmware/, kommt sie nach
-# /firmware in der initrd. Nicht im Repository (Lizenz von Intel, Binaerdateien) - siehe README
-FIRMWARE_FILES := $(wildcard firmware/*)
+# /firmware in der initrd. Nicht im Repository (Lizenz von Intel, Binaerdateien) - siehe README. Dateien mit ':' im
+# Namen (z.B. "...:Zone.Identifier", die Windows beim Kopieren nach WSL anlegt) bleiben draussen: make kann sie nicht
+FIRMWARE_FILES := $(shell find firmware -maxdepth 1 -type f ! -name '*:*' 2>/dev/null | sort)
 
 Build/user/%.o: Userland/%.c
 	@mkdir -p $(dir $@)
@@ -124,8 +125,9 @@ $(foreach p,$(USER_DIRPROGS),$(eval $(call USER_DIRPROG,$(p))))
 
 Image/initrd.tar: $(USER_BINS) $(INITRD_FILES) $(FIRMWARE_FILES)
 	@mkdir -p $(dir $@)
-	cp -r Initrd/. Build/initrd/
 	rm -rf Build/initrd/firmware
+	cp -r Initrd/. Build/initrd/
+	find Build/initrd -name '*:*' -delete
 	$(if $(FIRMWARE_FILES),mkdir -p Build/initrd/firmware && cp $(FIRMWARE_FILES) Build/initrd/firmware/)
 	tar --format=ustar --owner=0 --group=0 -cf $@ -C Build/initrd .
 
