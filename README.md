@@ -163,7 +163,7 @@ sys_munmap((void *)d, groesse);
 - Genutzt von `play` und `music` (MP3: der Decoder liest direkt aus der Datei, ohne Puffer und Umkopieren; `play`
   gibt Gespieltes wieder frei), den Schriften (`ttf.c`: nur gebrauchte Tabellen und Zeichen kommen in den Speicher)
   und `bmp_load` (`view`, `paint`).
-- Bis zu 32 Einblendungen je Prozess; jede hat ihre eigene Dateiposition (der Deskriptor darf geschlossen werden).
+- Bis zu 1024 Einblendungen je Prozess; jede hat ihre eigene Dateiposition (der Deskriptor darf geschlossen werden).
   `munmap` nimmt auch Teile heraus, `fork` vererbt sie (das Kind laedt fehlende Seiten selbst), `exec` und das
   Programmende raeumen auf. Liest der Kernel aus einer Einblendung (z.B. `write` aus ihr), laedt
   `process_user_range_ok` die Seiten vorher.
