@@ -18,6 +18,11 @@ uint64_t pmm_alloc_frames(uint64_t count); /* physisch zusammenhaengend */
 void pmm_free_frame(uint64_t addr);
 void pmm_free_frames(uint64_t addr, uint64_t count);
 
+/* Referenzen (Copy-on-Write nach fork): ein vergebener Frame hat einen Benutzer; pmm_ref fuegt einen hinzu (-1 bei
+ * mehr als 256 Benutzern), pmm_free_frame gibt einen ab - frei wird der Frame erst mit dem letzten. */
+int pmm_ref(uint64_t addr);
+int pmm_shared(uint64_t addr); /* hat der Frame mehr als einen Benutzer? */
+
 uint64_t pmm_total_frames(void); /* vom PMM verwaltete Frames (ohne reservierte) */
 uint64_t pmm_free_frame_count(void);
 

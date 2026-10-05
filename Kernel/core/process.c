@@ -456,7 +456,10 @@ int process_fork(const SyscallFrame *f)
     p->brk_mapped = parent->brk_mapped;
     p->mmap_next = parent->mmap_next;
 
-    p->as = as_clone(parent->as);
+    /* Mit einem Thread Copy-on-Write: die Seiten werden erst beim Schreiben kopiert (meist ruft das Kind gleich exec
+     * auf und braucht sie nie). Mit mehreren Threads eine echte Kopie - die anderen Threads koennten noch alte,
+     * beschreibbare TLB-Eintraege haben, und Prozesse mit Threads haben nie PAGE_COW-Seiten (siehe thread_create). */
+    p->as = parent->nlive == 1 ? as_clone_cow(parent->as) : as_clone(parent->as);
     ForkCtx *ctx = p->as ? kmalloc(sizeof(*ctx)) : 0;
     if (ctx) {
         ctx->regs = *f;
@@ -767,6 +770,10 @@ int process_thread_create(Process *p, uint64_t entry, uint64_t stack_top, uint64
             s = i;
     if (s < 0)
         return ERR_AGAIN;
+    /* Vor dem zweiten Thread alle Copy-on-Write-Seiten aufloesen: loeste einer sie spaeter auf, muessten die anderen
+     * CPUs erst ihren TLB leeren, bevor es weitergeht (warten koennte unter dem BKL haengen bleiben) */
+    if (p->nlive == 1 && as_cow_break_all(p->as) != 0)
+        return ERR_NOMEM;
     ThreadCtx *ctx = kmalloc(sizeof(*ctx));
     if (!ctx)
         return ERR_NOMEM;
@@ -965,10 +972,17 @@ int process_user_range_ok(const Process *p, uint64_t ptr, uint64_t len, int writ
         return 0;
     for (uint64_t a = ptr & ~(PAGE - 1); a < end; a += PAGE) {
         uint64_t flags;
-        if (!as_translate(p->as, a, 0, &flags) || !(flags & PAGE_USER) || (write && !(flags & PAGE_WRITE)))
+        if (!as_translate(p->as, a, 0, &flags) || !(flags & PAGE_USER))
             return 0;
+        if (write && !(flags & PAGE_WRITE) && !((flags & PAGE_COW) && as_cow_resolve(p->as, a) == 1))
+            return 0; /* Copy-on-Write: der Kernel schreibt gleich hinein, also jetzt schon die eigene Kopie */
     }
     return 1;
+}
+
+int process_cow_fault(Process *p, uint64_t addr)
+{
+    return p && as_cow_resolve(p->as, addr) == 1;
 }
 
 int process_copy_string(const Process *p, uint64_t uptr, char *dst, size_t max)

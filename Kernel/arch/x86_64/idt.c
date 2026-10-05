@@ -123,6 +123,15 @@ static void isr_dispatch(InterruptFrame *f)
         return;
     }
 
+    /* Schreibzugriff auf eine Copy-on-Write-Seite (nach fork; Fehlercode: Seite vorhanden + Schreiben), aus dem
+     * Programm oder aus dem Kernel, der in einen User-Puffer schreibt: eigene Kopie anlegen und den Befehl wiederholen */
+    if (f->vector == 14 && (f->error_code & 3) == 3) {
+        uint64_t cr2;
+        __asm__ __volatile__("mov %%cr2, %0" : "=r"(cr2));
+        if (process_cow_fault(process_current(), cr2))
+            return;
+    }
+
     /* Ausnahme in Ring 3: nur den Prozess beenden, der Kernel laeuft weiter */
     if ((f->cs & 3) == 3) {
         Process *p = process_current();

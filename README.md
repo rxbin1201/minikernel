@@ -94,6 +94,19 @@ thread_join(t, &ergebnis);               // wartet aufs Ende und gibt den Stack 
 
 `ps` zeigt die Threads je Prozess (Spalte THR). Der Selbsttest `threadtest` prueft das alles (22 Pruefungen).
 
+### fork mit Copy-on-Write
+
+`fork` kopiert die Seiten nicht mehr, sondern blendet dieselben Frames im Kind ein und macht beschreibbare Seiten in
+beiden Prozessen schreibgeschuetzt (PTE-Bit `PAGE_COW`, `paging.c: as_clone_cow`). Erst wer schreibt, bekommt im
+Seitenfehler eine eigene Kopie; hat sonst niemand mehr den Frame, wird die Seite einfach wieder beschreibbar. Der PMM
+zaehlt dafuer die Benutzer je Frame (`pmm_ref`, ein Byte je Frame); `pmm_free_frame` gibt erst mit dem letzten frei.
+Schreibt der Kernel in einen User-Puffer, loest schon `process_user_range_ok` die Seite auf.
+
+Der haeufigste Fall, `fork` und gleich `exec` (die Shell bei jedem Befehl), kopiert so gar nichts mehr: in QEMU ohne
+KVM dauert `fork` bei 32 MiB belegtem Speicher etwa 7 ms statt 780 ms. Prozesse mit mehreren Threads kopieren weiter
+sofort, und vor dem zweiten Thread werden alle geteilten Seiten aufgeloest - sonst muessten bei jedem Aufloesen erst die
+anderen CPUs ihren TLB leeren. Selbsttest: `cowtest` (11 Pruefungen).
+
 ## Intel-Grafik (Gen9: Skylake bis Comet Lake, z.B. UHD Graphics 630)
 
 `Kernel/drivers/gpu/igd.c` setzt auf der Anzeige auf, die die UEFI-Firmware eingerichtet hat, und ergaenzt:

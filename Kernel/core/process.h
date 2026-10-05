@@ -36,7 +36,8 @@ struct FdObj;
  * Liefert die PID oder -1. */
 int process_spawn(const char *path, const char *cmdline, uint32_t parent);
 
-/* fork: Kopie des aktuellen Prozesses (eigener Adressraum mit kopierten Seiten, geteilte Dateiobjekte).
+/* fork: Kopie des aktuellen Prozesses (eigener Adressraum, geteilte Dateiobjekte). Mit einem Thread per Copy-on-Write:
+ * beide teilen sich die Frames, bis einer schreibt (paging.h: PAGE_COW).
  * Das Kind laeuft mit den Registern aus `f` weiter und bekommt 0 als Rueckgabewert. Liefert im Elternprozess die PID. */
 int process_fork(const SyscallFrame *f);
 
@@ -80,7 +81,8 @@ int  process_futex_wake(Process *p, uint64_t addr, uint32_t count);             
 int process_info(unsigned index, ProcInfo *out);
 
 /* Zugriff auf User-Speicher des aktuellen Prozesses (laufen im Adressraum des Prozesses). */
-int process_user_range_ok(const Process *p, uint64_t ptr, uint64_t len, int write);
+int process_user_range_ok(const Process *p, uint64_t ptr, uint64_t len, int write); /* write: loest Copy-on-Write auf */
+int process_cow_fault(Process *p, uint64_t addr); /* Schreibfehler auf einer Copy-on-Write-Seite behoben? (1 = ja) */
 int process_copy_string(const Process *p, uint64_t uptr, char *dst, size_t max); /* Laenge oder -1 */
 
 /* Pfad aus dem User-Speicher holen und relativ zum Arbeitsverzeichnis zu einem absoluten, normalisierten Pfad machen */

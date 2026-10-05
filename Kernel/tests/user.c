@@ -142,6 +142,13 @@ void test_user(BootInfo *info)
           pid > 0 && process_wait(pid, 0, &code, &faulted, 60000) == 0 && code == 0 && !faulted);
     if (pid > 0 && code != 0)
         kprintf("  threadtest: Pruefung %d fehlgeschlagen\n", code);
+    /* fork mit Copy-on-Write: getrennte Inhalte nach dem Schreiben, auch bei Schreibzugriffen des Kernels, ueber
+     * Generationen und mit Threads danach (alle geteilten Frames muessen danach zurueck sein, siehe unten) */
+    pid = process_spawn("/bin/cowtest", "cowtest", 0);
+    check("cowtest (fork mit Copy-on-Write)",
+          pid > 0 && process_wait(pid, 0, &code, &faulted, 60000) == 0 && code == 0 && !faulted);
+    if (pid > 0 && code != 0)
+        kprintf("  cowtest: Pruefung %d fehlgeschlagen\n", code);
 
     /* Die Shell: Befehle tippen (Tastatur-Injektion), die Ergebnisse stehen danach als Dateien auf /disk.
      * Prueft Pipes, Umleitungen, Anfuehrungszeichen, relative Pfade, Verlauf (Pfeil hoch) und Ctrl-C. */
