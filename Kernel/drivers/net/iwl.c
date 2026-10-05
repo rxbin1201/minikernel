@@ -28,12 +28,15 @@
 #define GP_MAC_ACCESS_REQ    (1u << 3)
 #define GP_GOING_TO_SLEEP    (1u << 4)
 #define CNVI_AUX_MISC_CHIP   0xA200B0
-#define CNVR_AUX_MISC_CHIP   0xA2B800
 #define CSR_RESET            0x020
 #define RESET_SW             (1u << 7)
 /* Bits in CSR_HW_IF_CONFIG_REG */
-#define HWIF_NIC_READY       (1u << 22)
-#define HWIF_PREPARE         (1u << 27)
+#define HWIF_NIC_READY       (1u << 22) /* setzt der Treiber; bleibt es stehen, ist die Karte bereit */
+#define HWIF_PREPARE_DONE    (1u << 25)
+#define HWIF_PREPARE         (1u << 27) /* sonst: vorbereiten lassen, bis PREPARE_DONE weg ist, dann noch einmal */
+#define UREG_UCODE_LOAD_STATUS 0xA05C40 /* Peripherie-Register jeder Karte der Familie: Ladestatus, Status CPU 1 */
+#define SB_CPU_1_STATUS        0xA01E30
+#define BAD_PATTERN(v)       (((v) & 0xFFFFFFF0u) == 0xA5A5A5A0u) /* Antwort auf ein nicht erreichbares Register */
 #define HWIF_HAP_WAKE_L1A    (1u << 19)
 #define CSR_GIO_CHICKEN_BITS 0x100
 #define GIO_L1A_NO_L0S_RX    (1u << 23)
@@ -189,17 +192,25 @@ int iwl_wake_test(void)
         return -1;
     info.wake_done = 1;
     info.wake_clock = info.wake_access = 0;
-    info.cnvi_id = info.cnvr_id = 0;
+    info.cnvi_id = info.prph_load = info.prph_cpu1 = 0;
     uint64_t t0 = time_us();
-    /* 1. Bereitschaft anfordern: PREPARE setzen, bis die Karte NIC_READY meldet */
-    wr(CSR_HW_IF_CONFIG_REG, rd(CSR_HW_IF_CONFIG_REG) | HWIF_PREPARE);
-    info.wake_ready = WAIT_UNTIL(rd(CSR_HW_IF_CONFIG_REG) & HWIF_NIC_READY, 150);
+    /* 1. Bereitschaft: NIC_READY setzen - bleibt es stehen, ist die Karte bereit. Sonst PREPARE setzen, warten, bis
+     *    die Karte PREPARE_DONE loescht, und NIC_READY noch einmal versuchen */
+    wr(CSR_HW_IF_CONFIG_REG, rd(CSR_HW_IF_CONFIG_REG) | HWIF_NIC_READY);
+    info.wake_ready = WAIT_UNTIL(rd(CSR_HW_IF_CONFIG_REG) & HWIF_NIC_READY, 50);
+    if (!info.wake_ready) {
+        wr(CSR_HW_IF_CONFIG_REG, rd(CSR_HW_IF_CONFIG_REG) | HWIF_PREPARE);
+        WAIT_UNTIL(!(rd(CSR_HW_IF_CONFIG_REG) & HWIF_PREPARE_DONE), 150);
+        wr(CSR_HW_IF_CONFIG_REG, rd(CSR_HW_IF_CONFIG_REG) | HWIF_NIC_READY);
+        info.wake_ready = WAIT_UNTIL(rd(CSR_HW_IF_CONFIG_REG) & HWIF_NIC_READY, 50) ? 2 : 0;
+    }
     info.hwif_after = rd(CSR_HW_IF_CONFIG_REG);
     kprintf("iwl: 1 bereit %s, HW_IF_CONFIG %#x, GP_CNTRL %#x\n", info.wake_ready ? "ja" : "NEIN", info.hwif_after,
             rd(CSR_GP_CNTRL));
     /* 2. per Software zuruecksetzen und kurz warten */
     wr(CSR_RESET, rd(CSR_RESET) | RESET_SW);
     thread_sleep_ms(6);
+    WAIT_UNTIL(!BAD_PATTERN(rd(CSR_GP_CNTRL)), 100); /* waehrend des Neustarts antwortet die Karte nicht */
     kprintf("iwl: 2 nach Reset: RESET %#x, HW_IF_CONFIG %#x, GP_CNTRL %#x\n", rd(CSR_RESET), rd(CSR_HW_IF_CONFIG_REG),
             rd(CSR_GP_CNTRL));
     /* 3. Grundeinstellungen nach dem Reset: kein L0s beim Empfang in L1a, Weck-Bit fuer L1a, Hilfsregister
@@ -221,15 +232,18 @@ int iwl_wake_test(void)
     info.wake_us = (uint32_t)(time_us() - t0);
     info.gp_after = rd(CSR_GP_CNTRL);
     if (info.wake_access) {
-        wr(PRPH_RADDR, (CNVI_AUX_MISC_CHIP & 0xFFFFFF) | (3u << 24));
+        wr(PRPH_RADDR, (CNVI_AUX_MISC_CHIP & 0xFFFFFF) | (3u << 24)); /* nur bei integriertem CNVi, nicht AX200 */
         info.cnvi_id = rd(PRPH_RDAT);
-        wr(PRPH_RADDR, (CNVR_AUX_MISC_CHIP & 0xFFFFFF) | (3u << 24));
-        info.cnvr_id = rd(PRPH_RDAT);
+        wr(PRPH_RADDR, (UREG_UCODE_LOAD_STATUS & 0xFFFFFF) | (3u << 24));
+        info.prph_load = rd(PRPH_RDAT);
+        wr(PRPH_RADDR, (SB_CPU_1_STATUS & 0xFFFFFF) | (3u << 24));
+        info.prph_cpu1 = rd(PRPH_RDAT);
     }
     wr(CSR_GP_CNTRL, rd(CSR_GP_CNTRL) & ~GP_MAC_ACCESS_REQ);
-    kprintf("iwl: bereit %s (HW_IF_CONFIG %#x), Aufwecken %s nach %u us, GP_CNTRL %#x, CNVI %#x, CNVR %#x\n",
-            info.wake_ready ? "ja" : "NEIN", info.hwif_after, info.wake_access ? "ok" : "OHNE Zugriff", info.wake_us,
-            info.gp_after, info.cnvi_id, info.cnvr_id);
+    kprintf("iwl: bereit %s (HW_IF_CONFIG %#x), Aufwecken %s nach %u us, GP_CNTRL %#x, LOAD_STATUS %#x, CPU1_STATUS "
+            "%#x, CNVI %#x\n", info.wake_ready == 1 ? "ja" : info.wake_ready == 2 ? "ja (nach PREPARE)" : "NEIN",
+            info.hwif_after, info.wake_access ? "ok" : "OHNE Zugriff", info.wake_us, info.gp_after, info.prph_load,
+            info.prph_cpu1, info.cnvi_id);
     return info.wake_access ? 0 : -3;
 }
 

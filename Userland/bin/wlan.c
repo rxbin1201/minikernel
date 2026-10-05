@@ -20,12 +20,13 @@ void _start(int argc, char **argv)
             printf("wlan: keine Karte\n");
             sys_exit(1);
         }
-        printf("Bereit:    %s (HW_IF_CONFIG %#010x)\n", wi.wake_ready ? "ja (NIC_READY)" : "NEIN", wi.hwif_after);
+        printf("Bereit:    %s (HW_IF_CONFIG %#010x)\n", wi.wake_ready == 1 ? "ja (NIC_READY)"
+               : wi.wake_ready == 2 ? "ja (nach PREPARE)" : "NEIN", wi.hwif_after);
         printf("Takt:      %s\n", wi.wake_clock ? "bereit" : "KEINER (nach INIT_DONE)");
         printf("Zugriff:   %s nach %u us\n", wi.wake_access ? "bekommen" : "NICHT bekommen", wi.wake_us);
         printf("GP_CNTRL:  %#010x danach\n", wi.gp_after);
-        printf("CNVI-ID:   %#010x\n", wi.cnvi_id);
-        printf("CNVR-ID:   %#010x\n", wi.cnvr_id);
+        printf("Ladestatus der Firmware: %#010x   Status CPU 1: %#010x\n", wi.prph_load, wi.prph_cpu1);
+        printf("CNVI-ID:   %#010x (gibt es nur bei integriertem CNVi, bei der AX200 nicht)\n", wi.cnvi_id);
         sys_exit(r == 0 ? 0 : 1);
     }
     if (sys_wlan_info(&wi) != 0) {
