@@ -190,6 +190,12 @@ static void reap_dead(void)
     }
 }
 
+/* Beendete Threads jetzt aufraeumen (Kernel-Stack, Adressraum), mit BKL - fuer Selbsttests, die Frames zaehlen */
+void sched_reap(void)
+{
+    reap_dead();
+}
+
 /* Erster Code eines neuen Threads (von thread_trampoline aufgerufen, noch mit IF = 0). */
 void thread_bootstrap(ThreadEntry entry, void *arg)
 {

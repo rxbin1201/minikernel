@@ -565,12 +565,12 @@ static int glob_field(const char *s, const unsigned char *m, int len, Vec *out)
             wild = 1;
     if (!wild)
         return 0;
-    char word[512];
+    char word[PATH_MAX];
     int n = len < 511 ? len : 511;
     memcpy(word, s, (size_t)n);
     word[n] = 0;
     char *slash = strrchr(word, '/');
-    char dir[512];
+    char dir[PATH_MAX];
     const char *pat;
     if (slash) {
         int dl = (int)(slash - word);

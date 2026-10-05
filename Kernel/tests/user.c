@@ -142,6 +142,46 @@ void test_user(BootInfo *info)
           pid > 0 && process_wait(pid, 0, &code, &faulted, 60000) == 0 && code == 0 && !faulted);
     if (pid > 0 && code != 0)
         kprintf("  threadtest: Pruefung %d fehlgeschlagen\n", code);
+    /* fork mit Copy-on-Write: getrennte Inhalte nach dem Schreiben, auch bei Schreibzugriffen des Kernels, ueber
+     * Generationen und mit Threads danach (alle geteilten Frames muessen danach zurueck sein, siehe unten) */
+    pid = process_spawn("/bin/cowtest", "cowtest", 0);
+    check("cowtest (fork mit Copy-on-Write)",
+          pid > 0 && process_wait(pid, 0, &code, &faulted, 60000) == 0 && code == 0 && !faulted);
+    if (pid > 0 && code != 0)
+        kprintf("  cowtest: Pruefung %d fehlgeschlagen\n", code);
+    /* Eingeblendete Dateien: Seiten erst beim Zugriff aus der Datei (alle Frames muessen danach zurueck sein) */
+    pid = process_spawn("/bin/mmaptest", "mmaptest", 0);
+    check("mmaptest (Dateien einblenden)",
+          pid > 0 && process_wait(pid, 0, &code, &faulted, 60000) == 0 && code == 0 && !faulted);
+    if (pid > 0 && code != 0)
+        kprintf("  mmaptest: Pruefung %d fehlgeschlagen\n", code);
+    /* Grenzen: weit ueber den frueheren festen Tabellen, die neuen Obergrenzen greifen genau */
+    pid = process_spawn("/bin/limittest", "limittest", 0);
+    check("limittest (Deskriptoren, Threads, Prozesse, Stack, Einblendungen, Kommandozeile)",
+          pid > 0 && process_wait(pid, 0, &code, &faulted, 120000) == 0 && code == 0 && !faulted);
+    if (pid > 0 && code != 0)
+        kprintf("  limittest: Pruefung %d fehlgeschlagen\n", code);
+    /* MP3 dekodieren (play liest die eingeblendete Datei): 3 s Stereo, 44,1 kHz, zwei Sinustoene */
+    {
+        void *wav = 0;
+        uint64_t wsize = 0, sum = 0, loud = 0;
+        int ok = run_user("/bin/play", "play -w /disk/TON.WAV /share/ton.mp3", &code, &faulted) == 0 && code == 0 &&
+                 fs_read_file("/disk/TON.WAV", &wav, &wsize) == 0 && wsize > 44;
+        if (ok) {
+            const int16_t *smp = (const int16_t *)((const uint8_t *)wav + 44);
+            uint64_t n = (wsize - 44) / 2;
+            for (uint64_t i = 0; i < n; i++) {
+                sum = sum * 31 + (uint16_t)smp[i];
+                loud += smp[i] > 2000 || smp[i] < -2000; /* ffmpeg-Sinus: Spitze etwa 4096 */
+            }
+            uint64_t frames = n / 2;
+            kprintf("  play -w: %lu Abtastwerte je Kanal, Pruefsumme %#lx\n", (unsigned long)frames, (unsigned long)sum);
+            ok = frames > 3 * 44100 - 3000 && frames < 3 * 44100 + 3000 && loud > n / 4;
+        }
+        kfree(wav);
+        fs_unlink("/disk/TON.WAV");
+        check("play: MP3 in WAV umwandeln (eingeblendete Datei)", ok);
+    }
 
     /* Die Shell: Befehle tippen (Tastatur-Injektion), die Ergebnisse stehen danach als Dateien auf /disk.
      * Prueft Pipes, Umleitungen, Anfuehrungszeichen, relative Pfade, Verlauf (Pfeil hoch) und Ctrl-C. */
@@ -279,12 +319,10 @@ void test_user(BootInfo *info)
     check("Testdateien wieder geloescht", !dir_has("/disk", "O5.TXT", 0) && !dir_has("/disk", "O10.TXT", 0) &&
                                           !dir_has("/disk", "O9.TXT", 0) && !dir_has("/disk", "O11.TXT", 0));
 
-    thread_sleep_ms(100);
-    uint64_t grown = (heap_total_bytes() - heap_before) / 4096 + (paging_table_frames() - tables_before);
-    uint64_t used = frames_before - pmm_free_frame_count();
-    if (used != grown)
-        kprintf("  (%ld Frames weniger frei, davon %lu fuer Heap und Kernel-Page-Tables)\n", (long)used, (unsigned long)grown);
-    check("Keine Frames verloren (Adressraeume/Stacks freigegeben)", used == grown);
+    int64_t missing = frames_missing(frames_before, heap_before, tables_before);
+    if (missing)
+        kprintf("  (%ld Frames fehlen, ohne Heap und Kernel-Page-Tables)\n", (long)missing);
+    check("Keine Frames verloren (Adressraeume/Stacks freigegeben)", missing == 0);
     check("Kernel-Heap konsistent", heap_check());
 }
 

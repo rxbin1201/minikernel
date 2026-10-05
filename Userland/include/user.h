@@ -80,12 +80,17 @@ typedef unsigned int       u32;
 #define SYS_GETTID        71
 #define SYS_FUTEX_WAIT    72
 #define SYS_FUTEX_WAKE    73
+#define SYS_MMAP_FILE     74
 #define ERR_NOENT     (-2)
 #define ERR_IO        (-5)
 #define ERR_EXIST     (-17)
 #define ERR_INVAL     (-22)
 #define ERR_AGAIN     (-11)
 #define ERR_INTR      (-4)
+#define ERR_BADF      (-9)
+#define ERR_NOMEM     (-12)
+#define ERR_NAMETOOLONG (-36) /* Pfad laenger als PATH_MAX - 1 */
+#define PATH_MAX      1024  /* laengster Pfad (mit der abschliessenden 0), wie im Kernel (VFS_PATH_MAX) */
 #define ERR_NOSYS     (-38)
 #define ERR_NOSPC     (-28)
 #define ERR_ROFS      (-30)
@@ -426,6 +431,14 @@ static inline const char *net_strerror(s64 e)
 static inline void *sys_brk(void *addr)                       { return (void *)syscall3(SYS_BRK, (u64)addr, 0, 0); }
 static inline s64 sys_mmap(u64 len)                           { return syscall3(SYS_MMAP, len, 0, 0); }
 static inline s64 sys_munmap(void *addr, u64 len)             { return syscall3(SYS_MUNMAP, (u64)addr, len, 0); }
+/* Datei einblenden: liefert eine Adresse, ab der die Datei (ab offset, Vielfaches von 4096) im Speicher steht. Gelesen
+ * wird erst, wenn das Programm eine Seite anfasst - auch bei grossen Dateien geht das sofort. Privat: mit writable
+ * darf das Programm hineinschreiben, die Datei aendert sich dadurch nicht. Hinter dem Dateiende stehen Nullen. Der
+ * Deskriptor darf danach geschlossen werden; freigeben mit sys_munmap. ERR_BADF: fd ist keine Datei. */
+static inline s64 sys_mmap_file(int fd, u64 len, u64 offset, int writable)
+{
+    return syscall3(SYS_MMAP_FILE, (u64)(unsigned)fd | ((u64)(writable ? 1 : 0) << 32), len, offset);
+}
 
 static inline u64 u_strlen(const char *s)
 {

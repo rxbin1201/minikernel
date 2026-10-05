@@ -48,7 +48,7 @@ static void walk(const char *path, const char *prefix, int depth)
         out_write("\n", 1);
         if (e[i].is_dir) {
             ndirs++;
-            char child[512], pre[512];
+            char child[PATH_MAX], pre[512];
             join_path(child, sizeof(child), path, e[i].name);
             snprintf(pre, sizeof(pre), "%s%s", prefix, last ? "    " : "\xE2\x94\x82   "); /* │ */
             walk(child, pre, depth + 1);

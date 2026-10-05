@@ -23,7 +23,11 @@ struct FdObj;
 
 /* User-Speicherlayout (relativ zu USER_BASE = 0x7F8000000000):
  *   ELF-Segmente, dahinter der brk-Heap (waechst bis +32 GiB),
- *   mmap-Bereich +64 GiB .. +256 GiB, Stack: die obersten 64 KiB vor USER_END. */
+ *   mmap-Bereich +64 GiB .. +256 GiB, Stack: unter USER_END, anfangs 64 KiB, waechst bei Bedarf bis 8 MiB.
+ *
+ * Tabellen (Prozesse, Deskriptoren, Threads, Einblendungen) wachsen bei Bedarf; Obergrenzen nur gegen Ausreisser:
+ * 4096 Prozesse, je Prozess 1024 Deskriptoren, 1024 Threads, 1024 Datei- und 1024 Speicher-Einblendungen.
+ * Kommandozeilen bis 4 KiB und 256 Woerter. */
 #define USER_BRK_LIMIT   (USER_BASE + (32ULL << 30))
 #define USER_MMAP_BASE   (USER_BASE + (64ULL << 30))
 #define USER_MMAP_LIMIT  (USER_BASE + (256ULL << 30))
@@ -36,12 +40,16 @@ struct FdObj;
  * Liefert die PID oder -1. */
 int process_spawn(const char *path, const char *cmdline, uint32_t parent);
 
-/* fork: Kopie des aktuellen Prozesses (eigener Adressraum mit kopierten Seiten, geteilte Dateiobjekte).
+/* fork: Kopie des aktuellen Prozesses (eigener Adressraum, geteilte Dateiobjekte). Mit einem Thread per Copy-on-Write:
+ * beide teilen sich die Frames, bis einer schreibt (paging.h: PAGE_COW).
  * Das Kind laeuft mit den Registern aus `f` weiter und bekommt 0 als Rueckgabewert. Liefert im Elternprozess die PID. */
 int process_fork(const SyscallFrame *f);
 
-/* exec: ersetzt das Programm des aktuellen Prozesses. Kehrt nur bei einem Fehler zurueck (dann bleibt alles unveraendert). */
-int process_exec(const char *path, const char *cmdline);
+/* exec: ersetzt das Programm des aktuellen Prozesses. Kehrt nur bei einem Fehler zurueck (dann bleibt alles unveraendert).
+ * release (kmalloc-Speicher oder 0) wird beim Erfolg kurz vor dem Sprung ins neue Programm freigegeben. */
+int process_exec(const char *path, const char *cmdline, void *release);
+
+#define PROCESS_CMDLINE_MAX 4096 /* Kommandozeile fuer spawn/exec (256 Woerter) */
 
 /* Wartet, bis der Prozess beendet ist. `parent` != 0: nur eigene Kinder (sonst -2). 0 = beendet, -1 = Timeout
  * oder unbekannte PID, -4 = unterbrochen. *faulted: 0 = normal, 1 = durch Fehler, 2 = per Ctrl-C/kill beendet.
@@ -80,8 +88,9 @@ int  process_futex_wake(Process *p, uint64_t addr, uint32_t count);             
 int process_info(unsigned index, ProcInfo *out);
 
 /* Zugriff auf User-Speicher des aktuellen Prozesses (laufen im Adressraum des Prozesses). */
-int process_user_range_ok(const Process *p, uint64_t ptr, uint64_t len, int write);
-int process_copy_string(const Process *p, uint64_t uptr, char *dst, size_t max); /* Laenge oder -1 */
+int process_user_range_ok(const Process *p, uint64_t ptr, uint64_t len, int write); /* write: loest Copy-on-Write auf */
+int process_cow_fault(Process *p, uint64_t addr); /* Schreibfehler auf einer Copy-on-Write-Seite behoben? (1 = ja) */
+int process_copy_string(const Process *p, uint64_t uptr, char *dst, size_t max); /* Laenge; -1 Fehler, -2 zu lang */
 
 /* Pfad aus dem User-Speicher holen und relativ zum Arbeitsverzeichnis zu einem absoluten, normalisierten Pfad machen */
 int  process_path(Process *p, uint64_t upath, char out[VFS_PATH_MAX]);
@@ -91,7 +100,12 @@ const char *process_cwd(const Process *p);
 /* Speicher */
 int64_t process_brk(Process *p, uint64_t addr);            /* addr 0 = abfragen; liefert neues Programmende */
 int64_t process_mmap(Process *p, uint64_t len);            /* anonym, RW, genullt; Adresse oder negativer Fehler */
-int     process_munmap(Process *p, uint64_t addr, uint64_t len);
+int     process_munmap(Process *p, uint64_t addr, uint64_t len);   /* auch Teile von Datei-Einblendungen */
+/* Datei einblenden (SYS_MMAP_FILE): Seiten kommen erst beim Zugriff aus der Datei; privat (Schreiben aendert die Datei
+ * nicht). offset seitenausgerichtet. Adresse oder Fehler (ERR_BADF: keine Datei) */
+int64_t process_mmap_file(Process *p, int fd, uint64_t len, uint64_t offset, int writable);
+/* Fehlende Seite bereitstellen: eingeblendete Datei (laedt sie) oder der Stack (waechst bis 8 MiB). 1 = behoben */
+int     process_page_fault(Process *p, uint64_t addr, int write);
 /* Geteilter Speicher (SYS_SHM): 0 anlegen (bytes, u32 *nummer) -> Adresse, 1 einblenden (nummer) -> Adresse,
  * 2 ausblenden (adresse), 3 Groesse (nummer) -> Bytes */
 int64_t process_shm(Process *p, uint64_t op, uint64_t a, uint64_t b);

@@ -25,6 +25,10 @@ void mouse_goto(int x, int y);
 int write_text(const char *path, const char *text);
 int file_has(const char *path, const char *part);
 int run_sh(const char *cmdline);
+/* Frames, die seit frames (mit Heap heap0 und Kernel-Page-Tables tables0) fehlen, ohne Wachstum von Heap und Tabellen.
+ * Raeumt beendete Threads auf und wartet bis 0,5 s, bis die Bilanz stimmt: ein Thread, der gerade endet, gibt seinen
+ * Kernel-Stack (und ein Prozess seinen Adressraum) erst beim Aufraeumen zurueck. */
+int64_t frames_missing(uint64_t frames, uint64_t heap0, uint64_t tables0);
 
 /* Testgruppen */
 void test_kprintf(void);

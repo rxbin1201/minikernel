@@ -33,6 +33,7 @@ sonst in reiner Emulation. Unter WSL einmalig `sudo usermod -aG kvm $USER` und W
 | `DISK_LAYOUT=none\|mbr\|gpt` | Partitionierung beim Neuanlegen der Datenplatte |
 | `NET=e1000\|e1000e\|none` | Netzwerkkarte im QEMU-User-Netz (Gast 10.0.2.15, Router 10.0.2.2) |
 | `SOUND=none\|wav\|pa\|off` | Soundkarte (Intel HD Audio): Ton ins Leere, nach `Build/sound.wav`, ueber PulseAudio (unter WSLg die Windows-Lautsprecher) oder ohne Karte |
+| `MOUSE=0` | ohne USB-Maus. Standard: `usb-tablet` (absolute Koordinaten, der Zeiger folgt der Maus des Rechners, ohne sie im Fenster einzufangen; PS/2-Mausdaten verwirft der Kernel). Bei den Selbsttests nie |
 | `STICK=12\|16\|exfat` | zusaetzlichen Test-Stick (FAT12/FAT16/exFAT) am USB anschliessen |
 | `TESTS=1` / `TESTS=disk,user` | Selbsttests beim Start (alle bzw. nur diese Gruppen); `KEEP=1` bleibt danach im System |
 | `CMDLINE="..."` | weitere Kernel-Kommandozeile, siehe unten |
@@ -67,7 +68,7 @@ In der Shell: `burn 5000 & burn 5000 & cpus` zeigt zwei ausgelastete CPUs.
 
 ### Threads in Programmen
 
-Ein Programm kann bis zu 16 Threads haben (`Userland/include/thread.h`). Sie teilen Speicher, Datei-Deskriptoren und
+Ein Programm kann bis zu 1024 Threads haben (`Userland/include/thread.h`). Sie teilen Speicher, Datei-Deskriptoren und
 Arbeitsverzeichnis und rechnen auf mehreren CPUs gleichzeitig:
 
 ```c
@@ -87,12 +88,87 @@ thread_join(t, &ergebnis);               // wartet aufs Ende und gibt den Stack 
   beim naechsten Eintritt in den Kernel, wartende werden geweckt. `thread_exit` beendet nur den eigenen Thread, mit dem
   letzten endet das Programm (Code 0).
 - **fork** uebernimmt nur den aufrufenden Thread, **exec** geht nur mit einem Thread (sonst `ERR_AGAIN`).
-- **Kernel:** Platz 0..15 je Prozess (`process.c`), der letzte Thread raeumt den Prozess ab. `brk`/`mmap`/`munmap`
+- **Kernel:** Nummer 0..1023 je Prozess (`process.c`), der letzte Thread raeumt den Prozess ab. `brk`/`mmap`/`munmap`
   laufen bei mehreren Threads mit BKL. Ausgeblendete Seiten werden erst frei, wenn jede CPU, auf der gerade ein
   anderer Thread des Programms lief, ihren TLB geleert hat (IPI `VECTOR_TLB`, ohne darauf zu warten). Ein blockierendes
   `read` haelt sein Dateiobjekt fest, auch wenn ein anderer Thread den Deskriptor schliesst.
 
 `ps` zeigt die Threads je Prozess (Spalte THR). Der Selbsttest `threadtest` prueft das alles (22 Pruefungen).
+
+Threads nutzen: `gl.c` (die CPU zeichnet mit einem Thread je CPU, hoechstens 4, jeder nimmt jede n-te Bildzeile -
+`gldemo -cpu` in QEMU etwa 2,7-mal schneller) und `files` (Kopieren und Verschieben laufen im Hintergrund, die
+Fusszeile zeigt den Fortschritt, Esc bricht ab).
+
+### Grenzen
+
+Die Tabellen fuer Prozesse, Deskriptoren, Threads und Einblendungen wachsen bei Bedarf (`process.c`); feste Grenzen
+gibt es nur noch gegen Ausreisser - ein Programm, das endlos Dateien oeffnet, soll nicht den Kernel-Heap belegen:
+
+| | frueher | jetzt |
+|---|---|---|
+| Prozesse gleichzeitig | 64 | 4096 |
+| offene Deskriptoren je Prozess | 32 | 1024 (wie `ulimit -n` unter Linux) |
+| Threads je Prozess | 16 | 1024 |
+| Datei-Einblendungen / geteilter Speicher je Prozess | 32 / 80 | 1024 / 1024 |
+| geteilte Speicherobjekte im System | 192 | 4096 |
+| Stack | 64 KiB | waechst bei Bedarf bis 8 MiB (Seitenfehler) |
+| Kommandozeile | 16 Woerter, 512 Byte | 256 Woerter, 4 KiB (Shell: Eingabezeile 2048 Zeichen) |
+| Pipe in der Shell / Hintergrund-Jobs | 16 / 8 | 64 / 64 |
+| Kernel-Threads im System | 4096 | 65536 |
+| Pfadlaenge | 127 Zeichen (laengere still gekuerzt) | 1023 Zeichen, laengere: `ERR_NAMETOOLONG` |
+| Pfad im Fensterprotokoll (`WP_OPEN`, z.B. Doppelklick in den Dateien) | 255 Zeichen | 1023 Zeichen |
+| Zwischenablage | 16 KiB (still gekuerzt) | 4 MiB (groesser: `ERR_NOMEM`) |
+| benannte Dienste / wartende Verbindungen je Dienst / Name | 8 / 8 / 15 Zeichen | 256 / 256 / 63 Zeichen |
+| Fenster im Desktop / gerade startende Programme | 16 / 8 | 128 / 32 (Taskleiste: so viele minimierte, wie passen; Fenstermenue: die 30 obersten) |
+| GPU-Flaechen zum Zusammensetzen | 96 | 640 (passen sie nicht in den GGTT-Bereich, setzt die CPU zusammen) |
+
+Prozess-Eintraege und Thread-Bloecke werden nie freigegeben, sondern wiederverwendet: so koennen Interrupts (Strg+C)
+die Listen ohne BKL durchgehen. Pfade: `VFS_PATH_MAX` (Kernel) und `PATH_MAX` (Userland, `user.h`) sind 1024; die
+initrd speichert ihre Knoten weiter mit 256 Zeichen (mehr kann tar nicht). Frueher liess `vfs_normalize` zu lange
+Teile stillschweigend weg - ein zu langer Pfad konnte so auf eine andere Datei zeigen. Selbsttest: `limittest`
+(25 Pruefungen, u.a. genau 1024 offene Dateien und Threads, 100 Prozesse gleichzeitig, 4 MiB Stack, ein Pfad mit gut
+1000 Zeichen auf FAT, 1023 Zeichen erlaubt, 1024 abgelehnt, 1 MiB Zwischenablage, 20 Dienste mit 40 wartenden
+Verbindungen).
+
+### fork mit Copy-on-Write
+
+`fork` kopiert die Seiten nicht mehr, sondern blendet dieselben Frames im Kind ein und macht beschreibbare Seiten in
+beiden Prozessen schreibgeschuetzt (PTE-Bit `PAGE_COW`, `paging.c: as_clone_cow`). Erst wer schreibt, bekommt im
+Seitenfehler eine eigene Kopie; hat sonst niemand mehr den Frame, wird die Seite einfach wieder beschreibbar. Der PMM
+zaehlt dafuer die Benutzer je Frame (`pmm_ref`, ein Byte je Frame); `pmm_free_frame` gibt erst mit dem letzten frei.
+Schreibt der Kernel in einen User-Puffer, loest schon `process_user_range_ok` die Seite auf.
+
+Der haeufigste Fall, `fork` und gleich `exec` (die Shell bei jedem Befehl), kopiert so gar nichts mehr: in QEMU ohne
+KVM dauert `fork` bei 32 MiB belegtem Speicher etwa 7 ms statt 780 ms. Prozesse mit mehreren Threads kopieren weiter
+sofort, und vor dem zweiten Thread werden alle geteilten Seiten aufgeloest - sonst muessten bei jedem Aufloesen erst die
+anderen CPUs ihren TLB leeren. Selbsttest: `cowtest` (11 Pruefungen).
+
+### Dateien einblenden (mmap auf Dateien)
+
+`sys_mmap_file(fd, laenge, offset, schreibbar)` blendet eine Datei in den Speicher ein: das Programm greift einfach
+ueber einen Zeiger darauf zu, gelesen wird erst, wenn es eine Seite anfasst (Seitenfehler, `process.c: vma_fault`;
+jeder Fehler laedt bis zu 64 KiB am Stueck, soweit die Seiten noch fehlen).
+So geht das Einblenden auch bei grossen Dateien sofort, und Teile, die nie gebraucht werden, werden nie gelesen:
+
+```c
+int fd = sys_open("/disk/musik.wav", O_RDONLY);
+const unsigned char *d = (const unsigned char *)sys_mmap_file(fd, groesse, 0, 0);
+sys_close(fd);                 // die Einblendung bleibt
+... d[i] ...                   // liest beim ersten Zugriff die passenden 4 KiB
+sys_munmap((void *)d, groesse);
+```
+
+- **Privat:** mit `schreibbar` darf das Programm hineinschreiben, die Datei bleibt unveraendert (wie `MAP_PRIVATE`).
+  Nur lesbare Einblendungen beenden das Programm beim Schreiben. Hinter dem Dateiende stehen Nullen.
+- Genutzt von `play` und `music` (MP3: der Decoder liest direkt aus der Datei, ohne Puffer und Umkopieren; `play`
+  gibt Gespieltes wieder frei), den Schriften (`ttf.c`: nur gebrauchte Tabellen und Zeichen kommen in den Speicher)
+  und `bmp_load` (`view`, `paint`).
+- Bis zu 32 Einblendungen je Prozess; jede hat ihre eigene Dateiposition (der Deskriptor darf geschlossen werden).
+  `munmap` nimmt auch Teile heraus, `fork` vererbt sie (das Kind laedt fehlende Seiten selbst), `exec` und das
+  Programmende raeumen auf. Liest der Kernel aus einer Einblendung (z.B. `write` aus ihr), laedt
+  `process_user_range_ok` die Seiten vorher.
+- In QEMU ohne KVM: einblenden und der erste Zugriff etwa 3 ms, dieselbe Datei (2 MiB) ganz lesen etwa 15 ms.
+  Selbsttest: `mmaptest` (23 Pruefungen).
 
 ## Intel-Grafik (Gen9: Skylake bis Comet Lake, z.B. UHD Graphics 630)
 

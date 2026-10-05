@@ -27,7 +27,7 @@ static int   top, left;       /* erste sichtbare Zeile, erste sichtbare Spalte *
 static int   sel;             /* Markierung aktiv: von (ay, ax) bis zum Cursor */
 static int   ay, ax;
 static int   modified, crlf, trailing_nl = 1;
-static char  filename[256];
+static char  filename[PATH_MAX];
 static int   rows = 25, cols = 80, cell_w = 8, cell_h = 16;
 static char  msg[200];
 static int   msg_err;
@@ -361,12 +361,11 @@ static void dup_line(void)
 
 static void paste_clipboard(void)
 {
-    static char buf[16384];
-    s64 n = sys_clipboard_get(buf, sizeof(buf));
-    if (n > (s64)sizeof(buf))
-        n = sizeof(buf);
-    if (n > 0)
+    s64 n = sys_clipboard_get(0, 0); /* erst die Laenge (bis 4 MiB), dann der Inhalt */
+    char *buf = n > 0 ? u_malloc((u64)n) : 0;
+    if (buf && (n = sys_clipboard_get(buf, (u64)n)) > 0)
         insert_text(buf, (int)n);
+    u_free(buf);
 }
 
 /* ---------- Bewegen ---------- */

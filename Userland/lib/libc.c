@@ -491,7 +491,7 @@ static int read_small_file(const char *path, char *buf, int max)
 /* Setzt in der cmdline-Datei den Schluessel key (z.B. "mode=") auf value; value == NULL entfernt ihn */
 int boot_cmdline_set(const char *dir, const char *key, const char *value)
 {
-    char path[160], old[300], out[300];
+    char path[PATH_MAX], old[300], out[300];
     snprintf(path, sizeof(path), "%s/cmdline.txt", dir);
     if (read_small_file(path, old, sizeof(old)) < 0)
         old[0] = 0;

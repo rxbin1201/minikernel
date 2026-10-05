@@ -11,6 +11,9 @@
 #define PAGE_NX      (1ULL << 63)                /* wird ignoriert, wenn die CPU kein NX kann */
 #define PAGE_SHARED  (1ULL << 9)  /* frei verwendbares PTE-Bit: Frame gehoert einem Shared-Memory-Objekt (shm.c);
                                    * as_destroy gibt ihn nicht frei, as_clone (fork) uebernimmt die Seite nicht */
+#define PAGE_COW     (1ULL << 10) /* frei verwendbares PTE-Bit: Copy-on-Write nach fork. Die Seite ist schreibgeschuetzt
+                                   * und teilt sich ihren Frame vielleicht mit anderen Adressraeumen (pmm_ref); beim
+                                   * ersten Schreiben bekommt sie eine eigene Kopie (as_cow_resolve) */
 
 /* User-Bereich: ein eigener Top-Level-Slot (PML4-Index 255, 127,5 - 128 TiB), pro Prozess privat. Er liegt weit oberhalb
  * aller realen physischen Adressen (auch hoher PCI-BARs, die die Firmware bei 64-Bit-Fenstern gern weit oben vergibt).
@@ -27,6 +30,13 @@ AddressSpace *as_create(void);            /* teilt den Kernel-Teil, User-Bereich
 void          as_destroy(AddressSpace *as); /* gibt User-Seiten (samt Frames) und Tabellen frei */
 void          as_switch(AddressSpace *as);  /* CR3 laden */
 AddressSpace *as_clone(AddressSpace *src);  /* Kopie aller User-Seiten (fork); NULL bei Speichermangel */
+/* fork mit Copy-on-Write: das Kind bekommt dieselben Frames, beschreibbare Seiten werden in beiden Adressraeumen
+ * schreibgeschuetzt und PAGE_COW. Nur, wenn kein anderer Thread src gerade benutzt (leert den TLB dieser CPU). */
+AddressSpace *as_clone_cow(AddressSpace *src);
+/* Schreibzugriff auf eine PAGE_COW-Seite: eigene Kopie (oder, wenn sonst niemand den Frame hat, einfach wieder
+ * beschreibbar). 1 = erledigt, 0 = keine Copy-on-Write-Seite, -1 = kein Speicher. Nur fuer den eigenen Adressraum. */
+int           as_cow_resolve(AddressSpace *as, uint64_t virt);
+int           as_cow_break_all(AddressSpace *as); /* alle PAGE_COW-Seiten aufloesen (vor dem zweiten Thread); 0 / -1 */
 
 int as_map(AddressSpace *as, uint64_t virt, uint64_t phys, uint64_t flags);
 int as_unmap(AddressSpace *as, uint64_t virt);

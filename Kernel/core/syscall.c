@@ -26,6 +26,7 @@
 #include "drivers/video.h"
 #include "fs/vfs.h"
 #include "core/service.h"
+#include "mm/heap.h"
 
 #define MSR_EFER   0xC0000080
 #define MSR_STAR   0xC0000081
@@ -194,29 +195,42 @@ static int64_t sys_pipe(uint64_t ufds)
 
 /* ---------- Prozesse ---------- */
 
+/* Kommandozeile (bis PROCESS_CMDLINE_MAX) auf den Heap holen: der Kernel-Stack hat nur 16 KiB */
+static char *get_cmdline(Process *p, uint64_t ucmd, int64_t *err)
+{
+    char *cmd = kmalloc(PROCESS_CMDLINE_MAX);
+    *err = !cmd ? ERR_NOMEM : process_copy_string(p, ucmd, cmd, PROCESS_CMDLINE_MAX) < 0 ? ERR_FAULT : 0;
+    if (*err) {
+        kfree(cmd);
+        return 0;
+    }
+    return cmd;
+}
+
 static int64_t sys_spawn(uint64_t upath, uint64_t ucmd)
 {
     Process *p = process_current();
-    char path[VFS_PATH_MAX], cmd[512];
-    int r = get_path(upath, path);
-    if (r < 0)
+    char path[VFS_PATH_MAX];
+    int64_t r = get_path(upath, path);
+    char *cmd = r < 0 ? 0 : get_cmdline(p, ucmd, &r);
+    if (!cmd)
         return r;
-    if (process_copy_string(p, ucmd, cmd, sizeof(cmd)) < 0)
-        return ERR_FAULT;
     int pid = process_spawn(path, cmd, process_pid(p));
+    kfree(cmd);
     return pid < 0 ? ERR_NOENT : pid;
 }
 
 static int64_t sys_exec(uint64_t upath, uint64_t ucmd)
 {
     Process *p = process_current();
-    char path[VFS_PATH_MAX], cmd[512];
-    int r = get_path(upath, path);
-    if (r < 0)
+    char path[VFS_PATH_MAX];
+    int64_t r = get_path(upath, path);
+    char *cmd = r < 0 ? 0 : get_cmdline(p, ucmd, &r);
+    if (!cmd)
         return r;
-    if (process_copy_string(p, ucmd, cmd, sizeof(cmd)) < 0)
-        return ERR_FAULT;
-    return process_exec(path, cmd); /* kehrt nur bei einem Fehler zurueck */
+    r = process_exec(path, cmd, cmd); /* kehrt nur bei einem Fehler zurueck (beim Erfolg gibt es cmd frei) */
+    kfree(cmd);
+    return r;
 }
 
 static int64_t sys_wait(uint64_t pid, uint64_t ucode, uint64_t flags)
@@ -429,6 +443,9 @@ static void syscall_do(SyscallFrame *f)
     case SYS_GETTID:     ret = process_thread_self(process_current()); break;
     case SYS_FUTEX_WAIT: ret = process_futex_wait(process_current(), f->rdi, (uint32_t)f->rsi, f->rdx); break;
     case SYS_FUTEX_WAKE: ret = process_futex_wake(process_current(), f->rdi, (uint32_t)f->rsi); break;
+    case SYS_MMAP_FILE:
+        ret = process_mmap_file(process_current(), (int)(uint32_t)f->rdi, f->rsi, f->rdx, (int)((f->rdi >> 32) & 1));
+        break;
     case SYS_GPUCOMP:  ret = igd_comp_sys(process_pid(process_current()), f->rdi, f->rsi, f->rdx); break;
     case SYS_SERVICE:  ret = sys_service(f->rdi, f->rsi, f->rdx); break;
     case SYS_DUP:      ret = process_fd_dup(process_current(), (int)f->rdi); break;
@@ -745,9 +762,9 @@ static void syscall_do(SyscallFrame *f)
     case SYS_CLIPBOARD: {
         Process *p = process_current();
         uint64_t len = f->rdx;
-        if (len > 16383)
-            len = 16383;
-        if (!process_user_range_ok(p, f->rsi, len, f->rdi == 0)) {
+        if (f->rdi != 0 && len > CONSOLE_CLIP_MAX) {
+            ret = ERR_NOMEM; /* zu gross fuer die Zwischenablage */
+        } else if (!process_user_range_ok(p, f->rsi, len, f->rdi == 0)) {
             ret = ERR_FAULT;
         } else if (f->rdi == 0) {
             uint32_t n;
@@ -755,8 +772,7 @@ static void syscall_do(SyscallFrame *f)
             memcpy((void *)f->rsi, c, n < len ? n : len);
             ret = n;
         } else {
-            console_clipboard_set((const char *)f->rsi, (uint32_t)len);
-            ret = 0;
+            ret = console_clipboard_set((const char *)f->rsi, (uint32_t)len) == 0 ? 0 : ERR_NOMEM;
         }
         break;
     }

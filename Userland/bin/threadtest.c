@@ -190,11 +190,11 @@ static int child(const char *mode)
         sys_exec("/bin/threadtest", "threadtest afterexec");
         return 98;
     }
-    if (strcmp(mode, "afterexec") == 0) { /* neues Programm: wieder Thread 0, alle 15 Plaetze frei */
-        int n = 0;
-        while (n < 16 && thread_create(forever, 0) > 0)
+    if (strcmp(mode, "afterexec") == 0) { /* neues Programm: wieder Thread 0, die Nummern beginnen wieder bei 1 */
+        int first = thread_create(forever, 0), n = first > 0;
+        while (n < 20 && thread_create(forever, 0) > 0)
             n++;
-        return thread_self() == 0 && n == 15 ? 0 : 1;
+        return thread_self() == 0 && first == 1 && n == 20 ? 0 : 1;
     }
     if (strcmp(mode, "lastexit") == 0) { /* der letzte Thread beendet sich selbst: Code 0 */
         thread_create(thread_exit_later, 0);
@@ -262,7 +262,7 @@ void _start(int argc, char **argv)
         sys_exit(child(argv[1]));
 
     /* 1. erzeugen, abholen, Rueckgabewerte; eigene Nummer */
-    int t[16];
+    int t[48];
     for (int i = 0; i < 4; i++)
         t[i] = thread_create(twice, (void *)(u64)(i + 10));
     int ok = 1;
@@ -325,12 +325,12 @@ void _start(int argc, char **argv)
     check(13, thread_join(w, 0) == 0 && pipe_got == 'x');
     sys_close(pipe_fds[1]);
 
-    /* 7. hoechstens 16 Threads; exec geht nur mit einem */
+    /* 7. viele Threads gleichzeitig (frueher hoechstens 16; die Grenze selbst prueft limittest); exec geht nur mit einem */
     int n = 0;
     flag = 0;
-    while (n < 16 && (t[n] = thread_create(forever, 0)) > 0)
+    while (n < 40 && (t[n] = thread_create(forever, 0)) > 0)
         n++;
-    check(14, n == 15 && t[15] == ERR_AGAIN); /* Platz 0 hat der erste Thread */
+    check(14, n == 40);
     check(15, sys_exec("/bin/echo", "echo nein") == ERR_AGAIN);
 
     /* 8. fork mit laufenden Threads: das Kind hat nur den aufrufenden Thread */
@@ -351,5 +351,5 @@ void _start(int argc, char **argv)
 
     if (!failed)
         printf("[threadtest] alle %d Pruefungen OK\n", checks);
-    sys_exit(failed); /* beendet auch die 15 wartenden Threads aus Schritt 7 */
+    sys_exit(failed); /* beendet auch die 40 wartenden Threads aus Schritt 7 */
 }

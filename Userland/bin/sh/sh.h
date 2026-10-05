@@ -20,11 +20,12 @@
  * Interaktiv bildet jede Befehlszeile eine Prozessgruppe; Strg+C beendet die laufende Gruppe (und bricht Schleifen ab),
  * nicht die Shell. Variablen gelten nur in der Shell (es gibt keine Umgebung fuer Programme). */
 
-#define LINE_MAX  512
-#define MAX_CMDS  16
+#define LINE_MAX  2048 /* Eingabezeile */
+#define CMD_MAX   4096 /* Kommandozeile eines Programms (wie im Kernel: PROCESS_CMDLINE_MAX) */
+#define MAX_CMDS  64   /* Befehle in einer Pipe */
 #define HIST_MAX  32
 #define MAX_VARS  256
-#define MAX_JOBS  8
+#define MAX_JOBS  64
 #define MAX_CAND  128
 
 typedef struct {

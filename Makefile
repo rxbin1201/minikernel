@@ -143,6 +143,7 @@ CMDLINE ?=
 NET ?= e1000
 SOUND ?= none
 STICK ?=
+MOUSE ?= 1
 SMP ?= 4
 QEMU_EXTRA ?=
 QEMU_GDB ?=
@@ -190,13 +191,17 @@ QEMU_REBOOT  := $(if $(TESTS),-no-reboot)
 QEMU_XHCI  := $(if $(filter usb,$(DISK)),,-device qemu-xhci$(,)id=xhci)
 QEMU_STICK := $(if $(STICK),$(QEMU_XHCI) -drive file=Build/stick-$(STICK).img$(,)format=raw$(,)if=none$(,)id=stick \
               -device usb-storage$(,)bus=xhci.0$(,)drive=stick)
+# Maus: der Kernel kennt nur USB-Maeuse (PS/2-Mausdaten verwirft er). usb-tablet meldet absolute Koordinaten - der
+# Zeiger folgt der Maus des Rechners, ohne sie im Fenster einzufangen. Nicht bei den Selbsttests (die bewegen die Maus
+# selbst) und nicht mit MOUSE=0. Ein xHCI-Controller kommt dazu, wenn ihn nicht schon DISK=usb oder STICK anlegt.
+QEMU_MOUSE := $(if $(TESTS)$(filter 0,$(MOUSE)),,$(if $(STICK),,$(QEMU_XHCI)) -device usb-tablet$(,)bus=xhci.0)
 
 .PHONY: run efi
 run efi: Build/esp.img Image/disk.img $(if $(STICK),Build/stick-$(STICK).img)
 	qemu-system-x86_64 -bios $(OVMF) $(QEMU_ACCEL) -smp $(SMP) -m 512 -rtc base=localtime -serial file:$(LOG) $(QEMU_DISPLAY) \
 	    -drive file=Build/esp.img,format=raw,index=0,media=disk \
 	    -drive file=Image/disk.img,format=raw,if=none,id=hd0 $(QEMU_DISK_$(DISK)) \
-	    $(QEMU_NET) $(QEMU_SOUND) $(QEMU_STICK) $(QEMU_GDB) $(QEMU_REBOOT) $(QEMU_EXTRA)
+	    $(QEMU_NET) $(QEMU_SOUND) $(QEMU_STICK) $(QEMU_MOUSE) $(QEMU_GDB) $(QEMU_REBOOT) $(QEMU_EXTRA)
 
 # Debuggen mit gdb: 'make debug' startet QEMU angehalten mit gdb-Server auf Port 1234 (ohne KVM, damit normale
 # Breakpoints gehen), 'make gdb' in einem zweiten Terminal verbindet sich (tools/gdbinit: Symbole, Breakpoint kmain).
@@ -291,6 +296,7 @@ help:
 	@echo "  DISK_LAYOUT=none|mbr|gpt    Partitionierung beim Neuanlegen der Datenplatte"
 	@echo "  NET=e1000|e1000e|none       Netzwerkkarte (QEMU-User-Netz, Gast 10.0.2.15)"
 	@echo "  SOUND=none|wav|pa|off       Ton: ins Leere, nach Build/sound.wav, ueber PulseAudio, ohne Soundkarte"
+	@echo "  MOUSE=0                     ohne USB-Maus (Standard: usb-tablet, nicht bei den Selbsttests)"
 	@echo "  SMP=4                       Anzahl CPUs in QEMU (Standard 4)"
 	@echo "  STICK=12|16|exfat           zusaetzlichen Test-Stick anschliessen (tools/mkstick.py)"
 	@echo "  TESTS=1 | TESTS=disk,user   Selbsttests beim Start; KEEP=1 bleibt danach im System"

@@ -10,6 +10,7 @@
 
 /* Bit = 1: belegt/reserviert, Bit = 0: frei */
 static uint64_t *bitmap;
+static uint8_t  *extra;         /* je Frame: weitere Benutzer ausser dem ersten (Copy-on-Write nach fork) */
 static uint64_t  bitmap_words;
 static uint64_t  frame_count;   /* Frames, die die Bitmap abdeckt */
 static uint64_t  managed;       /* tatsaechlich nutzbare Frames */
@@ -72,9 +73,10 @@ void pmm_init(const BootInfo *info)
     frame_count  = max_end / PMM_FRAME_SIZE;
     bitmap_words = (frame_count + 63) / 64;
     uint64_t bitmap_bytes  = bitmap_words * 8;
-    uint64_t bitmap_frames = (bitmap_bytes + PMM_FRAME_SIZE - 1) / PMM_FRAME_SIZE;
+    /* dahinter ein Byte je Frame fuer die Referenzen (8 MiB bei 32 GiB) */
+    uint64_t bitmap_frames = (bitmap_bytes + frame_count + PMM_FRAME_SIZE - 1) / PMM_FRAME_SIZE;
 
-    /* 2. Bitmap in den ersten Bereich legen, der gross genug ist */
+    /* 2. Bitmap und Referenzen in den ersten Bereich legen, der gross genug ist */
     uint64_t bitmap_addr = 0;
     FOR_EACH_DESCRIPTOR(info, d) {
         if (usable_range(d, &s, &e) && e - s >= bitmap_frames * PMM_FRAME_SIZE) {
@@ -87,6 +89,8 @@ void pmm_init(const BootInfo *info)
         return;
     }
     bitmap = (uint64_t *)bitmap_addr;
+    extra = (uint8_t *)(bitmap_addr + bitmap_bytes);
+    memset(extra, 0, frame_count);
 
     /* 3. Erst alles als belegt markieren (inkl. Padding-Bits am Ende), dann freie Bereiche freigeben */
     memset(bitmap, 0xFF, bitmap_bytes);
@@ -167,6 +171,10 @@ static void free_frames_impl(uint64_t addr, uint64_t count)
             kprintf("pmm: double free bei %#lx\n", f * PMM_FRAME_SIZE);
             continue;
         }
+        if (extra[f]) { /* noch ein anderer Benutzer: nur dessen Referenz abgeben */
+            extra[f]--;
+            continue;
+        }
         frame_clear(f);
         free_count++;
         if (f / 64 < search_hint)
@@ -201,6 +209,25 @@ void pmm_free_frames(uint64_t addr, uint64_t count)
     uint64_t f = spin_lock(&pmm_lock);
     free_frames_impl(addr, count);
     spin_unlock(&pmm_lock, f);
+}
+
+int pmm_ref(uint64_t addr)
+{
+    uint64_t f = addr / PMM_FRAME_SIZE;
+    if (addr % PMM_FRAME_SIZE || f >= frame_count)
+        return -1;
+    uint64_t fl = spin_lock(&pmm_lock);
+    int ok = frame_used(f) && extra[f] < 255;
+    if (ok)
+        extra[f]++;
+    spin_unlock(&pmm_lock, fl);
+    return ok ? 0 : -1;
+}
+
+int pmm_shared(uint64_t addr)
+{
+    uint64_t f = addr / PMM_FRAME_SIZE;
+    return f < frame_count && __atomic_load_n(&extra[f], __ATOMIC_ACQUIRE) != 0;
 }
 
 uint64_t pmm_low_page(void)          { return low_page; }

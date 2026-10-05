@@ -423,8 +423,7 @@ static void smp_stress(unsigned n)
     check("Stresstest ohne BKL: lief auf mehreren CPUs", cpus >= 2);
     check("Stresstest ohne BKL: kein Block/Frame doppelt vergeben oder ueberschrieben", stress_bad == 0);
     check("Stresstest ohne BKL: Heap konsistent", heap_check());
-    uint64_t grown = (heap_total_bytes() - heap0) / 4096 + (paging_table_frames() - tables0); /* Heap gibt nichts zurueck */
-    check("Stresstest ohne BKL: alle Frames zurueck", frames - pmm_free_frame_count() == grown);
+    check("Stresstest ohne BKL: alle Frames zurueck", frames_missing(frames, heap0, tables0) == 0);
 }
 
 /* Mehrere CPUs: alle gestarteten CPUs laufen, und User-Programme rechnen wirklich gleichzeitig. Dazu laufen einige
@@ -472,7 +471,9 @@ void test_smp(void)
     }
     kprintf("  (Syscalls waehrenddessen: %lu ohne BKL, %lu mit BKL)\n", (unsigned long)(su1 - su0),
             (unsigned long)(sb1 - sb0));
-    check("burn: Syscalls laufen ueberwiegend ohne BKL (sys_ticks)", su1 - su0 > 1000 && su1 - su0 > 10 * (sb1 - sb0));
+    /* burn fragt die Uhr einmal je Million Schleifendurchlaeufe: wie viele Syscalls das sind, haengt von der Rechenleistung
+     * ab (QEMU ohne KVM: etwa 900-1100). Es zaehlt das Verhaeltnis. */
+    check("burn: Syscalls laufen ueberwiegend ohne BKL (sys_ticks)", su1 - su0 > 200 && su1 - su0 > 10 * (sb1 - sb0));
     uint64_t bkl_ticks = bkl_after - bkl_before;
     kprintf("  (%u x burn 1500 ms: %lu User-Ticks, %u CPU(s) mit mindestens 50; davon %lu Timer-Ticks mit BKL)\n", k,
             (unsigned long)sum, busy, (unsigned long)bkl_ticks);
@@ -498,8 +499,6 @@ void test_smp(void)
         if (mpids[i] <= 0 || process_wait(mpids[i], 0, &code, &faulted, 20000) != 0 || code != 0 || faulted)
             mok = 0;
     }
-    thread_sleep_ms(50); /* Idle-Thread raeumt Adressraeume und Stacks auf */
-    uint64_t grown = (heap_total_bytes() - heap0) / 4096 + (paging_table_frames() - tables0);
     check("brk/mmap/munmap ohne BKL: mehrere memtest gleichzeitig fehlerfrei", mok);
-    check("brk/mmap/munmap ohne BKL: alle Frames zurueck", frames - pmm_free_frame_count() == grown);
+    check("brk/mmap/munmap ohne BKL: alle Frames zurueck", frames_missing(frames, heap0, tables0) == 0);
 }

@@ -48,7 +48,8 @@
                           * warten_ms (hoechstens 1000): am Leseende einer leeren Pipe so lange auf Daten warten (wacht sofort auf) */
 #define SYS_STATFS    46 /* (pfad, u64 out[2]) -> 0: Groesse und freier Platz in Bytes */
 #define SYS_MOUSEMODE 44 /* (1 = Programm wertet die Maus aus, 0 = Konsole) */
-#define SYS_CLIPBOARD 45 /* (0, buf, max) -> Laenge der Zwischenablage (kopiert hoechstens max Bytes); (1, text, len) -> 0: setzen */
+#define SYS_CLIPBOARD 45 /* (0, buf, max) -> Laenge der Zwischenablage (kopiert hoechstens max Bytes); (1, text, len) -> 0: setzen
+                          * (bis 4 MiB, groesser: ERR_NOMEM) */
 #define SYS_KEYMAP    43 /* (name oder 0, out[16]) -> 0 / ERR_INVAL: Layout setzen (us, de, uk) und/oder abfragen */
 #define SYS_MOUSE     42 /* (MouseInfo*) -> 0: Position, Tasten, Rad (seit dem letzten Aufruf), Zaehler */
 #define SYS_TIME      39 /* () -> Sekunden seit 1970-01-01 (Zeit wie in der RTC, meist Ortszeit), 0 = unbekannt */
@@ -93,6 +94,9 @@
 #define SYS_FUTEX_WAIT    72 /* (u32 *adr, wert, timeout_ms; 0 = ohne Grenze) -> 0 geweckt, ERR_AGAIN *adr != wert,
                               * ERR_TIMEDOUT; nur Threads desselben Prozesses */
 #define SYS_FUTEX_WAKE    73 /* (u32 *adr, anzahl) -> geweckte Threads */
+#define SYS_MMAP_FILE     74 /* (fd | schreibbar << 32, laenge, offset) -> Adresse: Datei einblenden, Seiten werden erst beim
+                              * Zugriff gelesen; privat (Schreiben aendert die Datei nicht), offset Vielfaches von 4096,
+                              * hinter dem Dateiende Nullen; freigeben mit munmap. ERR_BADF: fd ist keine Datei */
 
 /* Argument fuer SYS_SENDTO/SYS_RECVFROM (gleiches Layout in Userland/user.h) */
 typedef struct {
@@ -133,6 +137,7 @@ typedef struct {
 #define ERR_NOSPC     (-28)
 #define ERR_ROFS      (-30)
 #define ERR_PIPE      (-32)
+#define ERR_NAMETOOLONG (-36) /* Pfad laenger als VFS_PATH_MAX (1023 Zeichen) */
 #define ERR_NOSYS     (-38)
 #define ERR_NOTEMPTY  (-39)
 #define ERR_NETUNREACH  (-101)

@@ -240,15 +240,20 @@ static void bar_layout(Bar *b)
 {
     b->h = SEG_H;
     b->y = H - U(8) - SEG_H;
-    b->nm = n_minimized();
-    b->n = NAPPS + b->nm;
-    b->sep = b->nm ? U(9) : 0;
     clock_texts(b->time, sizeof(b->time), b->date, sizeof(b->date));
     int tw = text_width(font_bold, FS, b->time), dw = text_width(font_ui, FS_SMALL, b->date);
-    b->sw[0] = SPAD * 2 + b->n * SLOT + b->sep;
     b->sw[1] = SPAD * 2 + 3 * BTN;
     b->sw[2] = (tw > dw ? tw : dw) + U(18) * 2;
     b->sw[3] = SPAD * 2 + TBTN * (1 + (net_ok != 0) + (vol_level >= 0));
+    /* minimierte Fenster: so viele, wie auf den Bildschirm passen (die anderen im Fenstermenue) */
+    int room = W - U(32) - b->sw[1] - b->sw[2] - b->sw[3] - 3 * SGAP - SPAD * 2 - U(9);
+    int fit = room / SLOT - NAPPS;
+    b->nm = n_minimized();
+    if (b->nm > fit)
+        b->nm = fit > 0 ? fit : 0;
+    b->n = NAPPS + b->nm;
+    b->sep = b->nm ? U(9) : 0;
+    b->sw[0] = SPAD * 2 + b->n * SLOT + b->sep;
     int total = b->sw[0] + b->sw[1] + b->sw[2] + b->sw[3] + 3 * SGAP, x = (W - total) / 2;
     for (int i = 0; i < 4; i++) {
         b->sx[i] = x;
@@ -743,15 +748,26 @@ static const MenuItem win_actions[] = {
     {"Fenster schlie\xC3\x9F" "en", A_WIN_CLOSE, "Alt+W"}, {"Programm beenden", A_APP_QUIT, "Alt+Q"},
 };
 #define NWACT ((int)(sizeof(win_actions) / sizeof(win_actions[0])))
-static MenuItem win_items[MAXW + NWACT + 2];
+#define WINMENU_MAX 30 /* so viele Fenster zeigt das Menue (die obersten); mehr passen nicht auf den Bildschirm */
+static MenuItem win_items[WINMENU_MAX + NWACT + 3];
+static char     win_more[40];
 
 static int build_windows(void)
 {
-    int n = 0;
+    int n = 0, more = 0;
     for (int i = nord - 1; i >= 0; i--)
-        if (order[i]->used && order[i]->anim != ANIM_CLOSE)
+        if (order[i]->used && order[i]->anim != ANIM_CLOSE) {
+            if (n == WINMENU_MAX) {
+                more++;
+                continue;
+            }
             win_items[n++] = (MenuItem){order[i]->title, A_WINSEL + (int)(order[i] - wins),
                                         order[i]->minimized ? "minimiert" : 0};
+        }
+    if (more) {
+        snprintf(win_more, sizeof(win_more), "%d weitere (Alt+Tab)", more);
+        win_items[n++] = (MenuItem){"\xE2\x80\xA6", A_INFO, win_more};
+    }
     if (!n)
         win_items[n++] = (MenuItem){"Keine Fenster", A_INFO, ""};
     win_items[n++] = (MenuItem){"", A_SEP, 0};

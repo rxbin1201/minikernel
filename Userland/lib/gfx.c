@@ -1101,18 +1101,17 @@ int bmp_load(const char *path, Surface *out, char *err, int errmax)
         snprintf(err, (size_t)errmax, "nicht gefunden");
         return -1;
     }
-    unsigned char *data = gfx_alloc(st.size + 1);
-    if (!data) {
-        snprintf(err, (size_t)errmax, "kein Speicher");
-        return -1;
-    }
+    /* eingeblendet statt gelesen: kein zweiter Puffer neben dem Bild, gelesen wird beim Umwandeln */
     s64 fd = sys_open(path, O_RDONLY);
-    u64 got = 0;
-    s64 r;
-    while (fd >= 0 && got < st.size && (r = sys_read((int)fd, data + got, st.size - got)) > 0)
-        got += (u64)r;
+    s64 m = fd >= 0 && st.size ? sys_mmap_file((int)fd, st.size, 0, 0) : ERR_INVAL;
     if (fd >= 0)
         sys_close((int)fd);
+    if (m < 0) {
+        snprintf(err, (size_t)errmax, fd < 0 ? "nicht lesbar" : st.size ? "kein Speicher" : "kein BMP-Bild");
+        return -1;
+    }
+    const unsigned char *data = (const unsigned char *)m;
+    u64 got = st.size;
     int ok = -1;
     if (got < 54 || data[0] != 'B' || data[1] != 'M') {
         snprintf(err, (size_t)errmax, "kein BMP-Bild");
@@ -1130,8 +1129,9 @@ int bmp_load(const char *path, Surface *out, char *err, int errmax)
             } else if (surface_new(out, w, h) != 0) {
                 snprintf(err, (size_t)errmax, "kein Speicher");
             } else {
-                for (int y = 0; y < h; y++) {
-                    const unsigned char *row = data + off + stride * (u64)(top_down ? y : h - 1 - y);
+                for (int r = 0; r < h; r++) { /* in der Reihenfolge der Datei (meist von unten nach oben): vorwaerts lesen */
+                    const unsigned char *row = data + off + stride * (u64)r;
+                    int y = top_down ? r : h - 1 - r;
                     for (int x = 0; x < w; x++) {
                         const unsigned char *p = row + x * (bpp / 8);
                         out->px[(u64)y * (u64)w + (u64)x] = RGB(p[2], p[1], p[0]);
@@ -1141,7 +1141,7 @@ int bmp_load(const char *path, Surface *out, char *err, int errmax)
             }
         }
     }
-    gfx_free(data, st.size + 1);
+    sys_munmap((void *)data, st.size);
     return ok;
 }
 

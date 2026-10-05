@@ -19,7 +19,7 @@ static u64 walk(const char *path, int depth)
     u64 total = 0;
     DirEnt ent;
     for (u64 i = 0; sys_readdir(path, i, &ent) == 0; i++) {
-        char child[512];
+        char child[PATH_MAX];
         join_path(child, sizeof(child), path, ent.name);
         if (ent.is_dir) {
             total += walk(child, depth + 1);

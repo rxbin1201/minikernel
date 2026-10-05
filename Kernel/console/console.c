@@ -254,8 +254,19 @@ static uint64_t hist_dropped;            /* Zeilen, die ganz verloren sind (aus 
 static int      sel_active, sel_dragging;
 static uint64_t sel_a_id, sel_b_id;
 static uint32_t sel_a_col, sel_b_col;
-static char     clip[16384];              /* Zwischenablage (UTF-8) */
+/* Zwischenablage (UTF-8) auf dem Heap, bis CONSOLE_CLIP_MAX (frueher fest 16 KiB). Zugriffe unter dem BKL (Syscall,
+ * Tastatur-Interrupt, USB-Thread); der Heap-Lock sperrt die Interrupts, kmalloc geht also auch im Interrupt. */
+static char    *clip;
 static uint32_t clip_len;
+
+/* Neuen Inhalt (kmalloc-Puffer, abgeschlossen mit 0) uebernehmen, den alten freigeben */
+static void clip_replace(char *text, uint32_t len)
+{
+    char *old = clip;
+    clip = text;
+    clip_len = len;
+    kfree(old);
+}
 
 /* Liegt die Zelle in der Markierung? */
 static int in_sel(uint64_t id, uint32_t col)
@@ -866,6 +877,13 @@ uint32_t console_copy_selection(void)
     }
     uint32_t n = 0;
     uint64_t total = hist_count + rows;
+    uint64_t want = (i2 - i1 + 1) * ((uint64_t)cols * 4 + 1) + 1; /* hoechstens 4 Byte je Zeichen, \n je Zeile */
+    uint32_t cap = want < CONSOLE_CLIP_MAX ? (uint32_t)want : CONSOLE_CLIP_MAX;
+    char *buf = kmalloc(cap);
+    if (!buf) {
+        irq_restore(f);
+        return 0;
+    }
     for (uint64_t id = i1; id <= i2; id++) {
         if (id < hist_dropped || id - hist_dropped >= total)
             continue; /* Zeile gibt es nicht mehr */
@@ -875,13 +893,13 @@ uint32_t console_copy_selection(void)
         for (uint32_t c = from; c <= to; c++)
             if (line[c].ch && line[c].ch != ' ')
                 last = c + 1;
-        for (uint32_t c = from; c < last && n + 5 < sizeof(clip); c++)
-            n += (uint32_t)utf8_encode(line[c].ch ? line[c].ch : ' ', clip + n);
-        if (id != i2 && n + 1 < sizeof(clip))
-            clip[n++] = '\n';
+        for (uint32_t c = from; c < last && n + 5 < cap; c++)
+            n += (uint32_t)utf8_encode(line[c].ch ? line[c].ch : ' ', buf + n);
+        if (id != i2 && n + 1 < cap)
+            buf[n++] = '\n';
     }
-    clip[n] = 0;
-    clip_len = n;
+    buf[n] = 0;
+    clip_replace(buf, n);
     sel_active = sel_dragging = 0;
     selection_changed();
     irq_restore(f);
@@ -891,17 +909,21 @@ uint32_t console_copy_selection(void)
 const char *console_clipboard(uint32_t *len)
 {
     if (len)
-        *len = clip_len;
-    return clip;
+        *len = clip ? clip_len : 0;
+    return clip ? clip : "";
 }
 
-void console_clipboard_set(const char *text, uint32_t len)
+int console_clipboard_set(const char *text, uint32_t len)
 {
-    if (len > sizeof(clip) - 1)
-        len = sizeof(clip) - 1;
-    memcpy(clip, text, len);
-    clip[len] = 0;
-    clip_len = len;
+    if (len > CONSOLE_CLIP_MAX)
+        return -1;
+    char *t = kmalloc((size_t)len + 1);
+    if (!t)
+        return -1;
+    memcpy(t, text, len);
+    t[len] = 0;
+    clip_replace(t, len);
+    return 0;
 }
 
 uint32_t console_history_lines(void) { return hist_count; }

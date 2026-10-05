@@ -1,15 +1,16 @@
 /* MP3 (MPEG-1/2/2.5 Layer III, auch I/II) abspielen oder in WAV umwandeln. Dekodiert wird mit minimp3 von lieff
- * (https://github.com/lieff/minimp3, CC0 / gemeinfrei, unveraendert in Userland/include/minimp3.h). Die Datei wird
- * stueckweise gelesen; jeder Frame (1152 Abtastwerte) geht direkt an den Mischer des Kernels, der Rate und
- * Mono/Stereo selbst umrechnet. */
+ * (https://github.com/lieff/minimp3, CC0 / gemeinfrei, unveraendert in Userland/include/minimp3.h). Die Datei ist
+ * eingeblendet (sys_mmap_file): der Decoder liest direkt aus ihr, ohne Puffer und Umkopieren; schon Gespieltes wird
+ * in Stuecken von 1 MiB wieder ausgeblendet. Jeder Frame (1152 Abtastwerte) geht direkt an den Mischer des Kernels,
+ * der Rate und Mono/Stereo selbst umrechnet. */
 
 #include "libc.h"
 #include "minimp3.h" /* nur die Deklarationen; die Implementierung steht in mp3dec.c */
 #include "play.h"
 
-#define INBUF (64 * 1024)
+#define WINDOW  (64 * 1024)  /* so viel bekommt der Decoder je Frame zu sehen */
+#define RELEASE (1024 * 1024) /* Gespieltes in diesen Stuecken freigeben */
 
-static unsigned char inbuf[INBUF];
 static short         pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
 static mp3dec_t      dec;
 
@@ -57,9 +58,16 @@ int play_mp3(const char *file, int fd, const char *wav_out)
 {
     s64 size = sys_lseek(fd, 0, 2);
     s64 start = skip_id3(fd), left_in_file = size - start;
+    s64 map = size > 0 ? sys_mmap_file(fd, (u64)size, 0, 0) : ERR_INVAL;
+    if (map < 0) {
+        fprintf(2, "play: %s laesst sich nicht einblenden (Fehler %d)\n", file, (int)map);
+        return 1;
+    }
+    const unsigned char *data = (const unsigned char *)map;
+    u64 pos = start > 0 && start < size ? (u64)start : 0, released = 0;
     mp3dec_init(&dec);
     mp3dec_frame_info_t info;
-    int fill = 0, open_hz = 0, open_ch = 0, out = -1, tty = sys_isatty(1) != 0, last_sec = -1;
+    int open_hz = 0, open_ch = 0, out = -1, tty = sys_isatty(1) != 0, last_sec = -1;
     unsigned long long samples = 0, out_bytes = 0;
     unsigned est_total = 0; /* geschaetzte Laenge in s (aus der Bitrate des ersten Frames) */
     if (wav_out) {
@@ -70,26 +78,20 @@ int play_mp3(const char *file, int fd, const char *wav_out)
         }
         wav_header(out, 44100, 2, 0); /* Platzhalter, am Ende mit den echten Werten ueberschrieben */
     }
-    int eof = 0;
-    for (;;) {
-        if (!eof && fill < INBUF / 2) { /* nachlesen */
-            s64 n = sys_read(fd, inbuf + fill, (u64)(INBUF - fill));
-            if (n <= 0)
-                eof = 1;
-            else
-                fill += (int)n;
-        }
-        if (!fill)
-            break;
-        int s = mp3dec_decode_frame(&dec, inbuf, fill, pcm, &info);
-        if (!info.frame_bytes) { /* nichts mehr gefunden */
-            if (eof)
+    while (pos < (u64)size) {
+        u64 left = (u64)size - pos;
+        int s = mp3dec_decode_frame(&dec, data + pos, (int)(left < WINDOW ? left : WINDOW), pcm, &info);
+        if (!info.frame_bytes) { /* im Fenster nichts gefunden: dahinter weitersuchen (oder Ende) */
+            if (left <= WINDOW)
                 break;
-            fill = 0; /* Muell: weiterlesen */
+            pos += WINDOW / 2;
             continue;
         }
-        memmove(inbuf, inbuf + info.frame_bytes, (u64)(fill - info.frame_bytes));
-        fill -= info.frame_bytes;
+        pos += (u64)info.frame_bytes;
+        while (pos - released > 2 * RELEASE) { /* Gespieltes ausblenden: belegt sonst bis zum Ende Speicher */
+            sys_munmap((void *)(data + released), RELEASE);
+            released += RELEASE;
+        }
         if (!s)
             continue; /* z.B. Xing/Info-Kopf oder noch kein Hauptdaten-Vorrat */
         if (info.hz != open_hz || info.channels != open_ch) {
@@ -138,6 +140,7 @@ int play_mp3(const char *file, int fd, const char *wav_out)
                 printf(" / %u:%02u", est_total / 60, est_total % 60);
         }
     }
+    sys_munmap((void *)(data + released), (u64)size - released);
     if (tty)
         printf("\n");
     if (!open_hz) {

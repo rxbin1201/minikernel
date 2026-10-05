@@ -19,7 +19,9 @@
  *   melden sich ueber den Dienst "desktop" und bekommen ebenfalls ein Fenster. "Zur Konsole" beendet den Desktop.
  * Alle Masse sind fuer 1920x1080 angegeben und werden mit U() (ui.h) an groessere Bildschirme angepasst. */
 
-#define MAXW 16
+/* Fenster gleichzeitig (frueher 16). Je Fenster blendet der Desktop 4 Stuecke geteilten Speicher ein und meldet sie
+ * fuer die GPU an (Kernel: bis 1024 Einblendungen je Prozess, 640 GPU-Flaechen) */
+#define MAXW 128
 
 /* Masse des Desktops (chrome.c: desk_init); Schriften und Farben in ui.h */
 extern int MENUBAR_H, TITLE_H, DOCK_H, RADIUS, SHADOW; /* MENUBAR_H: oberer Rand der Fensterflaeche (0) */
@@ -68,7 +70,8 @@ static inline int win_th(const Win *w) { return (w->flags & WPF_FRAMELESS) ? 0 :
 /* Aktionen (Menues und Taskleiste). Die ersten sind zugleich die Programmsymbole (ICON_* in ui.h). */
 enum { A_NONE, A_TERM, A_FILES, A_CALC, A_CLOCK, A_ABOUT, A_PAINT, A_SNAKE, A_TETRIS, A_EDIT, A_MUSIC, A_QUIT = 20, A_SEP,
        A_WIN_NEW, A_WIN_MIN, A_WIN_ZOOM, A_WIN_CLOSE, A_APP_QUIT, A_SNAP_LEFT, A_SNAP_RIGHT, A_NEXT_WIN,
-       A_RESTART, A_POWEROFF, A_INFO, A_NET_DHCP, A_SEARCH, A_WINSEL = 64 };
+       A_RESTART, A_POWEROFF, A_INFO, A_NET_DHCP, A_SEARCH,
+       A_WINSEL = 512 /* bis A_WINSEL + MAXW: hinter allen Aktionen und Programmsymbolen (ICON_IMAGE = 101) */ };
 /* A_INFO: Zeile nur zum Lesen (Name links, Wert rechts); A_SEARCH: Suchfeld im Startmenue; A_WINSEL + i: Fenster wins[i] */
 
 typedef struct {

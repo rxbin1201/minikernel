@@ -53,8 +53,9 @@ void        console_select_line(int x, int y);    /* Dreifachklick: ganze Zeile 
 int         console_has_selection(void);
 void        console_select_clear(void);
 uint32_t    console_copy_selection(void);         /* Markierung -> Zwischenablage; Laenge, 0 = nichts markiert */
+#define CONSOLE_CLIP_MAX (4u << 20) /* Zwischenablage: hoechstens 4 MiB */
 const char *console_clipboard(uint32_t *len);
-void        console_clipboard_set(const char *text, uint32_t len);
+int         console_clipboard_set(const char *text, uint32_t len); /* 0, -1 = zu gross oder kein Speicher */
 
 /* Mauszeiger (nur Framebuffer, nicht im Abbild): Position der Spitze in Pixeln; visible = 0 blendet ihn aus */
 void     console_cursor_set(int x, int y, int visible);

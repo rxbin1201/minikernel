@@ -9,8 +9,10 @@
  *   (Doppelklick oder Enter spielt), unten Ordner wechseln und die Lautstaerke dieses Programms.
  *   Tasten: Leertaste Abspielen/Pause, Pfeil links/rechts 10 s zurueck/vor, hoch/runter Auswahl, n/p naechster/voriger.
  * Gespielt wird ueber eine eigene Stimme im Mischer des Kernels (SYS_AUDIO), in kleinen Portionen (je etwa 0,25 s
- * Vorrat), damit die Oberflaeche nie wartet. Bei MP3 liest das Programm nebenbei alle Frame-Koepfe (ohne zu
- * dekodieren): daraus die genaue Laenge und eine Sprungtabelle, damit Springen auch ohne feste Bitrate genau landet. Fuer die Pause merkt sich das Programm die zuletzt geschickten
+ * Vorrat), damit die Oberflaeche nie wartet. Eine MP3-Datei ist eingeblendet (sys_mmap_file): Decoder und Kopf-
+ * Durchlauf lesen direkt aus ihr, ohne Puffer und Umkopieren, Springen setzt nur die Position. Nebenbei liest das
+ * Programm alle Frame-Koepfe (ohne zu dekodieren): daraus die genaue Laenge und eine Sprungtabelle, damit Springen
+ * auch ohne feste Bitrate genau landet. Fuer die Pause merkt sich das Programm die zuletzt geschickten
  * Abtastwerte: was im Kernel noch nicht gespielt war, wird beim Fortsetzen noch einmal geschickt (keine Luecke). */
 
 /* ---------------------------------------------------------------------------------------------------------------------
@@ -27,7 +29,7 @@ typedef struct {
     int  scanned; /* Tags und Laenge gelesen */
 } Track;
 
-static char   folder[256] = "/disk";
+static char   folder[PATH_MAX] = "/disk";
 static Track *tracks;
 static int    ntracks, sel = -1, scroll;
 
@@ -191,7 +193,7 @@ static void scan_track(int i)
 {
     Track *t = &tracks[i];
     t->scanned = 1;
-    char p[512];
+    char p[PATH_MAX];
     if (track_path(i, p, sizeof(p)))
         return;
     s64 fd = sys_open(p, O_RDONLY);
@@ -293,10 +295,11 @@ static s64      w_start;
 static u64      w_left;
 static unsigned char w_in[CHUNK * 8 * 4];
 /* MP3 */
-static mp3dec_t      dec;
-static unsigned char inbuf[65536];
-static int           fill, eof;
-static s64           m_start, m_size;
+#define WINDOW 65536             /* so viel sieht der Decoder je Frame */
+static mp3dec_t             dec;
+static const unsigned char *mdata; /* eingeblendete Datei (m_size Bytes) */
+static u64                  mpos;  /* naechster Frame */
+static s64                  m_start, m_size;
 static short         pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
 static short         out[MINIMP3_MAX_SAMPLES_PER_FRAME > CHUNK * 2 ? MINIMP3_MAX_SAMPLES_PER_FRAME : CHUNK * 2];
 static u64           skip_smp;  /* nach einem Sprung: so viele Abtastwerte noch verwerfen */
@@ -307,11 +310,9 @@ typedef struct {
     u64 off, smp;
 } SeekPt;
 static SeekPt       *seek_tab;
-static int           nseek, capseek, scan_fd = -1, scan_done, sfill, seof;
-static u64           scan_smp, scan_frames;
-static s64           sbase;     /* Dateiposition von sbuf[0] */
+static int           nseek, capseek, scanning, scan_done;
+static u64           scan_smp, scan_frames, spos; /* spos: Stelle des Durchlaufs in der Datei */
 static mp3dec_t      sdec;
-static unsigned char sbuf[65536];
 
 static void say(const char *m)
 {
@@ -439,9 +440,7 @@ static void send(const short *st, u64 frames, int remember) /* Stereo an die Sti
 
 static void scan_stop(void)
 {
-    if (scan_fd >= 0)
-        sys_close(scan_fd);
-    scan_fd = -1;
+    scanning = 0;
 }
 
 static void stop_file(void)
@@ -450,34 +449,45 @@ static void stop_file(void)
     if (pfd >= 0)
         sys_close(pfd);
     pfd = -1;
+    if (mdata)
+        sys_munmap((void *)mdata, (u64)m_size);
+    mdata = 0;
     playing = 0;
     scan_stop();
 }
 
-/* Ein Stueck des Kopf-Durchlaufs (hoechstens zwei Puffer je Aufruf, damit die Oberflaeche nicht wartet) */
+/* Naechster Frame ab *pos in der eingeblendeten Datei (dec: Decoder, pcm 0 = nur Kopf). Liefert die Abtastwerte und
+ * setzt *pos dahinter; info->frame_bytes = 0: keiner mehr bis zum Ende. */
+static int next_frame(mp3dec_t *d, u64 *pos, short *out_pcm, mp3dec_frame_info_t *info)
+{
+    while (*pos < (u64)m_size) {
+        u64 left = (u64)m_size - *pos;
+        int s = mp3dec_decode_frame(d, mdata + *pos, (int)(left < WINDOW ? left : WINDOW), out_pcm, info);
+        if (info->frame_bytes) {
+            *pos += (u64)info->frame_bytes; /* schliesst uebersprungenen Muell vor dem Frame ein (frame_offset) */
+            return s;
+        }
+        if (left <= WINDOW)
+            break;
+        *pos += WINDOW / 2; /* im Fenster kein Frame: dahinter weitersuchen */
+    }
+    *pos = (u64)m_size;
+    info->frame_bytes = 0;
+    return 0;
+}
+
+/* Ein Stueck des Kopf-Durchlaufs (hoechstens 128 KiB je Aufruf, damit die Oberflaeche nicht wartet) */
 static void scan_step(void)
 {
-    if (scan_fd < 0)
+    if (!scanning)
         return;
-    for (int round = 0; round < 2; round++) {
-        if (!seof && sfill < (int)sizeof(sbuf)) {
-            s64 n = sys_read(scan_fd, sbuf + sfill, sizeof(sbuf) - (u64)sfill);
-            if (n <= 0)
-                seof = 1;
-            else
-                sfill += (int)n;
-        }
-        int off = 0;
-        for (;;) {
-            if (!seof && sfill - off < 4096)
-                break; /* nachlesen, damit ein Frame ganz im Puffer liegt */
-            mp3dec_frame_info_t info;
-            int smp = mp3dec_decode_frame(&sdec, sbuf + off, sfill - off, 0, &info);
-            if (!info.frame_bytes) {
-                off = sfill;
-                break;
-            }
-            if (scan_frames % 16 == 0) {
+    u64 stop = spos + 2 * WINDOW;
+    while (spos < stop) {
+        mp3dec_frame_info_t info;
+        int smp = next_frame(&sdec, &spos, 0, &info);
+        if (!info.frame_bytes)
+            break;
+        if (scan_frames % 16 == 0) {
                 if (nseek == capseek) {
                     int c = capseek ? capseek * 2 : 256;
                     SeekPt *n = u_malloc(sizeof(SeekPt) * (u64)c);
@@ -487,41 +497,31 @@ static void scan_step(void)
                     seek_tab = n;
                     capseek = c;
                 }
-                seek_tab[nseek].off = (u64)(sbase + off + info.frame_offset);
-                seek_tab[nseek++].smp = scan_smp;
-            }
-            scan_smp += (u64)smp;
-            scan_frames++;
-            off += info.frame_offset + info.frame_bytes;
+            seek_tab[nseek].off = spos - (u64)info.frame_bytes + (u64)info.frame_offset; /* Anfang des Frames */
+            seek_tab[nseek++].smp = scan_smp;
         }
-        memmove(sbuf, sbuf + off, (u64)(sfill - off));
-        sfill -= off;
-        sbase += off;
-        if (seof && sfill == 0) { /* fertig: jetzt ist die Laenge genau */
-            scan_stop();
-            scan_done = 1;
-            if (scan_smp && rate) {
-                total_frames = scan_smp;
-                if (cur >= 0)
-                    tracks[cur].secs = (int)(scan_smp / (u64)rate);
-            }
-            return;
+        scan_smp += (u64)smp;
+        scan_frames++;
+    }
+    if (spos >= (u64)m_size) { /* fertig: jetzt ist die Laenge genau */
+        scan_stop();
+        scan_done = 1;
+        if (scan_smp && rate) {
+            total_frames = scan_smp;
+            if (cur >= 0)
+                tracks[cur].secs = (int)(scan_smp / (u64)rate);
         }
     }
 }
 
-static void scan_start(const char *path)
+static void scan_start(void)
 {
-    scan_stop();
     nseek = 0;
     scan_done = 0;
     scan_smp = scan_frames = 0;
-    sfill = seof = 0;
-    sbase = m_start;
+    spos = (u64)m_start;
     mp3dec_init(&sdec);
-    scan_fd = (int)sys_open(path, O_RDONLY);
-    if (scan_fd >= 0)
-        sys_lseek(scan_fd, m_start, 0);
+    scanning = 1;
 }
 
 static void start_track(int i, int autoplay);
@@ -570,16 +570,14 @@ static void seek_to(u64 target)
         skip_smp = 0;
         if (scan_done && nseek) { /* genau: Sprungpunkt etwas vor dem Ziel (Bit-Reservoir), den Rest verwerfen */
             int k = nseek - 1;
-            while (k > 0 && seek_tab[k].smp + 2304 > target)
+            while (k > 0 && seek_tab[k].smp + 10 * 1152 > target) /* Vorlauf: bis zu 10 Frames ohne Ton */
                 k--;
             off = (s64)seek_tab[k].off;
             skip_smp = target > seek_tab[k].smp ? target - seek_tab[k].smp : 0;
         } else { /* Durchlauf noch nicht fertig: anteilig nach Bytes */
             off = m_start + (total_frames ? (s64)((u64)(m_size - m_start) * target / total_frames) : 0);
         }
-        sys_lseek(pfd, off, 0);
-        fill = 0;
-        eof = 0;
+        mpos = (u64)off;
         mp3dec_init(&dec);
     }
     seeked = 1;
@@ -601,7 +599,7 @@ static void start_track(int i, int autoplay)
     stop_file();
     cur = i;
     sel = i;
-    char p[512];
+    char p[PATH_MAX];
     if (i < 0 || i >= ntracks || track_path(i, p, sizeof(p)) || (pfd = (int)sys_open(p, O_RDONLY)) < 0) {
         say("Datei nicht lesbar");
         return;
@@ -629,27 +627,26 @@ static void start_track(int i, int autoplay)
                  w_bits, w_ch == 1 ? "Mono" : "Stereo");
     } else {
         m_size = sys_lseek(pfd, 0, 2);
-        sys_lseek(pfd, 0, 0);
-        unsigned char h[10];
+        s64 map = m_size > 0 ? sys_mmap_file(pfd, (u64)m_size, 0, 0) : ERR_INVAL;
+        if (map < 0) {
+            say("Datei l\xC3\xA4sst sich nicht einblenden");
+            stop_file();
+            return;
+        }
+        mdata = (const unsigned char *)map;
         m_start = 0;
-        if (sys_read(pfd, h, 10) == 10 && h[0] == 'I' && h[1] == 'D' && h[2] == '3')
-            m_start = 10 + (s64)syncsafe(h + 6) + ((h[5] & 0x10) ? 10 : 0);
-        sys_lseek(pfd, m_start, 0);
+        if (m_size >= 10 && mdata[0] == 'I' && mdata[1] == 'D' && mdata[2] == '3')
+            m_start = 10 + (s64)syncsafe(mdata + 6) + ((mdata[5] & 0x10) ? 10 : 0);
+        if (m_start >= m_size)
+            m_start = 0;
+        mpos = (u64)m_start;
         mp3dec_init(&dec);
-        fill = 0;
-        eof = 0;
-        /* ersten Frame suchen: Rate und Format */
+        /* ersten Frame suchen: Rate und Format (nur Kopf ansehen, die Position bleibt) */
         mp3dec_frame_info_t info;
         info.hz = 0;
+        u64 look = mpos;
         for (int tries = 0; tries < 64 && !info.hz; tries++) {
-            if (!eof && fill < (int)sizeof(inbuf) / 2) {
-                s64 n = sys_read(pfd, inbuf + fill, sizeof(inbuf) - (u64)fill);
-                if (n <= 0)
-                    eof = 1;
-                else
-                    fill += (int)n;
-            }
-            mp3dec_decode_frame(&dec, inbuf, fill, 0, &info); /* nur Kopf ansehen */
+            next_frame(&dec, &look, 0, &info);
             if (!info.frame_bytes)
                 break;
         }
@@ -663,7 +660,7 @@ static void start_track(int i, int autoplay)
         snprintf(fmt_line, sizeof(fmt_line), "MP3  \xC2\xB7  %d,%d kHz  \xC2\xB7  %d kbit/s  \xC2\xB7  %s", info.hz / 1000,
                  info.hz % 1000 / 100, info.bitrate_kbps, info.channels == 1 ? "Mono" : "Stereo");
         mp3dec_init(&dec); /* das Ansehen hat nichts verbraucht; Decoder frisch fuer den Anfang */
-        scan_start(p);     /* nebenbei: genaue Laenge und Sprungtabelle */
+        scan_start();      /* nebenbei: genaue Laenge und Sprungtabelle */
     }
     status[0] = 0;
     if (autoplay && open_voice() == 0)
@@ -737,27 +734,17 @@ static int produce(void)
         return 1;
     }
     for (;;) {
-        if (!eof && fill < (int)sizeof(inbuf) / 2) {
-            s64 n = sys_read(pfd, inbuf + fill, sizeof(inbuf) - (u64)fill);
-            if (n <= 0)
-                eof = 1;
-            else
-                fill += (int)n;
-        }
-        if (!fill)
-            return 0;
         mp3dec_frame_info_t info;
-        int s = mp3dec_decode_frame(&dec, inbuf, fill, pcm, &info);
-        if (!info.frame_bytes) {
-            if (eof)
-                return 0;
-            fill = 0;
+        int s = next_frame(&dec, &mpos, pcm, &info);
+        if (!info.frame_bytes)
+            return 0; /* Ende der Datei */
+        if (!s) { /* noch kein Hauptdaten-Vorrat (nach einem Sprung): der Frame zaehlt trotzdem fuer das Ziel */
+            if (skip_smp) {
+                u64 spf = info.layer == 1 ? 384 : (info.hz < 32000 && info.layer == 3) ? 576 : 1152;
+                skip_smp = skip_smp > spf ? skip_smp - spf : 0;
+            }
             continue;
         }
-        memmove(inbuf, inbuf + info.frame_bytes, (u64)(fill - info.frame_bytes));
-        fill -= info.frame_bytes;
-        if (!s)
-            continue;
         if (skip_smp) { /* nach einem genauen Sprung: bis zum Ziel verwerfen */
             if (skip_smp >= (u64)s) {
                 skip_smp -= (u64)s;

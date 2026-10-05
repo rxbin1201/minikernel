@@ -20,7 +20,7 @@
 #define ADDR_MASK_4K 0x000FFFFFFFFFF000ULL
 #define ADDR_MASK_2M 0x000FFFFFFFE00000ULL
 /* Flag-Bits, die wir beim Aufteilen/Aendern von Eintraegen erhalten */
-#define FLAG_MASK    (PTE_WRITE | PTE_USER | PTE_PWT | PTE_PCD | PTE_NX | PAGE_SHARED)
+#define FLAG_MASK    (PTE_WRITE | PTE_USER | PTE_PWT | PTE_PCD | PTE_NX | PAGE_SHARED | PAGE_COW)
 
 #define SIZE_4K     4096ULL
 #define SIZE_2M     (2ULL * 1024 * 1024)
@@ -348,6 +348,122 @@ AddressSpace *as_clone(AddressSpace *src)
         }
     }
     return dst;
+}
+
+/* Ruft fn fuer jeden vorhandenen 4-KiB-Eintrag des User-Bereichs auf (Adresse, Zeiger auf den Eintrag); bricht ab,
+ * sobald fn etwas anderes als 0 liefert, und gibt das zurueck. */
+static int for_each_user_pte(AddressSpace *as, int (*fn)(void *ctx, uint64_t va, uint64_t *pte), void *ctx)
+{
+    uint64_t e4 = ((uint64_t *)as)[USER_BASE >> 39];
+    if (!(e4 & PTE_PRESENT))
+        return 0;
+    uint64_t *t3 = (uint64_t *)(e4 & ADDR_MASK_4K);
+    for (unsigned i = 0; i < 512; i++) {
+        if (!(t3[i] & PTE_PRESENT))
+            continue;
+        uint64_t *t2 = (uint64_t *)(t3[i] & ADDR_MASK_4K);
+        for (unsigned j = 0; j < 512; j++) {
+            if (!(t2[j] & PTE_PRESENT) || (t2[j] & PTE_HUGE))
+                continue;
+            uint64_t *pt = (uint64_t *)(t2[j] & ADDR_MASK_4K);
+            for (unsigned k = 0; k < 512; k++) {
+                if (!(pt[k] & PTE_PRESENT))
+                    continue;
+                uint64_t va = (USER_BASE & ~((1ULL << 39) - 1)) | ((uint64_t)i << 30) | ((uint64_t)j << 21) | ((uint64_t)k << 12);
+                int r = fn(ctx, va, &pt[k]);
+                if (r)
+                    return r;
+            }
+        }
+    }
+    return 0;
+}
+
+static int clone_cow_pte(void *ctx, uint64_t va, uint64_t *pte)
+{
+    AddressSpace *dst = ctx;
+    uint64_t e = *pte;
+    if (e & PAGE_SHARED) /* geteilter Speicher wird nicht vererbt */
+        return 0;
+    uint64_t frame = e & ADDR_MASK_4K, flags = e & FLAG_MASK;
+    if (pmm_ref(frame) != 0) { /* sehr viele Benutzer: diese Seite einfach kopieren */
+        uint64_t copy = pmm_alloc_frame();
+        if (!copy)
+            return -1;
+        memcpy((void *)copy, (void *)frame, SIZE_4K);
+        if (as_map(dst, va, copy, flags) != 0) {
+            pmm_free_frame(copy);
+            return -1;
+        }
+        return 0;
+    }
+    if (flags & PTE_WRITE)
+        flags = (flags & ~PTE_WRITE) | PAGE_COW;
+    if (as_map(dst, va, frame, flags) != 0) {
+        pmm_free_frame(frame); /* die eben genommene Referenz */
+        return -1;
+    }
+    if (e & PTE_WRITE)
+        *pte = (e & ~PTE_WRITE) | PAGE_COW; /* auch im Elternprozess: erst beim Schreiben kopieren */
+    return 0;
+}
+
+AddressSpace *as_clone_cow(AddressSpace *src)
+{
+    AddressSpace *dst = as_create();
+    if (!dst)
+        return 0;
+    int r = for_each_user_pte(src, clone_cow_pte, dst);
+    if (src == as_current())
+        flush_tlb(); /* die eben schreibgeschuetzten Seiten */
+    if (r) { /* schon umgestellte Seiten des Elternprozesses bleiben PAGE_COW und loesen sich beim Schreiben auf */
+        as_destroy(dst);
+        return 0;
+    }
+    return dst;
+}
+
+static int cow_resolve_pte(uint64_t va, uint64_t *pte)
+{
+    uint64_t e = *pte;
+    if (!(e & PAGE_COW))
+        return 0;
+    uint64_t frame = e & ADDR_MASK_4K;
+    if (pmm_shared(frame)) { /* ein anderer Adressraum hat den Frame noch: eigene Kopie */
+        uint64_t copy = pmm_alloc_frame();
+        if (!copy)
+            return -1;
+        memcpy((void *)copy, (void *)frame, SIZE_4K);
+        *pte = (e & ~(ADDR_MASK_4K | PAGE_COW)) | copy | PTE_WRITE;
+        invlpg(va);
+        pmm_free_frame(frame); /* unsere Referenz auf den alten */
+    } else { /* sonst niemand mehr: einfach wieder beschreibbar */
+        *pte = (e & ~PAGE_COW) | PTE_WRITE;
+        invlpg(va);
+    }
+    return 1;
+}
+
+int as_cow_resolve(AddressSpace *as, uint64_t virt)
+{
+    if (virt < USER_BASE || virt >= USER_END)
+        return 0;
+    uint64_t va = virt & ~(SIZE_4K - 1);
+    uint64_t *pte = walk((uint64_t *)as, va, 0, 0);
+    if (!pte || !(*pte & PTE_PRESENT))
+        return 0;
+    return cow_resolve_pte(va, pte);
+}
+
+static int break_pte(void *ctx, uint64_t va, uint64_t *pte)
+{
+    (void)ctx;
+    return cow_resolve_pte(va, pte) < 0 ? -1 : 0;
+}
+
+int as_cow_break_all(AddressSpace *as)
+{
+    return for_each_user_pte(as, break_pte, 0) ? -1 : 0;
 }
 
 /* Legt den Top-Level-Eintrag fuer einen Kernel-Bereich sofort an. Muss vor dem ersten as_create passieren,

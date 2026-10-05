@@ -53,7 +53,7 @@ static const char *color_for(const char *dir, const char *name, int is_dir)
         return C_GREEN;
     if (ends_with(name, ".txt"))
         return "";
-    char path[512];
+    char path[PATH_MAX];
     snprintf(path, sizeof(path), "%s/%s", dir, name);
     return is_elf(path) ? C_GREEN : "";
 }
