@@ -235,7 +235,17 @@ sys_munmap((void *)d, groesse);
   Farbe; Tiefenpuffer ist ein weiterer geteilter Speicher (D32_FLOAT, Y-Kacheln). Die Render-Engine teilt er sich mit
   dem Zusammensetzen (vorher dessen Auftrag abwarten; jeder Batch waehlt seine Pipeline und setzt den ganzen Zustand).
   Ohne Intel-GPU (QEMU, `gpucomp=soft`, ausserhalb des Desktops) rechnet `gl.c` dasselbe mit der CPU; `gldemo -cpu`
-  erzwingt das zum Vergleich. Noch nicht: Abschneiden an der nahen Ebene, Mischen (Alpha), Mip-Stufen
+  erzwingt das zum Vergleich.
+  **Abschneiden:** `gl.c` schneidet jedes Dreieck vor dem Abgeben an der nahen und fernen Ebene und an einem
+  Schutzstreifen von 4096 Pixeln um das Bild ab (Sutherland-Hodgman in Objektkoordinaten: jede Ebene ist eine
+  Linearkombination der Zeilen der fertigen Matrix, die neuen Ecken bekommen alle Werte linear dazwischen); Dreiecke
+  ganz ausserhalb des Bildes fallen gleich weg. So geht auch ein Boden, der hinter der Kamera weiterlaeuft, und man
+  kann in Gegenstaende hineinfahren. Innerhalb des Schutzstreifens rastert die GPU ohne Abschneiden.
+  **Rueckseiten** (`glEnable(GL_CULL_FACE)`, `glCullFace`, `glFrontFace`): die GPU laesst sie im Rasterizer weg
+  (`3DSTATE_RASTER`, Flags `GPU3D_CULL_BACK`/`_FRONT`; vorn ist wie bei Mesa fuer ein Fenster "Clockwise" in den
+  Koordinaten der Hardware, also auf dem Bildschirm gegen den Uhrzeigersinn), die CPU nach dem Umrechnen.
+  `gldemo`: Pfeiltasten (oder w/s) fahren die Kamera vor und zurueck, `c` schaltet das Weglassen der Rueckseiten um.
+  Selbsttest `gltest` (15 Pruefungen mit der CPU). Noch nicht: Mischen (Alpha), Mip-Stufen
 - **Zusammensetzen auf der GPU** (`igd_comp.c`, `SYS_GPUCOMP`; Desktop: `gpu.c`): Bildschirmbild, Hintergrund,
   Fensterbilder und Schatten liegen in geteiltem Speicher, den der Kernel fest in die GGTT einblendet (eigener Bereich,
   Referenz auf das shm-Objekt, solange angemeldet). Je Bild schickt der Desktop alle geaenderten Rechtecke als eine

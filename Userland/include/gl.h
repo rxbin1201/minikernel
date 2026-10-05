@@ -14,8 +14,11 @@
  *       gl_swap();                       anzeigen und auf das naechste Bild des Desktops warten
  *   }
  *
- * Einschraenkungen: kein Abschneiden an der nahen Ebene (Dreiecke mit einer Ecke hinter der Kamera fallen weg), kein
- * Mischen (Alpha), keine Mip-Stufen, ein Licht (GL_LIGHT0, nur Richtung), Texturen RGBA bzw. BGRA mit 8 Bit je Kanal. */
+ * Dreiecke werden an der nahen und fernen Ebene abgeschnitten (auch mit einer Ecke hinter der Kamera), Rueckseiten
+ * auf Wunsch weggelassen (glEnable(GL_CULL_FACE), glCullFace, glFrontFace).
+ *
+ * Einschraenkungen: kein Mischen (Alpha), keine Mip-Stufen, ein Licht (GL_LIGHT0, nur Richtung), Texturen RGBA bzw.
+ * BGRA mit 8 Bit je Kanal. */
 
 typedef float          GLfloat;
 typedef double         GLdouble;
@@ -38,6 +41,12 @@ typedef void           GLvoid;
 #define GL_QUADS               0x0007
 #define GL_QUAD_STRIP          0x0008
 #define GL_POLYGON             0x0009
+#define GL_FRONT               0x0404
+#define GL_BACK                0x0405
+#define GL_FRONT_AND_BACK      0x0408
+#define GL_CW                  0x0900
+#define GL_CCW                 0x0901
+#define GL_CULL_FACE           0x0B44
 #define GL_LIGHTING            0x0B50
 #define GL_DEPTH_TEST          0x0B71
 #define GL_TEXTURE_2D          0x0DE1
@@ -70,6 +79,8 @@ void glClearDepth(GLdouble d);
 void glClear(GLbitfield mask);
 void glEnable(GLenum cap);
 void glDisable(GLenum cap);
+void glCullFace(GLenum mode);                  /* GL_BACK (Standard), GL_FRONT, GL_FRONT_AND_BACK */
+void glFrontFace(GLenum mode);                 /* GL_CCW (Standard): gegen den Uhrzeigersinn ist vorn */
 void glFlush(void);
 void glFinish(void);
 

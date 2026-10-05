@@ -326,6 +326,8 @@ static inline s64 sys_gpucomp(u64 op, u64 a, u64 b)          { return syscall3(S
 #define GPU3D_LINEAR      2 /* Textur bilinear */
 #define GPU3D_CLEAR_COLOR 4
 #define GPU3D_CLEAR_DEPTH 8
+#define GPU3D_CULL_BACK   16 /* Rueckseiten weglassen (vorn = auf dem Bildschirm gegen den Uhrzeigersinn) */
+#define GPU3D_CULL_FRONT  32 /* Vorderseiten weglassen (beide: alle Dreiecke) */
 #define GPU3D_MAX_VERT    1365
 typedef struct {
     unsigned short dst, depth, tex, flags;      /* Flaechen (depth 0 = keiner), GPU3D_* */

@@ -14,7 +14,17 @@
  *
  * Die CPU zeichnet mit mehreren Threads (einer je CPU, hoechstens 4): jeder rastert alle Dreiecke eines Stapels, aber
  * nur jede n-te Bildzeile (Zeile y gehoert Thread y mod n - so bekommt jeder gleich viel von jedem Dreieck). Keiner
- * schreibt dieselben Pixel wie ein anderer, Sperren braucht es nicht. Die Ecken rechnet vorher der aufrufende Thread. */
+ * schreibt dieselben Pixel wie ein anderer, Sperren braucht es nicht. Die Ecken rechnet vorher der aufrufende Thread.
+ *
+ * Abschneiden (clip_tri): jede Ebene des Sichtraums ist in Objektkoordinaten eine Linearkombination der Zeilen der
+ * fertigen Matrix - nahe Ebene Z >= 0, ferne Z <= W, Bildraender X >= 0 ... (X, Y, Z, W = Zeilen mal Ecke). Liegt ein
+ * Dreieck ganz ausserhalb einer Ebene, faellt es weg; ragt es ueber die nahe oder ferne Ebene oder weit (GUARD Pixel)
+ * ueber den Rand, wird es dort abgeschnitten: die neuen Ecken liegen auf der Kante, alle 12 Werte linear dazwischen
+ * (genau, weil X, Y, Z, W linear in der Ecke sind). Das Vieleck geht als Faecher weiter - an die GPU wie an die CPU.
+ * Innerhalb des Schutzstreifens zerschneidet die GPU selbst (Rasterizer), ihr Clipper bleibt aus.
+ *
+ * Rueckseiten (glCullFace): die GPU laesst sie im Rasterizer weg (GPU3D_CULL_*), die CPU nach dem Umrechnen. Vorn ist
+ * ein Dreieck, das auf dem Bildschirm gegen den Uhrzeigersinn laeuft (glFrontFace(GL_CW) tauscht vorn und hinten). */
 
 #define VF    12                /* float je Eckpunkt: x, y, z, u, v, nx, ny, nz, r, g, b, a */
 #define BATCH GPU3D_MAX_VERT
@@ -22,6 +32,8 @@
 #define NTEX  64
 #define STACK 16
 #define PI    3.14159265358979f
+#define GUARD 4096.0f           /* Schutzstreifen um das Bild (Pixel), bis dahin rastert die GPU ohne Abschneiden */
+#define CLIPV (3 + 6)           /* Ecken eines Dreiecks nach dem Abschneiden an 6 Ebenen */
 
 typedef struct {
     int      used, w, h, pw;    /* Groesse, Zeilenlaenge in Pixeln (Vielfaches von 16: Flaeche fuer die GPU) */
@@ -43,6 +55,7 @@ static struct {
     u32    clear_color;
     float  clear_depth;
     int    depth_test, texturing, lighting;
+    int    culling, cull_face, front_cw; /* GL_CULL_FACE, GL_BACK/FRONT/FRONT_AND_BACK, glFrontFace(GL_CW) */
     GLuint bound;
     int    mode;
     float  st[2][STACK][16];
@@ -57,6 +70,7 @@ static struct {
         float  m[16], l[3], amb, dif;
         GLuint tex;
         int    depth;
+        int    cull;            /* GPU3D_CULL_* (vorn = auf dem Bildschirm gegen den Uhrzeigersinn) */
     } bs;
 } G;
 
@@ -386,6 +400,11 @@ static void cpu_draw(void)
                 s[k][6 + c] = p[8 + c] * br * iw;
             s[k][9] = p[11] * iw;
         }
+        if (ok && G.bs.cull) { /* Flaeche > 0: auf dem Bildschirm (y nach unten) im Uhrzeigersinn = Rueckseite */
+            float area = (s[1][0] - s[0][0]) * (s[2][1] - s[0][1]) - (s[1][1] - s[0][1]) * (s[2][0] - s[0][0]);
+            if (G.bs.cull & (area > 0 ? GPU3D_CULL_BACK : GPU3D_CULL_FRONT))
+                ok = 0;
+        }
         if (ok)
             ntris++;
     }
@@ -420,7 +439,7 @@ static void flush(void)
         d.tex = (unsigned short)t->surf;
         d.tex_w = (unsigned short)t->w;
         d.tex_h = (unsigned short)t->h;
-        d.flags = (unsigned short)((G.bs.depth ? GPU3D_DEPTH : 0) | (t->linear ? GPU3D_LINEAR : 0));
+        d.flags = (unsigned short)((G.bs.depth ? GPU3D_DEPTH : 0) | (t->linear ? GPU3D_LINEAR : 0) | G.bs.cull);
         memcpy(d.m, G.bs.m, sizeof(d.m));
         memcpy(d.light, G.bs.l, sizeof(d.light));
         d.ambient = G.bs.amb;
@@ -457,9 +476,18 @@ static void cur_state(void)
         dif = G.dif;
     }
     GLuint tid = G.texturing && G.bound && tex[G.bound].px ? G.bound : G.white;
-    int depth = G.depth_test != 0;
+    int depth = G.depth_test != 0, cull = 0;
+    if (G.culling) {
+        int back = G.cull_face != GL_FRONT, front = G.cull_face != GL_BACK;
+        if (G.front_cw) { /* vorn im Uhrzeigersinn: was auf dem Bildschirm hinten waere, ist vorn */
+            int t = back;
+            back = front;
+            front = t;
+        }
+        cull = (back ? GPU3D_CULL_BACK : 0) | (front ? GPU3D_CULL_FRONT : 0);
+    }
     if (G.bn && (memcmp(m, G.bs.m, sizeof(m)) || memcmp(l, G.bs.l, sizeof(l)) || amb != G.bs.amb ||
-                 dif != G.bs.dif || tid != G.bs.tex || depth != G.bs.depth))
+                 dif != G.bs.dif || tid != G.bs.tex || depth != G.bs.depth || cull != G.bs.cull))
         flush();
     memcpy(G.bs.m, m, sizeof(m));
     memcpy(G.bs.l, l, sizeof(l));
@@ -467,15 +495,90 @@ static void cur_state(void)
     G.bs.dif = dif;
     G.bs.tex = tid;
     G.bs.depth = depth;
+    G.bs.cull = cull;
+}
+
+static void emit(const float *a, const float *b, const float *c)
+{
+    if (G.bn + 3 > BATCH)
+        flush();
+    memcpy(G.bv[G.bn++], a, sizeof(G.pv[0]));
+    memcpy(G.bv[G.bn++], b, sizeof(G.pv[0]));
+    memcpy(G.bv[G.bn++], c, sizeof(G.pv[0]));
+}
+
+/* Abstaende einer Ecke zu den Ebenen: 0 nah, 1 fern, 2-5 Bildraender (links, rechts, oben, unten), 6-9 dieselben mit
+ * Schutzstreifen. >= 0 = innen */
+#define NPLANE 10
+static void plane_dist(const float *p, float *d)
+{
+    const float *m = G.bs.m;
+    float P[4];
+    for (int r = 0; r < 4; r++)
+        P[r] = m[r * 4] * p[0] + m[r * 4 + 1] * p[1] + m[r * 4 + 2] * p[2] + m[r * 4 + 3];
+    float w = (float)G.w, h = (float)G.h;
+    d[0] = P[2];
+    d[1] = P[3] - P[2];
+    d[2] = P[0];
+    d[3] = w * P[3] - P[0];
+    d[4] = P[1];
+    d[5] = h * P[3] - P[1];
+    for (int i = 0; i < 4; i++)
+        d[6 + i] = d[2 + i] + GUARD * P[3];
+}
+
+/* Vieleck v[0..n) an Ebene k abschneiden (Sutherland-Hodgman), Ergebnis nach o; Anzahl der Ecken */
+static int clip_plane(float (*v)[VF], float (*dv)[NPLANE], int n, int k, float (*o)[VF], float (*dout)[NPLANE])
+{
+    int m = 0;
+    for (int i = 0; i < n; i++) {
+        int j = i + 1 < n ? i + 1 : 0;
+        float di = dv[i][k], dj = dv[j][k];
+        if (di >= 0) {
+            memcpy(o[m], v[i], sizeof(o[0]));
+            memcpy(dout[m++], dv[i], sizeof(dout[0]));
+        }
+        if ((di >= 0) != (dj >= 0)) { /* Kante schneidet die Ebene: neue Ecke dort */
+            float t = di / (di - dj);
+            for (int c = 0; c < VF; c++)
+                o[m][c] = v[i][c] + (v[j][c] - v[i][c]) * t;
+            for (int c = 0; c < NPLANE; c++)
+                dout[m][c] = dv[i][c] + (dv[j][c] - dv[i][c]) * t;
+            dout[m][k] = 0;
+            m++;
+        }
+    }
+    return m;
 }
 
 static void tri(int a, int b, int c)
 {
-    if (G.bn + 3 > BATCH)
-        flush();
-    memcpy(G.bv[G.bn++], G.pv[a], sizeof(G.pv[0]));
-    memcpy(G.bv[G.bn++], G.pv[b], sizeof(G.pv[0]));
-    memcpy(G.bv[G.bn++], G.pv[c], sizeof(G.pv[0]));
+    static float v[2][CLIPV][VF], dv[2][CLIPV][NPLANE];
+    const float *p[3] = {G.pv[a], G.pv[b], G.pv[c]};
+    int clip = 0;
+    for (int k = 0; k < 3; k++)
+        plane_dist(p[k], dv[0][k]);
+    for (int e = 0; e < NPLANE; e++) {
+        int out = (dv[0][0][e] < 0) + (dv[0][1][e] < 0) + (dv[0][2][e] < 0);
+        if (out == 3 && e < 6)
+            return;                     /* ganz ausserhalb: weg */
+        if (out && (e < 2 || e >= 6))
+            clip |= 1 << e;             /* ragt ueber nah, fern oder den Schutzstreifen */
+    }
+    if (!clip) {
+        emit(p[0], p[1], p[2]);
+        return;
+    }
+    for (int k = 0; k < 3; k++)
+        memcpy(v[0][k], p[k], sizeof(v[0][0]));
+    int n = 3, cur = 0;
+    for (int e = 0; e < NPLANE && n >= 3; e++)
+        if (clip & (1 << e)) {
+            n = clip_plane(v[cur], dv[cur], n, e, v[cur ^ 1], dv[cur ^ 1]);
+            cur ^= 1;
+        }
+    for (int i = 2; i < n; i++)
+        emit(v[cur][0], v[cur][i - 1], v[cur][i]);
 }
 
 /* ---------- Fenster ---------- */
@@ -512,6 +615,7 @@ int gl_open(int w, int h, const char *title)
     for (int i = 0; i < 2; i++)
         m_ident(top(i));
     G.light[2] = 1;
+    G.cull_face = GL_BACK;
     G.amb = 0.25f;
     G.dif = 0.75f;
     G.clear_depth = 1;
@@ -618,6 +722,8 @@ void glEnable(GLenum cap)
         G.texturing = 1;
     else if (cap == GL_LIGHTING)
         G.lighting = 1;
+    else if (cap == GL_CULL_FACE)
+        G.culling = 1;
 }
 
 void glDisable(GLenum cap)
@@ -628,6 +734,20 @@ void glDisable(GLenum cap)
         G.texturing = 0;
     else if (cap == GL_LIGHTING)
         G.lighting = 0;
+    else if (cap == GL_CULL_FACE)
+        G.culling = 0;
+}
+
+void glCullFace(GLenum mode)
+{
+    if (mode == GL_FRONT || mode == GL_BACK || mode == GL_FRONT_AND_BACK)
+        G.cull_face = (int)mode;
+}
+
+void glFrontFace(GLenum mode)
+{
+    if (mode == GL_CW || mode == GL_CCW)
+        G.front_cw = mode == GL_CW;
 }
 
 void glFlush(void)

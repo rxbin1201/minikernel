@@ -5,7 +5,8 @@
  * gezeichnet, sonst mit der CPU. Im Titel: Bilder pro Sekunde und wer zeichnet.
  *   gldemo        normal
  *   gldemo -cpu   immer mit der CPU (zum Vergleich)
- * Esc oder q: Ende */
+ * Pfeil hoch/runter oder w/s: Kamera vor und zurueck (auch durch den Wuerfel - zeigt das Abschneiden an der nahen
+ * Ebene), c: Rueckseiten weglassen an/aus, Esc oder q: Ende */
 
 static u32 texture[64 * 64];
 
@@ -54,6 +55,9 @@ void _start(int argc, char **argv)
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_TEXTURE_2D);
     glEnable(GL_LIGHTING);
+    glEnable(GL_CULL_FACE); /* die Wuerfel sind geschlossen: Rueckseiten sieht man nie */
+    int culling = 1;
+    float dist = 8;         /* Abstand der Kamera zur Mitte */
     glClearColor(0.08f, 0.10f, 0.16f, 1);
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
@@ -70,6 +74,16 @@ void _start(int argc, char **argv)
             if (e.type == EV_CLOSE || (e.type == EV_KEY && (e.key == 0x1B || e.key == 'q'))) {
                 gl_close();
                 sys_exit(0);
+            } else if (e.type == EV_KEY && (e.key == KEY_UP || e.key == 'w')) {
+                dist = dist > 0.5f ? dist - 0.25f : dist;
+            } else if (e.type == EV_KEY && (e.key == KEY_DOWN || e.key == 's')) {
+                dist = dist < 30 ? dist + 0.25f : dist;
+            } else if (e.type == EV_KEY && e.key == 'c') {
+                culling = !culling;
+                if (culling)
+                    glEnable(GL_CULL_FACE);
+                else
+                    glDisable(GL_CULL_FACE);
             }
         float a = (float)(sys_time_us() - t0) * 60e-6f; /* 60 Grad pro Sekunde */
 
@@ -78,7 +92,7 @@ void _start(int argc, char **argv)
         glMatrixMode(GL_MODELVIEW);
         glLoadIdentity();
         glLightfv(GL_LIGHT0, GL_POSITION, light);
-        glTranslatef(0, 0, -8);
+        glTranslatef(0, 0, -dist);
         glPushMatrix();
         glRotatef(a, 1, 1, 0);
         glRotatef(a * 0.7f, 0, 1, 0);
@@ -102,10 +116,11 @@ void _start(int argc, char **argv)
         frames++;
         s64 now = sys_time_us();
         if (now - sec >= 1000000) {
-            char title[64];
+            char title[96];
             int us = frames ? (int)(draw_us / frames) : 0;
-            snprintf(title, sizeof(title), "GL-Demo - %d Bilder/s (%s, %d,%d ms je Bild)",
-                     (int)((s64)frames * 1000000 / (now - sec)), gl_gpu() ? "GPU" : "CPU", us / 1000, us % 1000 / 100);
+            snprintf(title, sizeof(title), "GL-Demo - %d Bilder/s (%s, %d,%d ms je Bild%s)",
+                     (int)((s64)frames * 1000000 / (now - sec)), gl_gpu() ? "GPU" : "CPU", us / 1000, us % 1000 / 100,
+                     culling ? "" : ", ohne Culling");
             gfx_set_title(title);
             frames = 0;
             draw_us = 0;

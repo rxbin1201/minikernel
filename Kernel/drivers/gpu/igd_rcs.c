@@ -1663,6 +1663,7 @@ typedef struct {
     uint32_t        mocs;                /* Cache-Steuerung fuer Ziel, Tiefe und Textur (Surface State, 0 = uncached) */
     int             depth_always;        /* Tiefentest "immer" (Loeschen) statt "kleiner" */
     int             no_color;            /* Farbe nicht schreiben (nur Tiefe loeschen) */
+    uint32_t        cull;                /* IGD_3D_CULL_BACK / _FRONT (0 = alle Dreiecke zeichnen) */
 } Draw3d;
 
 static uint32_t vert_size(int layout)
@@ -1815,8 +1816,13 @@ static uint32_t batch_3d(const Draw3d *d)
     b[k++] = S3D(0x51) | 9;          /* SBE_SWIZ */
     for (int i = 0; i < 10; i++)
         b[k++] = 0;
-    b[k++] = S3D(0x50) | 3;          /* RASTER: kein Culling, gegen den Uhrzeigersinn vorn */
-    b[k++] = (1u << 16) | (1u << 21);
+    /* RASTER: Culling. Die Hardware nennt ein Dreieck "im Uhrzeigersinn", wenn es in ihren Koordinaten (y nach unten)
+     * mathematisch so laeuft - auf dem Bildschirm also gegen den Uhrzeigersinn, wie bei OpenGL vorn (glFrontFace
+     * GL_CCW; Mesa stellt fuer das Fenster ebenso "Clockwise" ein). CullMode: 0 beide, 1 keine, 2 vorn, 3 hinten */
+    uint32_t cull = d->cull & (IGD_3D_CULL_BACK | IGD_3D_CULL_FRONT);
+    b[k++] = S3D(0x50) | 3;
+    b[k++] = !cull ? (1u << 16) | (1u << 21)
+           : cull == IGD_3D_CULL_BACK ? 3u << 16 : cull == IGD_3D_CULL_FRONT ? 2u << 16 : 0u;
     b[k++] = 0;
     b[k++] = 0;
     b[k++] = 0;
@@ -2296,7 +2302,7 @@ static int test_3d(void)
     const uint32_t X0 = 16, Y0 = 8, X1 = 176, Y1 = 40, want = 0xFFFF3399u;
     load_kernel(K3_PSCOL, (const uint32_t (*)[4])kbuf, asm_ps_color(kbuf, F_1_0, F_0_2, F_0_6, F_1_0));
     const uint32_t rv[3][4] = {{f32(X1), f32(Y1), F_1_0, F_1_0}, {f32(X0), f32(Y1), 0, F_1_0}, {f32(X0), f32(Y0), 0, 0}};
-    Draw3d r1 = {base << 12, TW, TH, TW * 4, L3_XYUV, PRIM_RECTLIST, 3, K3_PSCOL, &rv[0][0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    Draw3d r1 = {base << 12, TW, TH, TW * 4, L3_XYUV, PRIM_RECTLIST, 3, K3_PSCOL, &rv[0][0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (draw_3d("1. Rechteck ueber die 3D-Pipeline", &r1, 1, stat) != 0) {
         rc = -30;
         goto out_ring;
@@ -2325,7 +2331,7 @@ static int test_3d(void)
         {{f32(192), f32(80), h1, h1}, {f32(128), f32(80), h0, h1}, {f32(128), f32(16), h0, h0}}};
     for (int lin = 0; lin < 2; lin++) {
         Draw3d x1 = {base << 12, TW, TH, TW * 4, L3_XYUV, PRIM_RECTLIST, 3, K3_PSTEX, &xr[lin][0][0], 0, 0,
-                     xbase << 12, XW, XW, XW * 4, lin, 0, 0, 0};
+                     xbase << 12, XW, XW, XW * 4, lin, 0, 0, 0, 0};
         if (draw_3d(lin ? "1b. Textur bilinear" : "1b. Textur, naechster Texel", &x1, 1, stat) != 0) {
             rc = -41;
             goto out_ring;
@@ -2370,7 +2376,7 @@ static int test_3d(void)
     igd_clflush(mem, TPAGES * 4096);
     uint32_t tv[3][6];
     tri_screen(tv, 0, 100, 128, 128);
-    Draw3d t1 = {base << 12, TW, TH, TW * 4, L3_XYRGBA, PRIM_TRILIST, 3, K3_PSINT, &tv[0][0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    Draw3d t1 = {base << 12, TW, TH, TW * 4, L3_XYRGBA, PRIM_TRILIST, 3, K3_PSINT, &tv[0][0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (draw_3d("2. Dreieck mit Farbverlauf", &t1, 1, stat) != 0) {
         rc = -33;
         goto out_ring;
@@ -2386,7 +2392,7 @@ static int test_3d(void)
         px[i] = 0x11111111u;
     igd_clflush(mem, TPAGES * 4096);
     load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_pass(kbuf));
-    Draw3d t2 = {base << 12, TW, TH, TW * 4, L3_VS_XYRGBA, PRIM_TRILIST, 3, K3_PSINT, &tv[0][0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    Draw3d t2 = {base << 12, TW, TH, TW * 4, L3_VS_XYRGBA, PRIM_TRILIST, 3, K3_PSINT, &tv[0][0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (draw_3d("2b. Dreieck durch den Vertex-Shader", &t2, 1, stat) != 0) {
         rc = -35;
         goto out_ring;
@@ -2407,7 +2413,7 @@ static int test_3d(void)
     static uint32_t cv[36][7];
     uint32_t front = 0;
     cube_tris(cv, 5, 3, 160, 128, 128, &front);
-    Draw3d c1 = {base << 12, TW, TH, TW * 4, L3_XYZRGBA, PRIM_TRILIST, 36, K3_PSINT, &cv[0][0], dbase << 12, TW * 4, 0, 0, 0, 0, 0, 0, 0, 0};
+    Draw3d c1 = {base << 12, TW, TH, TW * 4, L3_XYZRGBA, PRIM_TRILIST, 36, K3_PSINT, &cv[0][0], dbase << 12, TW * 4, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (draw_3d("3. Wuerfel mit Tiefentest", &c1, 1, stat) != 0) {
         rc = -36;
         goto out_ring;
@@ -2431,7 +2437,7 @@ static int test_3d(void)
     igd_clflush(mem, 2 * TPAGES * 4096);
     cube_matrix(vm, vl, 5, 3, 160, 128, 128);
     load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_cube(kbuf, vm, vl));
-    Draw3d c2 = {base << 12, TW, TH, TW * 4, L3_VS_CUBE, PRIM_TRILIST, 36, K3_PSINT, &vcube[0][0], dbase << 12, TW * 4, 0, 0, 0, 0, 0, 0, 0, 0};
+    Draw3d c2 = {base << 12, TW, TH, TW * 4, L3_VS_CUBE, PRIM_TRILIST, 36, K3_PSINT, &vcube[0][0], dbase << 12, TW * 4, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (draw_3d("3b. Wuerfel mit Vertex-Shader", &c2, 1, stat) != 0) {
         rc = -39;
         goto out_ring;
@@ -2453,7 +2459,7 @@ static int test_3d(void)
     load_kernel(K3_VS, (const uint32_t (*)[4])kbuf, asm_vs_tex(kbuf, vm, vl, F_0_35, F_0_65));
     load_kernel(K3_PSTEXC, (const uint32_t (*)[4])kbuf, asm_ps_tex(kbuf, 1));
     Draw3d c3 = {base << 12, TW, TH, TW * 4, L3_VS_TEX, PRIM_TRILIST, 36, K3_PSTEXC, &tcube[0][0], dbase << 12, TW * 4,
-                 (xbase + XPAGES) << 12, XW, XW, XW * 4, 1, 0, 0, 0};
+                 (xbase + XPAGES) << 12, XW, XW, XW * 4, 1, 0, 0, 0, 0};
     if (draw_3d("3c. Wuerfel mit Textur", &c3, 1, stat) != 0) {
         rc = -43;
         goto out_ring;
@@ -2491,9 +2497,9 @@ static int test_3d(void)
         uint32_t rpitch = igd_scr_stride;
         load_kernel(K3_PSCOL, (const uint32_t (*)[4])kbuf, asm_ps_color(kbuf, F_0_2, F_0_2, F_0_2, F_1_0));
         const uint32_t bg[3][4] = {{f32(DW), f32(DW), 0, 0}, {0, f32(DW), 0, 0}, {0, 0, 0, 0}};
-        Draw3d clear = {rt, DW, DW, rpitch, L3_XYUV, PRIM_RECTLIST, 3, K3_PSCOL, &bg[0][0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        Draw3d clear = {rt, DW, DW, rpitch, L3_XYUV, PRIM_RECTLIST, 3, K3_PSCOL, &bg[0][0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
         Draw3d cube = {rt, DW, DW, rpitch, L3_VS_TEX, PRIM_TRILIST, 36, K3_PSTEXC, &tcube[0][0], abase << 12, DW * 4,
-                       (xbase + XPAGES) << 12, XW, XW, XW * 4, 1, 0, 0, 0}; /* die CPU rechnet je Bild nur die Matrix */
+                       (xbase + XPAGES) << 12, XW, XW, XW * 4, 1, 0, 0, 0, 0}; /* die CPU rechnet je Bild nur die Matrix */
         int vbl = igd_vblank_ok();
         uint64_t t0 = time_us();
         for (int f = 0; f < 240 && rc == 0; f++) {
@@ -2588,7 +2594,7 @@ int igd_rcs_draw3d(const IgdDraw3d *g)
         load_kernel(K3_PSINT, (const uint32_t (*)[4])kbuf, asm_ps_interp(kbuf));
         Draw3d cl = {g->rt_gtt, g->w, g->h, g->pitch, L3_XYZRGBA, PRIM_RECTLIST, 3, K3_PSINT, &cv[0][0],
                      (g->flags & IGD_3D_CLEAR_DEPTH) ? g->depth_gtt : 0, g->depth_pitch, 0, 0, 0, 0, 0, g->mocs, 1,
-                     !(g->flags & IGD_3D_CLEAR_COLOR)};
+                     !(g->flags & IGD_3D_CLEAR_COLOR), 0};
         rc = run_3d(&cl);
     }
     if (rc == 0 && g->nvert) {
@@ -2596,7 +2602,8 @@ int igd_rcs_draw3d(const IgdDraw3d *g)
         load_kernel(K3_PSTEXC, (const uint32_t (*)[4])kbuf, asm_ps_tex(kbuf, 1));
         Draw3d dr = {g->rt_gtt, g->w, g->h, g->pitch, L3_VS_TEX, PRIM_TRILIST, g->nvert, K3_PSTEXC, g->verts,
                      (g->flags & IGD_3D_DEPTH) ? g->depth_gtt : 0, g->depth_pitch, g->tex_gtt, g->tex_w, g->tex_h,
-                     g->tex_pitch, (g->flags & IGD_3D_LINEAR) != 0, g->mocs, 0, 0};
+                     g->tex_pitch, (g->flags & IGD_3D_LINEAR) != 0, g->mocs, 0, 0,
+                     g->flags & (IGD_3D_CULL_BACK | IGD_3D_CULL_FRONT)};
         rc = run_3d(&dr);
     }
     igd_forcewake_put();

@@ -79,6 +79,8 @@ int igd_front_surface(uint32_t *gtt, uint32_t *pitch, uint32_t *w, uint32_t *h);
 #define IGD_3D_LINEAR      2 /* Textur bilinear (sonst naechster Texel) */
 #define IGD_3D_CLEAR_COLOR 4
 #define IGD_3D_CLEAR_DEPTH 8
+#define IGD_3D_CULL_BACK   16 /* Rueckseiten weglassen (vorn = auf dem Bildschirm gegen den Uhrzeigersinn) */
+#define IGD_3D_CULL_FRONT  32 /* Vorderseiten weglassen (beide: alle Dreiecke) */
 #define IGD_3D_MAX_VERT    1365 /* passt in 64 KiB (48 Bytes je Eckpunkt), Vielfaches von 3 */
 typedef struct {
     uint32_t        rt_gtt, w, h, pitch, mocs;
