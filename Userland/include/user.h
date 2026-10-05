@@ -299,6 +299,9 @@ typedef struct {
     unsigned       load_done, load_alive, load_ms, load_int, load_status, reset_before, reset_after;
     unsigned       wfpm_before, wfpm_after, int_after, st_load, st_umac_pc, st_lmac_pc;
     unsigned       alive_len, alive_cmd, alive_group, alive_status;
+    unsigned       dmar_found, dmar_flags, iommu_units, iommu_active, iommu_off; /* IOMMU (VT-d) vor dem Start */
+    unsigned       iommu_gsts[4], iommu_pmen[4];
+    unsigned       ltr_before, ltr_after;
 } WlanInfo;
 static inline s64 sys_wlan_info(WlanInfo *wi)                 { return syscall3(SYS_WLAN, 0, (u64)wi, 0); }
 static inline s64 sys_wlan_wake(void)                         { return syscall3(SYS_WLAN, 1, 0, 0); }

@@ -16,6 +16,7 @@
 #include "arch/x86_64/apic.h"
 #include "core/sched.h"
 #include "mm/pmm.h"
+#include "arch/x86_64/acpi.h"
 
 #define CSR_HW_IF_CONFIG_REG 0x000
 #define CSR_GP_CNTRL         0x024
@@ -408,6 +409,77 @@ static void fw_state(uint32_t ms)
     info.st_lmac_pc = lpc;
 }
 
+/* IOMMU (Intel VT-d): Die ACPI-Tabelle DMAR nennt die Einheiten (DRHD, Typ 0: Registeradresse bei +8). Hat die Firmware
+ * des PCs die Adressuebersetzung (GSTS Bit 31) oder geschuetzte Speicherbereiche (PMEN Bit 0, "Pre-boot DMA
+ * Protection") angelassen, kommen DMA-Zugriffe der Karte nicht an - das ROM bliebe beim Lesen der Context Info
+ * haengen. Der Kernel benutzt die IOMMU nicht, also wird beides abgeschaltet. */
+#define VTD_GCMD  0x18
+#define VTD_GSTS  0x1C
+#define VTD_PMEN  0x64
+#define VTD_TES   (1u << 31)
+#define VTD_PRS   (1u << 0)
+#define VTD_EPM   (1u << 31)
+
+static void iommu_check(void)
+{
+    uint32_t len = 0;
+    const uint8_t *t = acpi_table("DMAR", &len);
+    info.dmar_found = t != 0;
+    info.iommu_units = info.iommu_active = info.iommu_off = 0;
+    if (!t || len < 48) {
+        kprintf("iwl: keine DMAR-Tabelle (keine IOMMU gemeldet)\n");
+        return;
+    }
+    info.dmar_flags = t[37];
+    kprintf("iwl: DMAR: Adressbreite %u Bit, Flags %#x%s\n", t[36] + 1, t[37],
+            t[37] & 4 ? " (DMA-Schutz beim Booten verlangt)" : "");
+    for (uint32_t off = 48; off + 4 <= len;) {
+        uint16_t type = (uint16_t)(t[off] | t[off + 1] << 8), l = (uint16_t)(t[off + 2] | t[off + 3] << 8);
+        if (l < 4 || off + l > len)
+            break;
+        if (type == 0 && l >= 16) {
+            uint64_t base = (uint64_t)le32(t + off + 8) | (uint64_t)le32(t + off + 12) << 32;
+            int n = (int)info.iommu_units++;
+            if (paging_map_mmio(base, 4096) != 0) {
+                kprintf("iwl:   IOMMU %d @ %#lx: Register nicht einblendbar\n", n, (unsigned long)base);
+            } else {
+                volatile uint32_t *r = (volatile uint32_t *)base;
+                uint32_t gsts = r[VTD_GSTS / 4], pmen = r[VTD_PMEN / 4];
+                if (n < 4) {
+                    info.iommu_gsts[n] = gsts;
+                    info.iommu_pmen[n] = pmen;
+                }
+                kprintf("iwl:   IOMMU %d @ %#lx%s: GSTS %#x (Uebersetzung %s), PMEN %#x (Schutzbereiche %s)\n", n,
+                        (unsigned long)base, t[off + 4] & 1 ? " (alle PCI-Geraete)" : "", gsts,
+                        gsts & VTD_TES ? "AN" : "aus", pmen, pmen & VTD_PRS ? "AN" : "aus");
+                if (gsts & VTD_TES || pmen & VTD_PRS) {
+                    info.iommu_active++;
+                    if (gsts & VTD_TES) { /* GCMD: aktuellen Zustand ohne die Einmal-Bits, TE weg */
+                        r[VTD_GCMD / 4] = (gsts & 0x96FFFFFFu) & ~VTD_TES;
+                        WAIT_UNTIL(!(r[VTD_GSTS / 4] & VTD_TES), 50);
+                    }
+                    if (pmen & VTD_PRS) {
+                        r[VTD_PMEN / 4] = pmen & ~VTD_EPM;
+                        WAIT_UNTIL(!(r[VTD_PMEN / 4] & VTD_PRS), 50);
+                    }
+                    gsts = r[VTD_GSTS / 4];
+                    pmen = r[VTD_PMEN / 4];
+                    int off_now = !(gsts & VTD_TES) && !(pmen & VTD_PRS);
+                    info.iommu_off += (uint32_t)off_now;
+                    kprintf("iwl:   IOMMU %d abgeschaltet: %s (GSTS %#x, PMEN %#x)\n", n, off_now ? "ja" : "NEIN", gsts,
+                            pmen);
+                }
+            }
+        }
+        off += l;
+    }
+}
+
+/* LTR (Latency Tolerance Reporting): Linux stellt bei der AX200 vor dem Start etwa 250 us ein - sonst kann das ROM
+ * beim Booten an Verzoegerungen der Plattform scheitern (die Firmware setzt den Wert spaeter selbst) */
+#define CSR_LTR_LONG_VAL_AD 0x0D4
+#define LTR_250US           ((1u << 31) | (2u << 26) | (250u << 16) | (1u << 15) | (2u << 10) | 250u)
+
 int iwl_load_fw(void)
 {
     if (!info.present || !regs)
@@ -452,6 +524,12 @@ int iwl_load_fw(void)
     ci->status_wr_ptr = (uint64_t)status;
     ci->cmd_queue_addr = (uint64_t)cmdq;
     ci->cmd_queue_size = (uint8_t)(ilog2(CMD_RING) - 3);
+
+    iommu_check();
+    info.ltr_before = rd(CSR_LTR_LONG_VAL_AD);
+    wr(CSR_LTR_LONG_VAL_AD, LTR_250US);
+    info.ltr_after = rd(CSR_LTR_LONG_VAL_AD);
+    kprintf("iwl: LTR %#x -> %#x\n", info.ltr_before, info.ltr_after);
 
     /* Adresse uebergeben, freie Puffer melden, starten */
     wr(CSR_UCODE_DRV_GP1_CLR, GP1_SW_RFKILL | GP1_CMD_BLOCKED);

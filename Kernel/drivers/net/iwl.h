@@ -31,6 +31,11 @@ typedef struct {
     uint32_t wfpm_before, wfpm_after, int_after; /* WFPM_CTRL_REG vor/nach ENABLE_WFPM, CSR_INT nach den Lesezugriffen */
     uint32_t st_load, st_umac_pc, st_lmac_pc; /* zuletzt: Ladestatus, Befehlszaehler UMAC/LMAC */
     uint32_t alive_len, alive_cmd, alive_group, alive_status; /* erste Nachricht; ALIVE: Befehl 1, Status 0xCAFE */
+    /* IOMMU (VT-d, ACPI-Tabelle DMAR) vor dem Start: Einheiten, davon aktiv (Uebersetzung oder geschuetzte Bereiche),
+     * davon abgeschaltet; Flags der Tabelle (Bit 2: Schutz vor DMA beim Booten); LTR-Wert vor und nach dem Setzen */
+    uint32_t dmar_found, dmar_flags, iommu_units, iommu_active, iommu_off;
+    uint32_t iommu_gsts[4], iommu_pmen[4];
+    uint32_t ltr_before, ltr_after;
 } WlanInfo;
 
 void iwl_probe(void);

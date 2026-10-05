@@ -21,6 +21,14 @@ void _start(int argc, char **argv)
             printf("wlan: keine Karte\n");
             sys_exit(1);
         }
+        if (!wi.dmar_found)
+            printf("IOMMU:     keine (keine DMAR-Tabelle)\n");
+        else
+            printf("IOMMU:     %u Einheit(en), %u aktiv, %u abgeschaltet, DMAR-Flags %#x%s\n", wi.iommu_units,
+                   wi.iommu_active, wi.iommu_off, wi.dmar_flags, wi.dmar_flags & 4 ? " (DMA-Schutz beim Booten)" : "");
+        for (unsigned i = 0; i < wi.iommu_units && i < 4; i++)
+            printf("           %u: GSTS %#010x PMEN %#010x\n", i, wi.iommu_gsts[i], wi.iommu_pmen[i]);
+        printf("LTR:       %#010x -> %#010x\n", wi.ltr_before, wi.ltr_after);
         printf("Firmware gestartet, gewartet %u ms, CSR_INT %#010x, Status %u\n", wi.load_ms, wi.load_int, wi.load_status);
         if (wi.load_alive)
             printf("Erste Nachricht: Befehl %#x, Gruppe %#x, Laenge %u, Status %#x%s\n", wi.alive_cmd, wi.alive_group,
