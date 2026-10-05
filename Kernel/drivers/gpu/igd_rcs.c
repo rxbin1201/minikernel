@@ -1816,13 +1816,14 @@ static uint32_t batch_3d(const Draw3d *d)
     b[k++] = S3D(0x51) | 9;          /* SBE_SWIZ */
     for (int i = 0; i < 10; i++)
         b[k++] = 0;
-    /* RASTER: Culling. Die Hardware nennt ein Dreieck "im Uhrzeigersinn", wenn es in ihren Koordinaten (y nach unten)
-     * mathematisch so laeuft - auf dem Bildschirm also gegen den Uhrzeigersinn, wie bei OpenGL vorn (glFrontFace
-     * GL_CCW; Mesa stellt fuer das Fenster ebenso "Clockwise" ein). CullMode: 0 beide, 1 keine, 2 vorn, 3 hinten */
+    /* RASTER: Culling. FrontWinding (Bit 21) = CCW: so laufen bei uns die Vorderseiten (auf dem Bildschirm gegen den
+     * Uhrzeigersinn, OpenGL-Standard). Auf echter Hardware geprueft - mit "Clockwise" (wie Mesa es fuer ein Fenster
+     * einstellt, das aber zusaetzlich die Viewport-Umrechnung der Hardware nutzt) blieben nur die Innenseiten.
+     * CullMode (Bits 17:16): 0 beide, 1 keine, 2 vorn, 3 hinten */
     uint32_t cull = d->cull & (IGD_3D_CULL_BACK | IGD_3D_CULL_FRONT);
     b[k++] = S3D(0x50) | 3;
-    b[k++] = !cull ? (1u << 16) | (1u << 21)
-           : cull == IGD_3D_CULL_BACK ? 3u << 16 : cull == IGD_3D_CULL_FRONT ? 2u << 16 : 0u;
+    b[k++] = (1u << 21) | (!cull ? 1u << 16
+                           : cull == IGD_3D_CULL_BACK ? 3u << 16 : cull == IGD_3D_CULL_FRONT ? 2u << 16 : 0u);
     b[k++] = 0;
     b[k++] = 0;
     b[k++] = 0;

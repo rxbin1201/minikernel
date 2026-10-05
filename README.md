@@ -242,8 +242,8 @@ sys_munmap((void *)d, groesse);
   ganz ausserhalb des Bildes fallen gleich weg. So geht auch ein Boden, der hinter der Kamera weiterlaeuft, und man
   kann in Gegenstaende hineinfahren. Innerhalb des Schutzstreifens rastert die GPU ohne Abschneiden.
   **Rueckseiten** (`glEnable(GL_CULL_FACE)`, `glCullFace`, `glFrontFace`): die GPU laesst sie im Rasterizer weg
-  (`3DSTATE_RASTER`, Flags `GPU3D_CULL_BACK`/`_FRONT`; vorn ist wie bei Mesa fuer ein Fenster "Clockwise" in den
-  Koordinaten der Hardware, also auf dem Bildschirm gegen den Uhrzeigersinn), die CPU nach dem Umrechnen.
+  (`3DSTATE_RASTER`, Flags `GPU3D_CULL_BACK`/`_FRONT`, FrontWinding "CCW" - auf echter Hardware geprueft; vorn ist
+  auf dem Bildschirm gegen den Uhrzeigersinn), die CPU nach dem Umrechnen.
   `gldemo`: Pfeiltasten (oder w/s) fahren die Kamera vor und zurueck, `c` schaltet das Weglassen der Rueckseiten um.
   Selbsttest `gltest` (15 Pruefungen mit der CPU). Noch nicht: Mischen (Alpha), Mip-Stufen
 - **Zusammensetzen auf der GPU** (`igd_comp.c`, `SYS_GPUCOMP`; Desktop: `gpu.c`): Bildschirmbild, Hintergrund,
