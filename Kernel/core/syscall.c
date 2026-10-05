@@ -525,6 +525,19 @@ static void syscall_do(SyscallFrame *f)
         if (f->rdi == 1 || f->rdi == 2) { /* Stufe 2a: aufwecken, 2b: Firmware laden */
             int r = f->rdi == 1 ? iwl_wake_test() : iwl_load_fw();
             ret = r == -1 ? ERR_NOENT : r < 0 ? ERR_IO : 0;
+        } else if (f->rdi == 3) { /* Stufe 4: suchen -> Zahl der Netze */
+            int r = iwl_scan();
+            ret = r == -1 ? ERR_NOENT : r == -7 ? ERR_AGAIN : r < 0 ? ERR_IO : r;
+        } else if (f->rdi == 4) { /* gefundenes Netz rsi nach rdx */
+            WlanNet n;
+            if (!process_user_range_ok(process_current(), f->rdx, sizeof(n), 1))
+                ret = ERR_FAULT;
+            else if (iwl_scan_result((unsigned)f->rsi, &n) != 0)
+                ret = ERR_NOENT;
+            else {
+                memcpy((void *)f->rdx, &n, sizeof(n));
+                ret = 0;
+            }
         } else if (f->rdi != 0)
             ret = ERR_INVAL;
         else if (!process_user_range_ok(process_current(), f->rsi, sizeof(wi), 1))

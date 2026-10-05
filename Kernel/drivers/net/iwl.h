@@ -37,17 +37,36 @@ typedef struct {
     uint32_t iommu_gsts[4], iommu_pmen[4];
     uint32_t ltr_before, ltr_after;
     uint32_t pci_cmd, bridges_fixed;          /* PCI Kommando/Status der Karte, Bruecken mit neu gesetztem Bus-Master */
-    /* Stufe 3 (nach ALIVE): 1 INIT_EXTENDED_CFG, 2 NVM_ACCESS_COMPLETE, 3 INIT_COMPLETE, 4 NVM_GET_INFO, 5 fertig */
+    /* Stufe 3 (nach ALIVE): 1 INIT_EXTENDED_CFG, 2 NVM_ACCESS_COMPLETE, 3 INIT_COMPLETE, 4 NVM_GET_INFO,
+     * 5 TX_ANT_CONFIGURATION, 6 BT_CONFIG, 7 MCC_UPDATE, 8 SCAN_CFG, 9 fertig */
     uint32_t init_step, init_complete, rx_packets;
     uint8_t  mac[6], mac_pad[2];
     uint32_t nvm_flags, nvm_version, nvm_board, nvm_hw_addrs, nvm_sku, nvm_tx_chains, nvm_rx_chains, nvm_lar;
     uint32_t nvm_channels;
+    uint32_t mcc, mcc_status, mcc_channels;   /* Land laut Firmware (z.B. 'DE'), Status, erlaubte Kanaele */
+    uint32_t scan_ms, scan_frames, scan_nets; /* letzte Suche */
 } WlanInfo;
+
+/* Ein gefundenes Netz (SYS_WLAN 4; gleiches Layout in Userland/include/user.h) */
+#define WLAN_MAX_NETS 64
+enum { WLAN_SEC_OPEN, WLAN_SEC_WEP, WLAN_SEC_WPA, WLAN_SEC_WPA2, WLAN_SEC_WPA3 };
+typedef struct {
+    uint8_t  bssid[6];
+    int8_t   signal;   /* dBm */
+    uint8_t  channel;
+    uint8_t  security; /* WLAN_SEC_* */
+    uint8_t  ssid_len;
+    uint16_t seen;     /* so oft empfangen */
+    char     ssid[33];
+    uint8_t  pad[3];
+} WlanNet;
 
 void iwl_probe(void);
 int  iwl_info(WlanInfo *out); /* 0 = gefuellt (auch ohne Karte: dann present = 0) */
 int  iwl_load_fw(void);       /* Stufe 2b+3; 0 = Firmware bereit, -3 kein ALIVE, -4 keine Firmware, -5 kein Speicher,
                                * -6 Befehl ohne Antwort (init_step sagt, welcher) */
+int  iwl_scan(void);         /* Stufe 4: Zahl der Netze, <0 Fehler (laedt die Firmware, falls noetig) */
+int  iwl_scan_result(unsigned i, WlanNet *out);
 int  iwl_wake_test(void);     /* Stufe 2a; 0 = Zugriff bekommen, -1 = keine Karte, -2 kein Takt, -3 kein Zugriff */
 
 #endif

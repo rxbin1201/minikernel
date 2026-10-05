@@ -3,7 +3,8 @@
 /* wlan [info]   WLAN-Karte (Intel AX200) und Bluetooth: was der Kernel erkannt hat, die zerlegte Firmware aus
  *               /firmware und das Bluetooth-Geraet am USB (8087:0029).
  * wlan wake     Stufe 2a: Karte aufwecken (Takt, Zugriff auf die inneren Register), eine Kennung lesen
- * wlan load     Stufe 2b: Firmware laden und auf ihre erste Nachricht (ALIVE) warten */
+ * wlan load     Stufe 2b/3: Firmware laden, ALIVE, erste Befehle (NVM, Land, Suche einrichten)
+ * wlan scan     Stufe 4: Netze suchen (laedt die Firmware, falls noetig) und nach Signalstaerke sortiert zeigen */
 
 static const char *hw_type(unsigned rev)
 {
@@ -39,12 +40,14 @@ void _start(int argc, char **argv)
                    "(Verlauf: dmesg | grep iwl)\n", wi.st_load, wi.st_umac_pc, wi.st_lmac_pc);
         if (wi.load_alive) {
             static const char *steps[] = {"-", "INIT_EXTENDED_CFG", "NVM_ACCESS_COMPLETE", "INIT_COMPLETE", "NVM_GET_INFO",
-                                          "fertig"};
-            unsigned st = wi.init_step < 6 ? wi.init_step : 0;
-            printf("Init:      %s (%u Pakete empfangen)\n", st == 5 ? "fertig" : steps[st], wi.rx_packets);
-            if (st != 5)
+                                          "TX_ANT_CONFIGURATION", "BT_CONFIG", "MCC_UPDATE", "SCAN_CFG", "fertig"};
+            unsigned st = wi.init_step < 10 ? wi.init_step : 0;
+            printf("Init:      %s (%u Pakete empfangen)\n", steps[st], wi.rx_packets);
+            if (st != 9)
                 printf("           bei diesem Schritt kam keine Antwort (Verlauf: dmesg | grep iwl)\n");
         }
+        if (wi.init_step >= 9 && wi.mcc)
+            printf("Land:      %c%c, %u Kanaele erlaubt\n", (char)(wi.mcc >> 8), (char)wi.mcc, wi.mcc_channels);
         if (wi.init_step >= 5) {
             unsigned k = wi.nvm_sku;
             printf("MAC:       %02x:%02x:%02x:%02x:%02x:%02x\n", wi.mac[0], wi.mac[1], wi.mac[2], wi.mac[3], wi.mac[4],
@@ -56,6 +59,45 @@ void _start(int argc, char **argv)
                    k & 8 ? "802.11ac " : "", k & 16 ? "802.11ax " : "", k & 32 ? "(ohne MIMO)" : "");
         }
         sys_exit(r == 0 ? 0 : 1);
+    }
+    if (argc > 1 && strcmp(argv[1], "scan") == 0) {
+        printf("Suche auf 38 Kanaelen (2,4 und 5 GHz), dauert einige Sekunden ...\n");
+        s64 r = sys_wlan_scan();
+        if (r == ERR_NOENT) {
+            printf("wlan: keine Karte\n");
+            sys_exit(1);
+        }
+        if (r < 0) {
+            sys_wlan_info(&wi);
+            printf("wlan: Suche fehlgeschlagen (%lld; Init-Schritt %u) - Verlauf: dmesg | grep iwl\n", (long long)r,
+                   wi.init_step);
+            sys_exit(1);
+        }
+        static WlanNet n[64];
+        int cnt = 0;
+        for (u64 i = 0; cnt < 64 && sys_wlan_net(i, &n[cnt]) == 0; i++)
+            cnt++;
+        for (int i = 1; i < cnt; i++) /* nach Signal sortieren, staerkstes zuerst */
+            for (int k = i; k > 0 && n[k].signal > n[k - 1].signal; k--) {
+                WlanNet t = n[k];
+                n[k] = n[k - 1];
+                n[k - 1] = t;
+            }
+        static const char *sec[] = {"offen", "WEP", "WPA", "WPA2", "WPA3"};
+        sys_wlan_info(&wi);
+        printf("%d Netz(e) in %u ms (%u Rahmen empfangen)\n", cnt, wi.scan_ms, wi.scan_frames);
+        printf("  %-32s  %-17s  %5s  %5s  %s\n", "Name", "BSSID", "Kanal", "dBm", "Schutz");
+        for (int i = 0; i < cnt; i++) {
+            char name[40];
+            if (n[i].ssid_len == 0 || n[i].ssid[0] == 0)
+                strcpy(name, "(versteckt)");
+            else
+                snprintf(name, sizeof(name), "%s", n[i].ssid);
+            printf("  %-32s  %02x:%02x:%02x:%02x:%02x:%02x  %5u  %5d  %s\n", name, n[i].bssid[0], n[i].bssid[1],
+                   n[i].bssid[2], n[i].bssid[3], n[i].bssid[4], n[i].bssid[5], n[i].channel, n[i].signal,
+                   n[i].security < 5 ? sec[n[i].security] : "?");
+        }
+        sys_exit(0);
     }
     if (argc > 1 && strcmp(argv[1], "wake") == 0) {
         s64 r = sys_wlan_wake();

@@ -307,10 +307,24 @@ typedef struct {
     unsigned char  mac[6], mac_pad[2];
     unsigned       nvm_flags, nvm_version, nvm_board, nvm_hw_addrs, nvm_sku, nvm_tx_chains, nvm_rx_chains, nvm_lar;
     unsigned       nvm_channels;
+    unsigned       mcc, mcc_status, mcc_channels; /* Land (zwei Buchstaben), Status, erlaubte Kanaele */
+    unsigned       scan_ms, scan_frames, scan_nets;
 } WlanInfo;
+/* Gefundenes Netz (SYS_WLAN 4) */
+enum { WLAN_SEC_OPEN, WLAN_SEC_WEP, WLAN_SEC_WPA, WLAN_SEC_WPA2, WLAN_SEC_WPA3 };
+typedef struct {
+    unsigned char  bssid[6];
+    signed char    signal; /* dBm */
+    unsigned char  channel, security, ssid_len;
+    unsigned short seen;
+    char           ssid[33];
+    unsigned char  pad[3];
+} WlanNet;
 static inline s64 sys_wlan_info(WlanInfo *wi)                 { return syscall3(SYS_WLAN, 0, (u64)wi, 0); }
 static inline s64 sys_wlan_wake(void)                         { return syscall3(SYS_WLAN, 1, 0, 0); }
 static inline s64 sys_wlan_load(void)                         { return syscall3(SYS_WLAN, 2, 0, 0); }
+static inline s64 sys_wlan_scan(void)                         { return syscall3(SYS_WLAN, 3, 0, 0); } /* -> Zahl */
+static inline s64 sys_wlan_net(u64 i, WlanNet *n)             { return syscall3(SYS_WLAN, 4, i, (u64)n); }
 static inline s64 sys_read(int fd, void *buf, u64 len)        { return syscall3(SYS_READ, fd, (u64)buf, len); }
 static inline s64 sys_close(int fd)                           { return syscall3(SYS_CLOSE, fd, 0, 0); }
 static inline s64 sys_closefrom(int fd)                       { return syscall3(SYS_CLOSEFROM, fd, 0, 0); } /* alle ab fd schliessen */

@@ -486,7 +486,7 @@ static void iommu_check(void)
 #define LTR_250US           ((1u << 31) | (2u << 26) | (250u << 16) | (1u << 15) | (2u << 10) | 250u)
 
 /* Puffer fuer Laden und Betrieb (identisch eingeblendet: virtuelle = physische Adresse) */
-#define CMD_SLOT 512 /* Platz je Befehl: Kopf (8) + Daten */
+#define CMD_SLOT 2048 /* Platz je Befehl: Kopf (8) + Daten (die Scan-Anfrage hat 1940 Byte) */
 static CtxtInfo          *ci;
 static uint64_t          *free_rbd;
 static uint32_t          *used_rbd;
@@ -678,9 +678,19 @@ int iwl_load_fw(void)
 #define CMD_NVM_ACCESS_END 0x00 /* REGULATORY_AND_NVM_GROUP: NVM_ACCESS_COMPLETE */
 #define CMD_NVM_GET_INFO   0x02
 #define CMD_DEBUG_LOG      0xF7
+#define GRP_LONG           0x1  /* Befehle der alten Gruppe 0 schickt Linux mit Gruppe 1 (DEF_ID) */
+#define CMD_TX_ANT_CFG     0x98
+#define CMD_BT_CONFIG      0x9B
+#define CMD_MCC_UPDATE     0xC8
+#define CMD_SCAN_CFG       0x0C
+#define CMD_SCAN_REQ       0x0D
+#define CMD_SCAN_COMPLETE  0x0F
+#define CMD_RX_MPDU        0xC1
 #define INIT_NVM           (1u << 1) /* INIT_EXTENDED_CFG: der Treiber schickt NVM-Befehle */
 #define CSR_INT_SW_ERR     (1u << 25)
 #define CSR_INT_HW_ERR     (1u << 29)
+
+static void scan_frame(const uint8_t *d, uint32_t len);
 
 static struct {
     int      active, got, seq; /* seq < 0: Meldung, jede Folgenummer */
@@ -699,11 +709,15 @@ static void rx_packet(const uint8_t *pkt, uint32_t len)
     info.rx_packets++;
     if (grp == GRP_LEGACY && cmd == CMD_INIT_COMPLETE)
         info.init_complete = 1;
-    if (want.active && !want.got && grp == want.group && cmd == want.cmd &&
+    if (want.active && !want.got && cmd == want.cmd && (want.group == 0xFF || want.seq >= 0 || grp == want.group) &&
         (want.seq < 0 ? (seq & SEQ_RX_FRAME) != 0 : seq == (uint16_t)want.seq)) {
         want.len = plen < sizeof(want.data) ? plen : sizeof(want.data);
         memcpy(want.data, d, want.len);
         want.got = 1;
+    }
+    if (cmd == CMD_RX_MPDU) {
+        scan_frame(d, plen);
+        return;
     }
     if (grp == GRP_LEGACY && cmd == CMD_DEBUG_LOG)
         return; /* Protokoll der Firmware: zu viel fuers Log */
@@ -894,8 +908,214 @@ static int fw_init(void)
             info.nvm_version, info.nvm_flags, info.nvm_hw_addrs, info.nvm_sku, info.nvm_tx_chains, info.nvm_rx_chains,
             info.nvm_lar, info.nvm_channels);
     read_mac();
+
+    /* wie iwl_mvm_up, soweit es zum Suchen noetig ist: Antennen, Koexistenz mit Bluetooth, Land (LAR: "ZZ" = die
+     * Voreinstellung der Karte, Quelle GET_CURRENT), Grundeinstellung der Suche */
     info.init_step = 5;
+    uint32_t ant = info.nvm_tx_chains ? info.nvm_tx_chains : 3;
+    if (cmd_sync(GRP_LONG, CMD_TX_ANT_CFG, &ant, 4, "TX_ANT_CONFIGURATION") < 0)
+        return -6;
+    info.init_step = 6;
+    uint32_t bt[2] = {1 /* BT_COEX_NW */, 0x15 /* MPLUT, SYNC2SCO, HIGH_BAND_RET */};
+    if (cmd_sync(GRP_LONG, CMD_BT_CONFIG, bt, 8, "BT_CONFIG") < 0)
+        return -6;
+    info.init_step = 7;
+    uint8_t mcc[28] = {'Z', 'Z', 0x10 /* MCC_SOURCE_GET_CURRENT */};
+    int m = cmd_sync(GRP_LONG, CMD_MCC_UPDATE, mcc, sizeof(mcc), "MCC_UPDATE");
+    if (m < 0)
+        return -6;
+    if (m >= 20) { /* Antwort v4: Status, Land, Faehigkeiten, Zeit, Geo, Quelle, 3, Zahl der Kanaele */
+        info.mcc = (uint32_t)(want.data[4] << 8 | want.data[5]);
+        info.mcc_status = le32(want.data);
+        info.mcc_channels = le32(want.data + 16);
+        kprintf("iwl: Land '%c%c' (Status %u), %u Kanaele\n", (char)want.data[5], (char)want.data[4], info.mcc_status,
+                info.mcc_channels);
+    }
+    info.init_step = 8;
+    uint32_t scfg[3] = {0, ant, info.nvm_rx_chains ? info.nvm_rx_chains : 3}; /* SCAN_CONFIG v5 */
+    if (cmd_sync(GRP_LONG, CMD_SCAN_CFG, scfg, sizeof(scfg), "SCAN_CFG") < 0)
+        return -6;
+    info.init_step = 9;
     kprintf("iwl: Firmware bereit, MAC %02x:%02x:%02x:%02x:%02x:%02x\n", info.mac[0], info.mac[1], info.mac[2],
             info.mac[3], info.mac[4], info.mac[5]);
+    return 0;
+}
+
+/* ---------- Stufe 4: Netze suchen ----------
+ * SCAN_REQ_UMAC Version 15 (Aufbau wie struct iwl_scan_req_umac_v17 in Linux, 1940 Byte): passiv auf allen Kanaelen
+ * von 2,4 und 5 GHz - die Karte hoert je Kanal ~110 ms auf Beacons. Jeder empfangene Rahmen kommt als
+ * REPLY_RX_MPDU (Beschreibung 48 Byte wie iwl_rx_mpdu_desc bis einschliesslich v1, dann der 802.11-Rahmen); das Ende meldet SCAN_COMPLETE_UMAC. */
+typedef struct __attribute__((packed)) {
+    uint32_t uid, ooc_priority;
+    /* general_params_v11 */
+    uint16_t gflags;
+    uint8_t  greserved, scan_start_mac;
+    uint8_t  active_dwell[2], adwell_2g, adwell_5g, adwell_social, gflags2;
+    uint16_t adwell_max_budget;
+    uint32_t max_out_of_time[2], suspend_time[2], scan_priority;
+    uint8_t  passive_dwell[2], num_fragments[2];
+    /* channel_params_v7 */
+    uint8_t  cflags, count, n_aps_override[2];
+    struct __attribute__((packed)) {
+        uint32_t flags;
+        uint8_t  channel, band, iter_count, iter_interval;
+    } chan[67];
+    /* periodic_params_v1 */
+    struct __attribute__((packed)) {
+        uint16_t interval;
+        uint8_t  iter_count, reserved;
+    } schedule[2];
+    uint16_t delay, preserved;
+    /* probe_params_v4 */
+    uint8_t  preq[4 + 12 + 4 + 512];
+    uint8_t  short_ssid_num, bssid_num;
+    uint16_t probe_reserved;
+    uint8_t  direct_scan[20][34];
+    uint32_t short_ssid[8];
+    uint8_t  bssid_array[16][6];
+} ScanReq;
+_Static_assert(__builtin_offsetof(ScanReq, cflags) == 44, "Scan: Kanaele");
+_Static_assert(__builtin_offsetof(ScanReq, schedule) == 584, "Scan: Zeitplan");
+_Static_assert(sizeof(ScanReq) == 1940, "Scan: Groesse");
+
+#define RX_DESC 48 /* Laenge, Flags, Phy, Status (+12), Reihenfolge, dann v1: RSS, Filter, Rate, Energie A/B (+32), Kanal */
+static WlanNet nets[WLAN_MAX_NETS];
+static uint32_t n_nets, scan_frames;
+static int scan_busy;
+
+static const uint8_t scan_chans[] = {1,   2,   3,   4,   5,   6,   7,   8,   9,   10,  11,  12,  13,  36,  40,  44,  48,
+                                     52,  56,  60,  64,  100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
+                                     149, 153, 157, 161, 165};
+
+/* Beacon oder Antwort auf eine Suchanfrage: BSSID, Staerke, Kanal, Name (SSID), Verschluesselung */
+static void scan_frame(const uint8_t *d, uint32_t len)
+{
+    scan_frames++;
+    if (len < RX_DESC + 36)
+        return;
+    uint32_t mpdu_len = (uint32_t)(d[0] | d[1] << 8), status = le32(d + 12);
+    uint8_t flags2 = d[3], energy_a = d[32], energy_b = d[33], chan = d[34];
+    if (!(status & 1) || RX_DESC + mpdu_len > len) /* CRC nicht in Ordnung */
+        return;
+    const uint8_t *f = d + RX_DESC;
+    if (f[0] != 0x80 && f[0] != 0x50) /* nur Beacon (Typ 0, Untertyp 8) und Probe Response (5) */
+        return;
+    uint32_t hdr = 24 + (flags2 & 0x20 ? 2 : 0), flen = mpdu_len;
+    if (flen < hdr + 12)
+        return;
+    const uint8_t *bssid = f + 16, *body = f + hdr;
+    uint16_t cap = (uint16_t)(body[10] | body[11] << 8);
+    int sig = -(int)(energy_a && (!energy_b || energy_a < energy_b) ? energy_a : energy_b ? energy_b : 100);
+    WlanNet n;
+    memset(&n, 0, sizeof(n));
+    memcpy(n.bssid, bssid, 6);
+    n.signal = (int8_t)sig;
+    n.channel = chan;
+    n.security = cap & 0x10 ? WLAN_SEC_WEP : WLAN_SEC_OPEN;
+    for (uint32_t o = hdr + 12; o + 2 <= flen;) {
+        uint8_t id = f[o], l = f[o + 1];
+        if (o + 2 + l > flen)
+            break;
+        const uint8_t *v = f + o + 2;
+        if (id == 0 && l <= 32) {
+            memcpy(n.ssid, v, l);
+            n.ssid_len = l;
+        } else if (id == 3 && l >= 1) {
+            n.channel = v[0];
+        } else if (id == 48) {
+            n.security = WLAN_SEC_WPA2;
+            /* AKM-Liste: 00-0F-AC-08 = SAE (WPA3) */
+            if (l >= 8) {
+                uint32_t pc = (uint32_t)(v[6] | v[7] << 8), ak = 8 + pc * 4;
+                if (ak + 2 <= l) {
+                    uint32_t na = (uint32_t)(v[ak] | v[ak + 1] << 8);
+                    for (uint32_t i = 0; i < na && ak + 2 + i * 4 + 4 <= l; i++)
+                        if (v[ak + 2 + i * 4 + 3] == 8)
+                            n.security = WLAN_SEC_WPA3;
+                }
+            }
+        } else if (id == 221 && l >= 4 && v[0] == 0x00 && v[1] == 0x50 && v[2] == 0xF2 && v[3] == 1 &&
+                   n.security < WLAN_SEC_WPA2) {
+            n.security = WLAN_SEC_WPA;
+        }
+        o += 2 + l;
+    }
+    for (uint32_t i = 0; i < n_nets; i++)
+        if (memcmp(nets[i].bssid, n.bssid, 6) == 0) {
+            if (n.signal > nets[i].signal)
+                nets[i].signal = n.signal;
+            nets[i].seen++;
+            return;
+        }
+    if (n_nets < WLAN_MAX_NETS) {
+        n.seen = 1;
+        nets[n_nets++] = n;
+    }
+}
+
+int iwl_scan(void)
+{
+    if (scan_busy)
+        return -7;
+    if (info.init_step != 9) {
+        int r = iwl_load_fw();
+        if (r < 0)
+            return r;
+    }
+    scan_busy = 1;
+    static ScanReq rq;
+    memset(&rq, 0, sizeof(rq));
+    rq.uid = 0;
+    rq.ooc_priority = 6;                         /* IWL_SCAN_PRIORITY_EXT_6 */
+    rq.gflags = (1u << 11) | (1u << 1) | (1u << 7); /* FORCE_PASSIVE, PASS_ALL, ADAPTIVE_DWELL */
+    rq.active_dwell[0] = rq.active_dwell[1] = 10;
+    rq.passive_dwell[0] = rq.passive_dwell[1] = 110;
+    rq.adwell_2g = 2;
+    rq.adwell_5g = 8;
+    rq.adwell_social = 10;
+    rq.adwell_max_budget = 300;
+    rq.scan_priority = 6;
+    rq.cflags = 1u << 5; /* ENABLE_CHAN_ORDER */
+    rq.n_aps_override[0] = 10;
+    rq.n_aps_override[1] = 2;
+    for (unsigned i = 0; i < sizeof(scan_chans); i++) {
+        rq.chan[i].channel = scan_chans[i];
+        rq.chan[i].band = scan_chans[i] <= 14 ? 1 : 0; /* PHY_BAND_24 / PHY_BAND_5 */
+        rq.chan[i].iter_count = 1;
+    }
+    rq.count = (uint8_t)sizeof(scan_chans);
+    rq.schedule[0].iter_count = 1;
+    n_nets = 0;
+    scan_frames = 0;
+    logged = 0;
+    uint64_t t0 = time_us();
+    int r = cmd_sync(GRP_LONG, CMD_SCAN_REQ, &rq, sizeof(rq), "SCAN_REQ_UMAC");
+    if (r >= 4 && le32(want.data) != 0) {
+        kprintf("iwl: Suche abgelehnt, Status %#x\n", le32(want.data));
+        r = -8;
+    }
+    if (r >= 0) {
+        want.active = 1;
+        want.got = 0;
+        want.group = 0xFF;
+        want.cmd = CMD_SCAN_COMPLETE;
+        want.seq = -1;
+        r = wait_for(0xFF, CMD_SCAN_COMPLETE, -1, 15000, "SCAN_COMPLETE");
+        if (r >= 8)
+            kprintf("iwl: Suche fertig nach %u ms: Status %u, %u Rahmen, %u Netze\n",
+                    (uint32_t)((time_us() - t0) / 1000), want.data[6], scan_frames, n_nets);
+    }
+    info.scan_ms = (uint32_t)((time_us() - t0) / 1000);
+    info.scan_frames = scan_frames;
+    info.scan_nets = n_nets;
+    scan_busy = 0;
+    return r < 0 ? (r == -8 ? -8 : -6) : (int)n_nets;
+}
+
+int iwl_scan_result(unsigned i, WlanNet *out)
+{
+    if (i >= n_nets)
+        return -1;
+    *out = nets[i];
     return 0;
 }
