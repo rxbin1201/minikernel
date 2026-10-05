@@ -33,6 +33,7 @@ sonst in reiner Emulation. Unter WSL einmalig `sudo usermod -aG kvm $USER` und W
 | `DISK_LAYOUT=none\|mbr\|gpt` | Partitionierung beim Neuanlegen der Datenplatte |
 | `NET=e1000\|e1000e\|none` | Netzwerkkarte im QEMU-User-Netz (Gast 10.0.2.15, Router 10.0.2.2) |
 | `SOUND=none\|wav\|pa\|off` | Soundkarte (Intel HD Audio): Ton ins Leere, nach `Build/sound.wav`, ueber PulseAudio (unter WSLg die Windows-Lautsprecher) oder ohne Karte |
+| `MOUSE=0` | ohne USB-Maus. Standard: `usb-tablet` (absolute Koordinaten, der Zeiger folgt der Maus des Rechners, ohne sie im Fenster einzufangen; PS/2-Mausdaten verwirft der Kernel). Bei den Selbsttests nie |
 | `STICK=12\|16\|exfat` | zusaetzlichen Test-Stick (FAT12/FAT16/exFAT) am USB anschliessen |
 | `TESTS=1` / `TESTS=disk,user` | Selbsttests beim Start (alle bzw. nur diese Gruppen); `KEEP=1` bleibt danach im System |
 | `CMDLINE="..."` | weitere Kernel-Kommandozeile, siehe unten |
