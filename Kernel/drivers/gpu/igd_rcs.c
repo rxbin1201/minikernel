@@ -1612,7 +1612,8 @@ static int asm_vs_tex(uint32_t (*k)[4], const uint32_t m[16], const uint32_t l[3
 }
 
 /* Pixel-Shader mit Textur: u, v aus Attribut 0 interpolieren (r104/r106), "sample" -> r12-r19 (R, G, B, A je 2
- * Register). mod: mal Attribut 1 (Farbe, Koeffizienten ab r8). Dann Render-Target-Write mit Thread-Ende */
+ * Register). mod: mal Attribut 1 (Farbe mit Alpha, Koeffizienten ab r8 - auch das Alpha, sonst mischt glBlendFunc
+ * mit dem der Textur allein). Dann Render-Target-Write mit Thread-Ende */
 static int asm_ps_tex(uint32_t (*k)[4], int mod)
 {
     static const int reg[4] = {6, 6, 7, 7}, sub[4] = {0, 16, 0, 16};
@@ -1622,7 +1623,7 @@ static int asm_ps_tex(uint32_t (*k)[4], int mod)
                 eu_r(EU_F, 2, 0, 4, 3, 1));
     eu_send(k[n++], 4, SFID_SAMPLER, eu_d(EU_F, 12, 0), 104, SAMPLE_SIMD16);
     for (int c = 0; c < 4; c++) {
-        if (mod && c < 3) {
+        if (mod) {
             eu_inst(k[n++], EU_PLN, 4, 0, eu_d(EU_F, 20, 0), eu_r(EU_F, reg[c] + 2, sub[c], SCALAR),
                     eu_r(EU_F, 2, 0, 4, 3, 1));
             eu_inst(k[n++], EU_MUL, 4, 0, eu_d(EU_F, 112 + 2 * c, 0), eu_r(EU_F, 12 + 2 * c, 0, 4, 3, 1),
