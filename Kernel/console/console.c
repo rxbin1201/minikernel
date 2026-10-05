@@ -34,6 +34,7 @@ static uint32_t *shadow;        /* gleiche Zeilenlaenge (pitch) wie der Framebuf
 static volatile int gfx_mode;   /* ein Programm zeichnet selbst: die Konsole schreibt nur noch ins Abbild */
 static volatile int splash;     /* Startanimation laeuft (splash.c): ebenso nur ins Abbild */
 static uint64_t     splash_t0;  /* Beginn (ms; 0 = vor dem Timer) */
+static int          splash_pm, splash_goal; /* Ladebalken: gezeigt und Ziel (Promille) */
 #define FB_OFF (gfx_mode || splash) /* nicht in den Framebuffer schreiben */
 static uint32_t     gfx_owner;  /* PID dieses Programms */
 static uint32_t pitch;          /* Pixel pro Zeile */
@@ -241,7 +242,21 @@ void console_splash_start(void)
     uint64_t f = irq_save();
     cursor_hide();
     splash = 1;
-    splash_draw(fb, pitch, width_px, height_px);
+    splash_draw(fb, pitch, width_px, height_px, splash_pm);
+    irq_restore(f);
+}
+
+void console_splash_progress(int percent)
+{
+    if (percent * 10 <= splash_goal)
+        return;
+    splash_goal = percent * 10;
+    /* gleich zeichnen (bis kurz vor das Ziel): waehrend der Kernel startet, kommt der Konsolen-Thread kaum dran */
+    uint64_t f = irq_save();
+    if (splash && !gfx_mode && splash_pm < splash_goal - 60) {
+        splash_pm = splash_goal - 60;
+        splash_bar(fb, pitch, width_px, height_px, splash_pm);
+    }
     irq_restore(f);
 }
 
@@ -644,7 +659,7 @@ int console_resize(uint32_t w, uint32_t h)
         shadow[i] = bg;
     render_all();
     if (splash)
-        splash_draw(fb, pitch, width_px, height_px);
+        splash_draw(fb, pitch, width_px, height_px, splash_pm);
     else
         memmove((void *)fb, shadow, (uint64_t)height_px * pitch * sizeof(uint32_t));
     cursor_show();
@@ -803,13 +818,18 @@ static void console_thread(void *arg)
         }
         if (tick_hook)
             tick_hook();
-        if (splash) { /* Startanimation: etwa 30 Bilder je Sekunde; nach 60 s ohne Programm die Meldungen zeigen */
+        if (splash) { /* Ladebalken: etwa 30 Bilder je Sekunde gleitet er zum Ziel; nach 60 s die Meldungen zeigen */
             uint64_t now = time_ms();
             if (!splash_t0)
                 splash_t0 = now;
+            if (splash_goal >= 900 && splash_goal < 990) /* das erste Programm startet: langsam weiter bis 99 % */
+                splash_goal += 2;
+            int old = splash_pm;
+            if (splash_pm < splash_goal)
+                splash_pm += (splash_goal - splash_pm) / 6 + 1;
             uint64_t f = irq_save();
-            if (splash && !gfx_mode)
-                splash_tick(fb, pitch, width_px, height_px, now - splash_t0);
+            if (splash && !gfx_mode && splash_pm != old)
+                splash_bar(fb, pitch, width_px, height_px, splash_pm);
             irq_restore(f);
             if (now - splash_t0 > 60000)
                 console_splash_end(1);

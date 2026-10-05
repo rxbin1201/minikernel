@@ -3,6 +3,7 @@
 
 #include "drivers/serial.h"
 #include "console/console.h"
+#include "console/splash.h"
 #include "lib/kprintf.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/idt.h"
@@ -113,6 +114,7 @@ void kmain(BootInfo *info)
     console_init(&info->fb);
     /* Startanimation statt der Meldungen ("verbose" zeigt sie; bei den Selbsttests immer Text) */
     if (!boot_word(info->cmdline, "verbose") && !boot_word(info->cmdline, "selftest")) {
+        splash_logo(info->logo, info->logo_size, info->logo_x, info->logo_y, info->logo_scr_w, info->logo_scr_h);
         console_splash_start();
         kprintf_quiet(1); /* Meldungen nur seriell und in dmesg */
     }
@@ -132,6 +134,7 @@ void kmain(BootInfo *info)
     paging_harden();
     heap_init();
     kstack_init();
+    console_splash_progress(10);
     console_enable_shadow(); /* ab hier scrollt die Konsole im RAM statt im (langsamen) Framebuffer */
 
     cmdline_init(info->cmdline);
@@ -153,17 +156,22 @@ void kmain(BootInfo *info)
         kprintf("Ohne Timer kann der Kernel nicht weiterlaufen, angehalten.\n");
         halt_forever();
     }
+    console_splash_progress(20);
     fpu_init();   /* FPU/SSE fuer Programme (die weiteren CPUs uebernehmen CR0/CR4 beim Start) */
     sched_init();
     smp_init(); /* weitere CPUs: laufen ab jetzt Threads aus der gemeinsamen Run-Queue */
     console_start_thread(); /* blaettert im Verlauf (Shift+Bild hoch/runter), zeichnet den Mauszeiger */
+    console_splash_progress(30);
     mouse_init();
     rtc_init();
     init_storage(info);
+    console_splash_progress(60);
     igd_init(info); /* Intel-Grafik: vorerst nur erkennen und auslesen */
+    console_splash_progress(75);
     hda_init();     /* Ton: Intel High Definition Audio */
     net_init(); /* Netzwerkkarten; DHCP laeuft im Hintergrund */
     syscall_init();
+    console_splash_progress(90);
 
     if (cmdline_has("selftest")) {
         run_selftests(info);

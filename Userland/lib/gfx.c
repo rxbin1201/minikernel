@@ -9,6 +9,7 @@ static u32    *gfx_front;       /* gfx_screen plus Mauszeiger: das, was auf dem 
 Clip           gfx_clip;
 static Clip    gfx_base = {0, 0, 1 << 30, 1 << 30}; /* aeussere Grenze: jedes gfx_set_clip wird darauf beschraenkt */
 static int     gfx_cur_x, gfx_cur_y, gfx_cur_visible = 1;
+static int     gfx_shown; /* das Programm hat schon ein Bild gezeigt: vorher keinen Zeiger (das Startbild bleibt stehen) */
 static int     gfx_hw_cursor; /* der Kernel zeigt den Zeiger als eigene Ebene (Intel-Grafik): nichts einzeichnen */
 
 /* Fenster unter dem Desktop (winproto.h) */
@@ -485,7 +486,7 @@ int gfx_hw_cursor_on(void)
 /* SYS_GFX 3: Hardware-Mauszeiger setzen; 0 = ok, sonst gibt es keinen */
 static s64 gfx_hw_cursor_set(void)
 {
-    u64 arg = ((u64)(gfx_cur_x & 0xFFFF)) | ((u64)(gfx_cur_y & 0xFFFF) << 16) | ((u64)(gfx_cur_visible != 0) << 32);
+    u64 arg = ((u64)(gfx_cur_x & 0xFFFF)) | ((u64)(gfx_cur_y & 0xFFFF) << 16) | ((u64)(gfx_cur_visible && gfx_shown) << 32);
     return sys_gfx(3, (const void *)arg);
 }
 
@@ -501,7 +502,7 @@ void gfx_compose(int x, int y, int w, int h)
     for (int yy = y; yy < y + h; yy++)
         memcpy(gfx_front + (u64)yy * (u64)gfx_screen.w + (u64)x, gfx_screen.px + (u64)yy * (u64)gfx_screen.w + (u64)x,
                (u64)w * 4);
-    if (!gfx_cur_visible)
+    if (!gfx_cur_visible || !gfx_shown)
         return;
     int cx, cy, cw, ch;
     gfx_cur_box(&cx, &cy, &cw, &ch);
@@ -530,7 +531,7 @@ void gfx_set_cursor_size(int pct)
     int ox, oy, ow, oh;
     gfx_cur_box(&ox, &oy, &ow, &oh);
     gfx_cursor_build((int)sys_gfx(6, 0));
-    if (!gfx_hw_cursor && gfx_screen.px) {
+    if (!gfx_hw_cursor && gfx_screen.px && gfx_shown) {
         int x, y, w, h;
         gfx_cur_box(&x, &y, &w, &h);
         gfx_present(ox, oy, ow, oh);
@@ -546,12 +547,28 @@ int gfx_cursor_size(void)
 
 static void gfx_win_damage(int x, int y, int w, int h);
 
+/* Das Programm hat sein erstes Bild gezeigt (gfx_present, gfx_vsync): ab jetzt auch den Zeiger */
+static void gfx_mark_shown(void)
+{
+    if (gfx_shown || gfx_win)
+        return;
+    gfx_shown = 1;
+    if (gfx_hw_cursor) {
+        gfx_hw_cursor_set();
+    } else if (gfx_cur_visible && gfx_screen.px) {
+        int x, y, w, h;
+        gfx_cur_box(&x, &y, &w, &h);
+        gfx_present(x, y, w, h);
+    }
+}
+
 void gfx_present(int x, int y, int w, int h)
 {
     if (gfx_win) {
         gfx_win_damage(x, y, w, h);
         return;
     }
+    gfx_mark_shown();
     if (gfx_hw_cursor) { /* Zeiger ist eine eigene Ebene: direkt aus gfx_screen, ohne Zwischenkopie */
         gfx_blit_from(gfx_screen.px, x, y, w, h);
         return;
@@ -576,6 +593,8 @@ void gfx_move_cursor(int x, int y)
         gfx_hw_cursor_set();
         return;
     }
+    if (!gfx_shown)
+        return;
     int bx, by, bw, bh;
     gfx_cur_box(&bx, &by, &bw, &bh);
     gfx_present(ox - gfx_cur_hot, oy - gfx_cur_hot, bw, bh);
@@ -591,6 +610,8 @@ void gfx_show_cursor(int visible)
         gfx_hw_cursor_set();
         return;
     }
+    if (!gfx_shown)
+        return;
     int bx, by, bw, bh;
     gfx_cur_box(&bx, &by, &bw, &bh);
     gfx_present(bx, by, bw, bh);
@@ -1325,6 +1346,7 @@ int bmp_save(const char *path, const Surface *s, int x, int y, int w, int h)
 
 int gfx_vsync(void)
 {
+    gfx_mark_shown();
     if (gfx_win) { /* im Fenster: im Takt des Desktops (er meldet sich nach seinem naechsten Bild) */
         gfx_win_flush();
         gfx_win_frame = 0;

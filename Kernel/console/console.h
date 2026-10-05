@@ -65,6 +65,7 @@ void     console_cursor_set(int x, int y, int visible);
  * wenn ein Programm den Bildschirm nimmt oder etwas ausgibt (console_splash_end(0): leere Konsole) oder bei einem
  * Fehler des Kernels (console_splash_end(1): mit allen Meldungen) */
 void     console_splash_start(void);
+void     console_splash_progress(int percent); /* Ladebalken: so weit ist der Start (steigt nur) */
 void     console_splash_end(int show_log);
 int      console_splash_active(void);
 void     console_cursor_size(uint32_t pct);

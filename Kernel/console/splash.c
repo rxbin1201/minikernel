@@ -1,123 +1,154 @@
-/* Startanimation: solange der Kernel startet (ohne "verbose" in der Kommandozeile), steht statt der Meldungen das
- * Logo des Desktops (abgerundetes Quadrat mit Farbverlauf und weissem Punkt) auf dunklem Grund, darunter ein Kreis
- * aus zehn Punkten, durch den ein heller Punkt laeuft. Nur Ganzzahlen (der Kernel rechnet ohne FPU); Kanten werden
- * mit 4 x 4 Abtastpunkten je Pixel geglaettet (Koordinaten in 1/8 Pixel). */
+/* Startbild: solange der Kernel startet (ohne "verbose" in der Kommandozeile), bleibt der Bildschirm schwarz mit dem
+ * Startlogo der Firmware an derselben Stelle wie vor dem Bootloader (ACPI-Tabelle BGRT, vom Bootloader kopiert - wie
+ * bei Windows und Linux); darunter ein schmaler, abgerundeter Ladebalken wie bei macOS. Hat der Bootloader oder die
+ * Intel-Grafik die Aufloesung gewechselt, steht das Logo an derselben relativen Stelle (bei mindestens doppelter
+ * Groesse doppelt so gross). Ohne BGRT nur der Balken. Nur Ganzzahlen (der Kernel rechnet ohne FPU); die runden
+ * Enden des Balkens werden mit 4 x 4 Abtastpunkten je Pixel geglaettet. */
 
 #include "console/splash.h"
 
-#define BG    0x0B0D14u
-#define TOP   0x6A7CFFu /* Farbverlauf des Logos (wie draw_logo im Desktop) */
-#define BOT   0xC04BD6u
-#define NDOTS 10
+#define TRACK 0x3A3A3Cu /* Balken: Rinne und Fuellung */
+#define FILL  0xE5E5EAu
 
-/* Punkte auf dem Kreis: sin/cos in 1/1000, beginnend oben, im Uhrzeigersinn */
-static const int dot_sin[NDOTS] = {0, 588, 951, 951, 588, 0, -588, -951, -951, -588};
-static const int dot_cos[NDOTS] = {1000, 809, 309, -309, -809, -1000, -809, -309, 309, 809};
+static const uint8_t *bmp;
+static uint64_t       bmp_size;
+static uint32_t       logo_x, logo_y, logo_sw, logo_sh;
+static int            bw, bh, bpp, row_bytes, top_down; /* Bild der BMP */
+static uint32_t       pix_off;
+
+static uint32_t rd32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
+
+void splash_logo(const void *data, uint64_t size, uint32_t x, uint32_t y, uint32_t scr_w, uint32_t scr_h)
+{
+    const uint8_t *b = data;
+    bmp = 0;
+    if (!b || size < 54 || b[0] != 'B' || b[1] != 'M' || !scr_w || !scr_h)
+        return;
+    int32_t w = (int32_t)rd32(b + 18), h = (int32_t)rd32(b + 22);
+    int depth = b[28] | b[29] << 8;
+    uint32_t comp = rd32(b + 30), off = rd32(b + 10);
+    if (w <= 0 || h == 0 || w > 4096 || h > 4096 || h < -4096 || (depth != 24 && depth != 32) || (comp != 0 && comp != 3))
+        return;
+    int rb = ((w * (depth / 8)) + 3) & ~3, ah = h < 0 ? -h : h;
+    if ((uint64_t)off + (uint64_t)rb * (uint64_t)ah > size)
+        return;
+    bmp = b;
+    bmp_size = size;
+    bw = w;
+    bh = ah;
+    bpp = depth / 8;
+    row_bytes = rb;
+    top_down = h < 0;
+    pix_off = off;
+    logo_x = x;
+    logo_y = y;
+    logo_sw = scr_w;
+    logo_sh = scr_h;
+}
+
+/* Lage des Logos auf diesem Bildschirm: links oben, Massstab; 0 = kein Logo */
+static int logo_place(uint32_t w, uint32_t h, int *x, int *y, int *k)
+{
+    if (!bmp)
+        return 0;
+    *k = w >= 2 * logo_sw && h >= 2 * logo_sh ? 2 : 1;
+    if (w == logo_sw && h == logo_sh) {
+        *x = (int)logo_x;
+        *y = (int)logo_y;
+    } else { /* gleiche relative Lage der Mitte */
+        *x = (int)(((uint64_t)logo_x * 2 + (uint64_t)bw) * w / (2 * (uint64_t)logo_sw)) - bw * *k / 2;
+        *y = (int)(((uint64_t)logo_y * 2 + (uint64_t)bh) * h / (2 * (uint64_t)logo_sh)) - bh * *k / 2;
+    }
+    return 1;
+}
+
+/* Balken: links oben, Breite, Hoehe */
+static void bar_place(uint32_t w, uint32_t h, int *x, int *y, int *bw_, int *bh_)
+{
+    int m = (int)(w < h ? w : h);
+    int width = m / 5, height = m / 160;
+    if (width < 120)
+        width = 120;
+    if (height < 4)
+        height = 4;
+    int lx, ly, k, top;
+    if (logo_place(w, h, &lx, &ly, &k))
+        top = ly + bh * k + (int)h / 10;
+    else
+        top = (int)h * 62 / 100;
+    if (top > (int)h - 4 * height)
+        top = (int)h - 4 * height;
+    *x = ((int)w - width) / 2;
+    *y = top;
+    *bw_ = width;
+    *bh_ = height;
+}
 
 static uint32_t mix(uint32_t a, uint32_t b, uint32_t t) /* t: 0 = a, 256 = b */
 {
     uint32_t r = 0;
-    for (int s = 0; s < 24; s += 8) {
-        uint32_t ca = (a >> s) & 0xFF, cb = (b >> s) & 0xFF;
-        r |= ((ca * (256 - t) + cb * t) >> 8) << s;
-    }
+    for (int s = 0; s < 24; s += 8)
+        r |= ((((a >> s) & 0xFF) * (256 - t) + ((b >> s) & 0xFF) * t) >> 8) << s;
     return r;
 }
 
-typedef struct {
-    int S, lx, ly;          /* Logo: Groesse, links oben */
-    int cx, cy, R, rd;      /* Punktkreis: Mitte, Radius, Radius eines Punkts */
-} Layout;
-
-static void layout(uint32_t w, uint32_t h, Layout *L)
+/* Deckung 0-16 der Kapsel (x, y, w, h; Radius h/2) im Pixel (px, py), in 1/8 Pixel gerechnet */
+static int capsule_cov(int px, int py, int x, int y, int w, int h)
 {
-    int S = (int)(h < w ? h : w) / 6;
-    if (S < 48)
-        S = 48;
-    L->S = S;
-    L->lx = ((int)w - S) / 2;
-    L->ly = (int)h / 2 - S * 3 / 4;
-    L->cx = (int)w / 2;
-    L->cy = L->ly + S + S * 3 / 4;
-    L->R = S * 22 / 100;
-    L->rd = S * 4 / 100 < 2 ? 2 : S * 4 / 100;
-}
-
-/* Deckung 0-16 des abgerundeten Rechtecks (x, y, s, s, Radius r) im Pixel (px, py) */
-static int rrect_cov(int px, int py, int x, int y, int s, int r)
-{
-    int n = 0, x0 = (x + r) * 8, x1 = (x + s - r) * 8, y0 = (y + r) * 8, y1 = (y + s - r) * 8, rr = r * 8 * r * 8;
+    if (w <= 0)
+        return 0;
+    int r8 = h * 4, cy8 = y * 8 + h * 4, x0 = x * 8 + r8, x1 = (x + w) * 8 - r8, n = 0;
+    if (x1 < x0)
+        x0 = x1 = (x0 + x1) / 2;
     for (int sy = 0; sy < 4; sy++)
         for (int sx = 0; sx < 4; sx++) {
             int X = px * 8 + sx * 2 + 1, Y = py * 8 + sy * 2 + 1;
-            if (X < x * 8 || X >= (x + s) * 8 || Y < y * 8 || Y >= (y + s) * 8)
-                continue;
-            int dx = X < x0 ? x0 - X : X > x1 ? X - x1 : 0, dy = Y < y0 ? y0 - Y : Y > y1 ? Y - y1 : 0;
-            n += dx * dx + dy * dy <= rr;
-        }
-    return n;
-}
-
-/* Deckung 0-16 einer Kreisscheibe (Mitte und Radius in 1/8 Pixel) */
-static int disc_cov(int px, int py, int cx8, int cy8, int r8)
-{
-    int n = 0;
-    for (int sy = 0; sy < 4; sy++)
-        for (int sx = 0; sx < 4; sx++) {
-            int dx = px * 8 + sx * 2 + 1 - cx8, dy = py * 8 + sy * 2 + 1 - cy8;
+            int dx = X < x0 ? x0 - X : X > x1 ? X - x1 : 0, dy = Y - cy8;
             n += dx * dx + dy * dy <= r8 * r8;
         }
     return n;
 }
 
-static void put(volatile uint32_t *fb, uint32_t pitch, uint32_t w, uint32_t h, int x, int y, uint32_t c)
+void splash_bar(volatile uint32_t *fb, uint32_t pitch, uint32_t w, uint32_t h, int permille)
 {
-    if (x >= 0 && y >= 0 && (uint32_t)x < w && (uint32_t)y < h)
-        fb[(uint64_t)y * pitch + (uint64_t)x] = c;
-}
-
-void splash_tick(volatile uint32_t *fb, uint32_t pitch, uint32_t w, uint32_t h, uint64_t ms)
-{
-    Layout L;
-    layout(w, h, &L);
-    int head = (int)((ms / 90) % NDOTS), m = L.R + L.rd + 2;
-    for (int y = L.cy - m; y <= L.cy + m; y++)
-        for (int x = L.cx - m; x <= L.cx + m; x++) {
-            uint32_t c = BG;
-            for (int i = 0; i < NDOTS; i++) {
-                int dx8 = L.cx * 8 + L.R * 8 * dot_sin[i] / 1000, dy8 = L.cy * 8 - L.R * 8 * dot_cos[i] / 1000;
-                if (x * 8 < dx8 - L.rd * 8 - 8 || x * 8 > dx8 + L.rd * 8 + 8 || y * 8 < dy8 - L.rd * 8 - 8 ||
-                    y * 8 > dy8 + L.rd * 8 + 8)
-                    continue;
-                int cov = disc_cov(x, y, dx8, dy8, L.rd * 8);
-                if (!cov)
-                    continue;
-                int age = (head - i + NDOTS) % NDOTS; /* 0 = der helle Punkt, dahinter verblassend */
-                uint32_t bright = (uint32_t)(240 - age * 20);
-                c = mix(c, mix(BG, 0xFFFFFF, bright), (uint32_t)cov * 16);
-            }
-            put(fb, pitch, w, h, x, y, c);
+    int x, y, width, height;
+    bar_place(w, h, &x, &y, &width, &height);
+    if (permille < 0)
+        permille = 0;
+    if (permille > 1000)
+        permille = 1000;
+    int fw = permille ? height + (width - height) * permille / 1000 : 0; /* Fuellung: mindestens ein runder Punkt */
+    for (int py = y - 1; py <= y + height; py++)
+        for (int px = x - 1; px <= x + width; px++) {
+            if (px < 0 || py < 0 || (uint32_t)px >= w || (uint32_t)py >= h)
+                continue;
+            uint32_t c = mix(0, TRACK, (uint32_t)capsule_cov(px, py, x, y, width, height) * 16);
+            int f = capsule_cov(px, py, x, y, fw, height);
+            if (f)
+                c = mix(c, FILL, (uint32_t)f * 16);
+            fb[(uint64_t)py * pitch + (uint64_t)px] = c;
         }
 }
 
-void splash_draw(volatile uint32_t *fb, uint32_t pitch, uint32_t w, uint32_t h)
+void splash_draw(volatile uint32_t *fb, uint32_t pitch, uint32_t w, uint32_t h, int permille)
 {
     for (uint32_t y = 0; y < h; y++)
         for (uint32_t x = 0; x < w; x++)
-            fb[(uint64_t)y * pitch + x] = BG;
-    Layout L;
-    layout(w, h, &L);
-    int S = L.S, r = S / 4, dot8 = S * 8 * 18 / 100;
-    for (int y = L.ly; y < L.ly + S; y++)
-        for (int x = L.lx; x < L.lx + S; x++) {
-            int cov = rrect_cov(x, y, L.lx, L.ly, S, r);
-            if (!cov)
+            fb[(uint64_t)y * pitch + x] = 0;
+    int lx, ly, k;
+    if (logo_place(w, h, &lx, &ly, &k))
+        for (int y = 0; y < bh * k; y++) {
+            int sy = y / k, row = top_down ? sy : bh - 1 - sy, py = ly + y;
+            if (py < 0 || (uint32_t)py >= h)
                 continue;
-            uint32_t c = mix(TOP, BOT, (uint32_t)((y - L.ly) * 256 / S));
-            int d = disc_cov(x, y, L.lx * 8 + S * 4, L.ly * 8 + S * 4, dot8);
-            if (d)
-                c = mix(c, 0xFFFFFF, (uint32_t)d * 15); /* weisser Punkt, leicht durchscheinend wie im Desktop */
-            put(fb, pitch, w, h, x, y, mix(BG, c, (uint32_t)cov * 16));
+            const uint8_t *src = bmp + pix_off + (uint64_t)row * (uint64_t)row_bytes;
+            for (int x = 0; x < bw * k; x++) {
+                int px = lx + x;
+                if (px < 0 || (uint32_t)px >= w)
+                    continue;
+                const uint8_t *p = src + (x / k) * bpp; /* B, G, R */
+                fb[(uint64_t)py * pitch + (uint64_t)px] = (uint32_t)p[2] << 16 | (uint32_t)p[1] << 8 | p[0];
+            }
         }
-    splash_tick(fb, pitch, w, h, 0);
+    splash_bar(fb, pitch, w, h, permille);
 }

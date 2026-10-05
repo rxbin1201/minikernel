@@ -42,6 +42,11 @@ typedef struct {
     unsigned int       mode_current;    /* Index des benutzten Modus in modes[] */
     BootVideoMode      modes[BOOT_MAX_MODES];
     unsigned long long kernel_size;     /* Groesse von \kernel.elf: damit findet der Kernel sein Boot-Volume wieder */
+    /* Startlogo der Firmware (ACPI-Tabelle BGRT), vom Bootloader kopiert: BMP-Datei, Lage links oben in dem Modus,
+     * in dem die Firmware es gezeichnet hat (logo_scr_w x logo_scr_h). logo = 0: keins */
+    void              *logo;
+    unsigned long long logo_size;
+    unsigned int       logo_x, logo_y, logo_scr_w, logo_scr_h;
 } BootInfo;
 
 #endif

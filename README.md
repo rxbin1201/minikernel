@@ -500,14 +500,20 @@ Der Bootloader liest `\cmdline.txt` von der EFI-Systempartition (bei QEMU aus `C
 
 Im laufenden System schreibt `resolution` Grafikmodus und Schriftgroesse in die `cmdline.txt` der Boot-Partition.
 
-**Startanimation:** ohne `verbose` gibt der Bootloader nichts aus, und der Kernel zeigt gleich nach dem Start statt
-seiner Meldungen das Logo auf dunklem Grund mit einem drehenden Punktkreis (`Kernel/console/splash.c`, nur Ganzzahlen,
-kantengeglaettet; etwa 30 Bilder je Sekunde aus dem Konsolen-Thread, nach einem Moduswechsel der Intel-Grafik neu
-gezeichnet). Die Konsole schreibt solange nur in ihr RAM-Abbild. Die Animation endet, sobald das erste Programm den
-Bildschirm nimmt (Desktop: das Bild geht ohne Text direkt in den Desktop ueber) oder etwas in die Konsole schreibt
-(Shell: leere Konsole mit ihrer Begruessung); bei einer Ausnahme im Kernel und nach 60 s ohne Programm erscheinen alle
-Meldungen. Auch danach kommen Meldungen des Kernels nicht auf den Bildschirm (wie `quiet` bei Linux), nur seriell und
-in `dmesg`; Ausgaben der Programme und Abstuerze von Programmen schon. Bei den Selbsttests immer Text.
+**Startbild:** ohne `verbose` loescht der Bootloader den Bildschirm nicht und gibt nichts aus; er kopiert das
+Startlogo der Firmware (ACPI-Tabelle BGRT, wie Windows und Linux) in eigenen Speicher (`BootInfo.logo`), zeichnet den
+Bildschirm schwarz mit dem Logo an seiner Stelle (Text der Firmware weg) und reicht es weiter. Der Kernel zeigt gleich
+nach dem Start dasselbe Bild und darunter einen schmalen, abgerundeten Ladebalken wie bei macOS
+(`Kernel/console/splash.c`, nur Ganzzahlen, kantengeglaettet). Den Fortschritt melden die Startschritte des Kernels
+(`console_splash_progress`); der Konsolen-Thread laesst ihn weich nachgleiten, waehrend das erste Programm startet,
+langsam bis 99 %. Nach einem Moduswechsel (Bootloader `mode=`, Intel `igdmode=`) steht das Logo an derselben relativen
+Stelle (ab doppelter Groesse doppelt so gross). Ohne BGRT nur der Balken. Die Konsole schreibt solange nur in ihr
+RAM-Abbild. Das Bild bleibt, bis das erste Programm etwas zeigt: der Desktop nimmt den Bildschirm, die
+Grafikbibliothek zeichnet den Mauszeiger erst nach dem ersten Bild des Programms - so geht das Startbild direkt in den
+Desktop ueber. Schreibt das erste Programm in die Konsole (Shell), erscheint eine leere Konsole mit seiner Ausgabe; bei
+einer Ausnahme im Kernel und nach 60 s ohne Programm alle Meldungen. Auch danach kommen Meldungen des Kernels nicht auf
+den Bildschirm (wie `quiet` bei Linux), nur seriell und in `dmesg`; Ausgaben der Programme und Abstuerze von
+Programmen schon. Bei den Selbsttests immer Text.
 
 ## Echte Hardware und VMware
 
