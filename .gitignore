@@ -6,3 +6,6 @@ Out.log
 # Python
 __pycache__/
 *.pyc
+
+# Geraete-Firmware (linux-firmware, Lizenz des Herstellers): lokal in firmware/, kommt in die initrd
+/firmware/

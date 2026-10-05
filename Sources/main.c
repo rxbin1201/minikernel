@@ -5,6 +5,10 @@
 #define KERNEL_PATH L"\\kernel.elf"
 #define PAGE_SIZE   4096ULL
 
+/* Meldungen nur mit "verbose" in cmdline.txt (sonst zeigt der Kernel gleich seine Startanimation); Fehler immer */
+static int verbose;
+#define LOG(...) do { if (verbose) Print(__VA_ARGS__); } while (0)
+
 /* Minimaler ELF64-Support */
 #define PT_LOAD 1
 
@@ -68,7 +72,7 @@ static EFI_STATUS load_kernel(EFI_HANDLE image, UINT64 *entry, UINT64 *file_size
         Print(L"Kernel %s nicht gefunden: %r\r\n", KERNEL_PATH, st);
         return st;
     }
-    Print(L"Kernel gefunden\r\n");
+    LOG(L"Kernel gefunden\r\n");
     EFI_FILE_INFO *kfi = LibFileInfo(file);
     if (kfi) {
         *file_size = kfi->FileSize;
@@ -87,7 +91,7 @@ static EFI_STATUS load_kernel(EFI_HANDLE image, UINT64 *entry, UINT64 *file_size
         Print(L"Kein gueltiger x86-64 ELF\r\n");
         return EFI_UNSUPPORTED;
     }
-    Print(L"ELF-Header gueltig, Entry: 0x%lx\r\n", eh.e_entry);
+    LOG(L"ELF-Header gueltig, Entry: 0x%lx\r\n", eh.e_entry);
 
     /* Program Headers lesen */
     UINTN ph_size = (UINTN)eh.e_phnum * sizeof(Elf64_Phdr);
@@ -135,7 +139,7 @@ static EFI_STATUS load_kernel(EFI_HANDLE image, UINT64 *entry, UINT64 *file_size
     uefi_call_wrapper(file->Close, 1, file);
     FreePool(ph);
 
-    Print(L"Kernel geladen @ 0x%lx (%d Seiten)\r\n", lo, pages);
+    LOG(L"Kernel geladen @ 0x%lx (%d Seiten)\r\n", lo, pages);
     *entry = eh.e_entry;
     return EFI_SUCCESS;
 }
@@ -286,7 +290,92 @@ static void select_mode(BootInfo *info)
         }
     }
     info->mode_current = (UINT32)want;
-    Print(L"Grafikmodus: %dx%d (%d verfuegbar)\r\n", info->modes[want].width, info->modes[want].height, (int)n);
+    LOG(L"Grafikmodus: %dx%d (%d verfuegbar)\r\n", info->modes[want].width, info->modes[want].height, (int)n);
+}
+
+/* Startlogo der Firmware (BGRT) in eigenen Speicher kopieren (EfiLoaderData: der Kernel gibt ihn nicht frei), damit
+ * der Kernel es an derselben Stelle weiter zeigen kann. Lage gilt fuer den Modus vor select_mode (scr_w x scr_h). */
+static void copy_boot_logo(BootInfo *info, const UINT8 *rsdp, UINT32 scr_w, UINT32 scr_h)
+{
+    if (!rsdp || rsdp[0] != 'R' || rsdp[1] != 'S' || rsdp[2] != 'D')
+        return;
+    UINT64 sdt = rsdp[15] >= 2 ? *(const UINT64 *)(rsdp + 24) : *(const UINT32 *)(rsdp + 16);
+    UINTN esz = rsdp[15] >= 2 ? 8 : 4;
+    const UINT8 *h = (const UINT8 *)(UINTN)sdt;
+    if (!h)
+        return;
+    UINT32 len = *(const UINT32 *)(h + 4);
+    for (UINTN off = 36; off + esz <= len; off += esz) {
+        UINT64 a = esz == 8 ? *(const UINT64 *)(h + off) : *(const UINT32 *)(h + off);
+        const UINT8 *t = (const UINT8 *)(UINTN)a;
+        if (!t || t[0] != 'B' || t[1] != 'G' || t[2] != 'R' || t[3] != 'T' || *(const UINT32 *)(t + 4) < 56)
+            continue;
+        const UINT8 *bmp = (const UINT8 *)(UINTN)*(const UINT64 *)(t + 40);
+        if (t[39] != 0 || !bmp || bmp[0] != 'B' || bmp[1] != 'M') /* Bildtyp 0 = BMP */
+            return;
+        UINT32 size = *(const UINT32 *)(bmp + 2);
+        if (size < 54 || size > (16u << 20))
+            return;
+        EFI_PHYSICAL_ADDRESS dst;
+        if (EFI_ERROR(uefi_call_wrapper(BS->AllocatePages, 4, AllocateAnyPages, EfiLoaderData,
+                                        (UINTN)((size + PAGE_SIZE - 1) / PAGE_SIZE), &dst)))
+            return;
+        CopyMem((VOID *)(UINTN)dst, (VOID *)bmp, size);
+        info->logo = (VOID *)(UINTN)dst;
+        info->logo_size = size;
+        info->logo_x = *(const UINT32 *)(t + 48);
+        info->logo_y = *(const UINT32 *)(t + 52);
+        info->logo_scr_w = scr_w;
+        info->logo_scr_h = scr_h;
+        LOG(L"Startlogo der Firmware: %d Bytes bei %d,%d\r\n", (int)size, (int)info->logo_x, (int)info->logo_y);
+        return;
+    }
+}
+
+/* Ohne "verbose": Bildschirm schwarz und das Startlogo wieder an seine Stelle (Text der Firmware weg, nach einem
+ * Moduswechsel an derselben relativen Stelle - wie spaeter der Kernel in Kernel/console/splash.c) */
+static void draw_boot_logo(const BootInfo *info)
+{
+    EFI_GRAPHICS_OUTPUT_PROTOCOL *gop;
+    if (EFI_ERROR(LibLocateProtocol(&GraphicsOutputProtocol, (VOID **)&gop)))
+        return;
+    UINT32 w = gop->Mode->Info->HorizontalResolution, h = gop->Mode->Info->VerticalResolution;
+    EFI_GRAPHICS_OUTPUT_BLT_PIXEL black = {0, 0, 0, 0};
+    uefi_call_wrapper(gop->Blt, 10, gop, &black, EfiBltVideoFill, 0, 0, 0, 0, (UINTN)w, (UINTN)h, 0);
+    const UINT8 *b = info->logo;
+    if (!b)
+        return;
+    INT32 bw = *(const INT32 *)(b + 18), bh = *(const INT32 *)(b + 22);
+    UINT32 bpp = (UINT32)(b[28] | b[29] << 8) / 8, off = *(const UINT32 *)(b + 10);
+    UINT32 ah = (UINT32)(bh < 0 ? -bh : bh), rb = ((UINT32)bw * bpp + 3) & ~3u;
+    if (bw <= 0 || bw > 4096 || ah == 0 || ah > 4096 || (bpp != 3 && bpp != 4) ||
+        (UINT64)off + (UINT64)rb * ah > info->logo_size)
+        return;
+    UINT32 k = w >= 2 * info->logo_scr_w && h >= 2 * info->logo_scr_h ? 2 : 1, ow = (UINT32)bw * k, oh = ah * k;
+    INT64 x = info->logo_x, y = info->logo_y;
+    if (w != info->logo_scr_w || h != info->logo_scr_h) {
+        x = (INT64)(((UINT64)info->logo_x * 2 + (UINT64)bw) * w / (2 * (UINT64)info->logo_scr_w)) - (INT64)ow / 2;
+        y = (INT64)(((UINT64)info->logo_y * 2 + ah) * h / (2 * (UINT64)info->logo_scr_h)) - (INT64)oh / 2;
+    }
+    if (x < 0 || y < 0 || x + ow > w || y + oh > h)
+        return;
+    EFI_GRAPHICS_OUTPUT_BLT_PIXEL *px = AllocatePool((UINTN)ow * oh * sizeof(*px));
+    if (!px)
+        return;
+    for (UINT32 yy = 0; yy < oh; yy++) {
+        UINT32 sy = yy / k, row = bh < 0 ? sy : ah - 1 - sy;
+        const UINT8 *src = b + off + (UINT64)row * rb;
+        for (UINT32 xx = 0; xx < ow; xx++) {
+            const UINT8 *p = src + (xx / k) * bpp;
+            EFI_GRAPHICS_OUTPUT_BLT_PIXEL *d = &px[(UINT64)yy * ow + xx];
+            d->Blue = p[0];
+            d->Green = p[1];
+            d->Red = p[2];
+            d->Reserved = 0;
+        }
+    }
+    uefi_call_wrapper(gop->Blt, 10, gop, px, EfiBltBufferToVideo, 0, 0, (UINTN)x, (UINTN)y, (UINTN)ow, (UINTN)oh, 0);
+    FreePool(px);
 }
 
 static EFI_STATUS get_framebuffer(BootFramebuffer *fb)
@@ -308,20 +397,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 {
     InitializeLib(ImageHandle, SystemTable);
 
-    uefi_call_wrapper(ST->ConOut->ClearScreen, 1, ST->ConOut);
-    Print(L"Bootloader gestartet\r\n");
-
-    UINT64 entry;
     static BootInfo info; /* static: bleibt nach ExitBootServices gueltig */
-    UINT64 kernel_size = 0;
-    EFI_STATUS st = load_kernel(ImageHandle, &entry, &kernel_size);
-    info.kernel_size = kernel_size;
-    if (EFI_ERROR(st)) {
-        Print(L"Kernel laden fehlgeschlagen: %r\r\n", st);
-        goto halt;
-    }
 
-    /* Optionale Kommandozeile fuer den Kernel (siehe Kernel/core/cmdline.h); "mode=" wird gleich hier ausgewertet */
+    /* Optionale Kommandozeile fuer den Kernel (siehe Kernel/core/cmdline.h), zuerst: "verbose" schaltet die Meldungen
+     * hier ein, "mode=" wird gleich hier ausgewertet */
     VOID *cmd = NULL;
     UINT64 cmd_size = 0;
     if (!EFI_ERROR(load_module(ImageHandle, L"\\cmdline.txt", &cmd, &cmd_size)) && cmd) {
@@ -331,16 +410,42 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
             info.cmdline[i] = ch < ' ' ? ' ' : ch; /* Zeilenumbrueche usw. werden zu Leerzeichen */
         }
         info.cmdline[n] = 0;
-        Print(L"Kommandozeile geladen (%d Bytes)\r\n", (int)n);
+        const CHAR8 *v = find_option((const CHAR8 *)info.cmdline, "verbose");
+        verbose = v && (*v == 0 || *v == ' ');
+    }
+    if (verbose) { /* sonst bleibt das Bild der Firmware (ihr Logo) stehen, bis der Kernel es uebernimmt */
+        uefi_call_wrapper(ST->ConOut->ClearScreen, 1, ST->ConOut);
+        Print(L"Bootloader gestartet\r\nKommandozeile geladen\r\n");
     }
 
+    UINT64 entry;
+    UINT64 kernel_size = 0;
+    EFI_STATUS st = load_kernel(ImageHandle, &entry, &kernel_size);
+    info.kernel_size = kernel_size;
+    if (EFI_ERROR(st)) {
+        Print(L"Kernel laden fehlgeschlagen: %r\r\n", st);
+        goto halt;
+    }
+
+    /* ACPI-RSDP: bevorzugt 2.0 (XSDT), sonst 1.0 */
+    EFI_GUID acpi20 = ACPI_20_TABLE_GUID;
+    VOID *rsdp = NULL;
+    if (EFI_ERROR(LibGetSystemConfigurationTable(&acpi20, &rsdp)))
+        LibGetSystemConfigurationTable(&AcpiTableGuid, &rsdp);
+    info.rsdp = rsdp;
+    BootFramebuffer before;
+    if (!EFI_ERROR(get_framebuffer(&before)))
+        copy_boot_logo(&info, (const UINT8 *)rsdp, before.width, before.height);
+
     select_mode(&info);
+    if (!verbose)
+        draw_boot_logo(&info);
     st = get_framebuffer(&info.fb);
     if (EFI_ERROR(st)) {
         Print(L"Kein GOP-Framebuffer: %r\r\n", st);
         goto halt;
     }
-    Print(L"Framebuffer: 0x%lx, %dx%d\r\n", info.fb.base, info.fb.width, info.fb.height);
+    LOG(L"Framebuffer: 0x%lx, %dx%d\r\n", info.fb.base, info.fb.width, info.fb.height);
 
     /* Optionales User-Programm; ohne die Datei startet der Kernel trotzdem */
     VOID *module = NULL;
@@ -349,18 +454,12 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     if (EFI_ERROR(st))
         Print(L"initrd.tar nicht geladen (%r)\r\n", st);
     else
-        Print(L"initrd.tar geladen: %ld Bytes @ 0x%lx\r\n", module_size, (UINT64)(UINTN)module);
+        LOG(L"initrd.tar geladen: %ld Bytes @ 0x%lx\r\n", module_size, (UINT64)(UINTN)module);
     info.module = module;
     info.module_size = module_size;
 
-    /* ACPI-RSDP: bevorzugt 2.0 (XSDT), sonst 1.0 */
-    EFI_GUID acpi20 = ACPI_20_TABLE_GUID;
-    VOID *rsdp = NULL;
-    if (EFI_ERROR(LibGetSystemConfigurationTable(&acpi20, &rsdp)))
-        LibGetSystemConfigurationTable(&AcpiTableGuid, &rsdp);
-    info.rsdp = rsdp;
-    Print(L"ACPI RSDP: 0x%lx\r\n", (UINT64)(UINTN)rsdp);
-    Print(L"Springe zum Kernel...\r\n");
+    LOG(L"ACPI RSDP: 0x%lx\r\n", (UINT64)(UINTN)rsdp);
+    LOG(L"Springe zum Kernel...\r\n");
 
     /* Memory Map holen und Boot Services beenden. Zwischen GetMemoryMap und
      * ExitBootServices darf nichts mehr allokiert/ausgegeben werden, sonst wird der MapKey ungueltig. */

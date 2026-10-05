@@ -58,6 +58,18 @@ Programme: `ifconfig`, `ping`, `nslookup`, `ntp`, `udp`, `netstat` (TCP-Verbindu
 `wget -O - url | less` zeigt die Seite, `-S` die Kopfzeilen der Antwort, `-q` keine Meldungen. Folgt Weiterleitungen,
 versteht Content-Length und "chunked"; nur `http://` (fuer `https://` fehlt TLS).
 
+### WLAN und Bluetooth (Intel AX200, im Aufbau)
+
+Die Firmware kommt aus *linux-firmware* und liegt lokal in `firmware/` (nicht im Repository):
+`iwlwifi-cc-a0-77.ucode` (WLAN) und `ibt-20-1-3.sfi` (Bluetooth). `make` packt sie nach `/firmware` in die initrd,
+so liest der Kernel sie ohne Datentraeger (wie Firmware in der initramfs bei Linux).
+
+Stufe 1 (`Kernel/drivers/net/iwl.c`): die Karte (PCI 8086:2723) wird erkannt, BAR0 eingeblendet und die Kennungen
+gelesen (`CSR_HW_REV`, `CSR_HW_RF_ID`; die Karte wird noch nicht angefasst); die Firmware wird zerlegt (TLV-Format wie
+bei Linux: Laufzeit-Abschnitte fuer LMAC und UMAC, Paging, Faehigkeiten). `wlan` zeigt alles, dazu das
+Bluetooth-Geraet am USB (8087:0029). Naechste Stufen: Firmware laden ("alive"), Netze suchen, offen verbinden, WPA2,
+WLAN im Desktop, dann Bluetooth.
+
 ## Mehrere CPUs (SMP)
 
 Der Kernel startet alle CPUs aus der ACPI-MADT (QEMU: `make run SMP=N`, Standard 4). Threads und Prozesse kommen aus
@@ -163,7 +175,7 @@ sys_munmap((void *)d, groesse);
 - Genutzt von `play` und `music` (MP3: der Decoder liest direkt aus der Datei, ohne Puffer und Umkopieren; `play`
   gibt Gespieltes wieder frei), den Schriften (`ttf.c`: nur gebrauchte Tabellen und Zeichen kommen in den Speicher)
   und `bmp_load` (`view`, `paint`).
-- Bis zu 32 Einblendungen je Prozess; jede hat ihre eigene Dateiposition (der Deskriptor darf geschlossen werden).
+- Bis zu 1024 Einblendungen je Prozess; jede hat ihre eigene Dateiposition (der Deskriptor darf geschlossen werden).
   `munmap` nimmt auch Teile heraus, `fork` vererbt sie (das Kind laedt fehlende Seiten selbst), `exec` und das
   Programmende raeumen auf. Liest der Kernel aus einer Einblendung (z.B. `write` aus ihr), laedt
   `process_user_range_ok` die Seiten vorher.
@@ -235,7 +247,38 @@ sys_munmap((void *)d, groesse);
   Farbe; Tiefenpuffer ist ein weiterer geteilter Speicher (D32_FLOAT, Y-Kacheln). Die Render-Engine teilt er sich mit
   dem Zusammensetzen (vorher dessen Auftrag abwarten; jeder Batch waehlt seine Pipeline und setzt den ganzen Zustand).
   Ohne Intel-GPU (QEMU, `gpucomp=soft`, ausserhalb des Desktops) rechnet `gl.c` dasselbe mit der CPU; `gldemo -cpu`
-  erzwingt das zum Vergleich. Noch nicht: Abschneiden an der nahen Ebene, Mischen (Alpha), Mip-Stufen
+  erzwingt das zum Vergleich.
+  **Abschneiden:** `gl.c` schneidet jedes Dreieck vor dem Abgeben an der nahen und fernen Ebene und an einem
+  Schutzstreifen von 4096 Pixeln um das Bild ab (Sutherland-Hodgman in Objektkoordinaten: jede Ebene ist eine
+  Linearkombination der Zeilen der fertigen Matrix, die neuen Ecken bekommen alle Werte linear dazwischen); Dreiecke
+  ganz ausserhalb des Bildes fallen gleich weg. So geht auch ein Boden, der hinter der Kamera weiterlaeuft, und man
+  kann in Gegenstaende hineinfahren. Innerhalb des Schutzstreifens rastert die GPU ohne Abschneiden.
+  **Rueckseiten** (`glEnable(GL_CULL_FACE)`, `glCullFace`, `glFrontFace`): die GPU laesst sie im Rasterizer weg
+  (`3DSTATE_RASTER`, Flags `GPU3D_CULL_BACK`/`_FRONT`, FrontWinding "CCW" - auf echter Hardware geprueft; vorn ist
+  auf dem Bildschirm gegen den Uhrzeigersinn), die CPU nach dem Umrechnen.
+  **Mischen** (`glEnable(GL_BLEND)`, `glBlendFunc` mit allen Faktoren ausser den konstanten, `glDepthMask`): die GPU
+  mischt im Blend-State (`BLEND_STATE` und `3DSTATE_PS_BLEND`, Flag `GPU3D_BLEND`, Faktoren als Codes der Hardware
+  in `Gpu3dDraw.blend`), die CPU im Rasterer. Das Fenster hat keinen Alpha-Kanal: Byte 3 bleibt 255
+  (`GPU3D_KEEP_ALPHA`, der Desktop liest es als Deckung), `GL_DST_ALPHA` ist also immer 1.
+  `gldemo`: Pfeiltasten (oder w/s) fahren die Kamera vor und zurueck, `c` schaltet das Weglassen der Rueckseiten um,
+  `b` den grossen Wuerfel aus Glas (erst die hinteren, dann die vorderen Seiten, ohne Tiefe zu schreiben).
+  **Puffer und Vertex-Arrays** (OpenGL 1.5: `glGenBuffers`, `glBindBuffer`, `glBufferData`/`SubData`, `glMapBuffer`,
+  `glVertexPointer`/`TexCoord`/`Normal`/`ColorPointer`, `glDrawArrays`, `glDrawElements` mit 8-, 16- oder 32-Bit-
+  Indizes): ein Puffer ist geteilter Speicher, fuer die GPU als Flaeche angemeldet (4 KiB je Zeile, bis 64 MiB), und
+  bleibt ueber viele Bilder. `SYS_GPUCOMP 9` (`Gpu3dDrawVB`) schickt nur Zustand, Anfang und Abstand je Attribut: der
+  Kernel stellt `VERTEX_BUFFERS` (je Attribut einer, feste Werte als Puffer mit Zeilenlaenge 0), `VERTEX_ELEMENTS`
+  und `INDEX_BUFFER` ein, die GPU holt Ecken und Indizes selbst (Liste, Streifen, Faecher). Groessen begrenzen das
+  Lesen auf die Flaechen des Programms. Abschneiden macht die GPU dabei nicht: `gl.c` prueft vorher den Kasten um die
+  benutzten Ecken (kleinster/groesster Index und Kasten zwischengespeichert, bis sich der Puffer aendert) - ganz
+  ausserhalb faellt die Zeichnung weg, ganz innerhalb geht sie direkt an die GPU, sonst (und fuer Ecken im
+  Programmspeicher, Vierecke, andere Formate) setzt die Bibliothek die Dreiecke zusammen und schneidet ab.
+  Auf der CPU rechnet `glDrawArrays`/`glDrawElements` jede benutzte Ecke nur einmal um (bei Indizes gehoert sie meist
+  zu mehreren Dreiecken) und merkt sich, ausserhalb welcher Ebenen sie liegt; die Dreiecke entstehen direkt aus den
+  umgerechneten Ecken, nur abzuschneidende gehen ueber `tri_v`. In QEMU: Ringe aus Puffern etwa 25 % schneller als
+  mit `glBegin` (Ecken umrechnen halb so lang).
+  `gldemo`: drei Ringe mit je 2304 Dreiecken aus Puffern, `v` wechselt zum Vergleich auf `glBegin`/`glEnd`.
+  Selbsttest `gltest` (28 Pruefungen mit der CPU, Puffer und Arrays muessen pixelgenau dasselbe Bild ergeben wie
+  `glBegin`/`glEnd`). Noch nicht: Mip-Stufen, Auftraege ohne Warten
 - **Zusammensetzen auf der GPU** (`igd_comp.c`, `SYS_GPUCOMP`; Desktop: `gpu.c`): Bildschirmbild, Hintergrund,
   Fensterbilder und Schatten liegen in geteiltem Speicher, den der Kernel fest in die GGTT einblendet (eigener Bereich,
   Referenz auf das shm-Objekt, solange angemeldet). Je Bild schickt der Desktop alle geaenderten Rechtecke als eine
@@ -321,8 +364,30 @@ Alt-Kombinationen kommen als zwei Bytes (`KEY_ALT`/`KEY_ALT_SHIFT`, dann die Tas
 Animationen (nach der Uhr, nicht nach Bildern): Fenster blenden beim Oeffnen und Schliessen weich ein und aus, fliegen
 beim Minimieren an ihren Platz in der Taskleiste und von dort zurueck, Zoomen gleitet auf die neue Groesse.
 
+Einstellungen (`settings`; im Startmenue und im Systemmenue unter "Einstellungen ..."): links die Bereiche, rechts
+Karten mit Schaltern im Stil des Desktops.
+
+- **Anzeige:** Aufloesung aus den Modi des Monitors bzw. der Firmware. Mit Intel-Treiber schaltet der Desktop sofort um
+  (`WP_SETMODE`: er gibt den Bildschirm kurz ab, der Kernel schaltet, er holt ihn in der neuen Groesse wieder und passt
+  Hintergrund, Taskleiste und Fenster an); danach fragt das Programm "beibehalten?" und springt nach 15 s zurueck.
+  Beibehalten speichert wie `resolution` (`igdmode=`, `mode=max` in cmdline.txt). Ohne Intel-Treiber stellt der
+  Bootloader die Aufloesung ein: sie gilt ab dem naechsten Start ("Jetzt neu starten"). Groesse der Oberflaeche
+  (automatisch, 100, 125, 150 %): ab dem naechsten Start des Desktops, weil jedes Programm seine Titelleiste in seiner
+  Groesse selbst zeichnet.
+- **Zeiger:** Groesse 100-250 % mit Vorschau. Gilt sofort fuer den Hardware-Zeiger (der Kernel zeichnet sein Bild neu),
+  den Zeiger der Konsole und den der Grafikbibliothek (`SYS_GFX 5/6`; ohne Hardware-Zeiger zeichnet `gfx.c` jetzt
+  denselben kantengeglaetteten Pfeil wie der Kernel statt der alten Pixel-Grafik).
+- **Taskleiste:** klein, normal, gross (85/100/125 %), Uhr mit Sekunden, Datum unter der Uhrzeit.
+- **Hintergrund:** fuenf Farbthemen (Abendrot, Ozean, Wald, Lavendel, Graphit; `ui_wallpaper_at` in `ui.c`).
+- **Tastatur:** Layout de/us/uk, sofort und dauerhaft (`kbd=` in cmdline.txt).
+- **Info:** Bildschirm, Grafik, Groesse der Oberflaeche und wo die Einstellungen liegen.
+
+Gespeichert wird in `settings.cfg` auf dem Boot-Volume neben cmdline.txt (ohne Boot-Volume auf `/disk`;
+`Userland/lib/settings.c`). Der Desktop liest die Datei beim Start und auf `WP_SETTINGS` hin neu und uebernimmt alles
+ausser der Groesse der Oberflaeche sofort.
+
 Jedes Fenster gehoert einem eigenen Prozess; der Desktop zeichnet nur Rahmen und Taskleiste. Programme:
-`term` (Terminal mit Shell), `files` (Dateien; Doppelklick oeffnet Ordner hier, Bilder in `view`, alles andere im
+`term` (Terminal mit Shell), `settings` (Einstellungen), `files` (Dateien; Doppelklick oeffnet Ordner hier, Bilder in `view`, alles andere im
 Texteditor), `textedit`, `textview` (nur ansehen), `view`, `calc`, `clock`, `about`, `paint`, `snake`, `tetris`. Ohne
 Desktop gestartet, laufen sie im Vollbild.
 
@@ -438,13 +503,29 @@ Der Bootloader liest `\cmdline.txt` von der EFI-Systempartition (bei QEMU aus `C
 | `scale=1..4` | Schriftvergroesserung der Konsole |
 | `kbd=us\|de\|uk` | Tastaturlayout |
 | `tz=eu\|uk\|utc\|+2\|+5:30` | Zeitzone der Uhr |
-| `init=/bin/...` | erstes Programm statt `/bin/sh` |
+| `init=/bin/...` | erstes Programm statt `/bin/sh` (z.B. `init=/bin/desktop`) |
+| `verbose` | Meldungen von Bootloader und Kernel auf dem Bildschirm statt der Startanimation |
 | `ip=192.168.1.50/24,192.168.1.1[,dns]` | feste Adresse fuer eth0 statt DHCP; `nodhcp`, `nonet`, `nontp` schalten ab |
 | `fsro` | fremde Volumes nur lesbar einbinden |
 | `nosmp`, `cpus=N` | nur die Boot-CPU bzw. hoechstens N CPUs benutzen |
 | `selftest`, `selftest=gruppe,...`, `keep` | Selbsttests (siehe `Kernel/tests/selftest.c`) |
 
 Im laufenden System schreibt `resolution` Grafikmodus und Schriftgroesse in die `cmdline.txt` der Boot-Partition.
+
+**Startbild:** ohne `verbose` loescht der Bootloader den Bildschirm nicht und gibt nichts aus; er kopiert das
+Startlogo der Firmware (ACPI-Tabelle BGRT, wie Windows und Linux) in eigenen Speicher (`BootInfo.logo`), zeichnet den
+Bildschirm schwarz mit dem Logo an seiner Stelle (Text der Firmware weg) und reicht es weiter. Der Kernel zeigt gleich
+nach dem Start dasselbe Bild und darunter einen schmalen, abgerundeten Ladebalken wie bei macOS
+(`Kernel/console/splash.c`, nur Ganzzahlen, kantengeglaettet). Den Fortschritt melden die Startschritte des Kernels
+(`console_splash_progress`); der Konsolen-Thread laesst ihn weich nachgleiten, waehrend das erste Programm startet,
+langsam bis 99 %. Nach einem Moduswechsel (Bootloader `mode=`, Intel `igdmode=`) steht das Logo an derselben relativen
+Stelle (ab doppelter Groesse doppelt so gross). Ohne BGRT nur der Balken. Die Konsole schreibt solange nur in ihr
+RAM-Abbild. Das Bild bleibt, bis das erste Programm etwas zeigt: der Desktop nimmt den Bildschirm, die
+Grafikbibliothek zeichnet den Mauszeiger erst nach dem ersten Bild des Programms - so geht das Startbild direkt in den
+Desktop ueber. Schreibt das erste Programm in die Konsole (Shell), erscheint eine leere Konsole mit seiner Ausgabe; bei
+einer Ausnahme im Kernel und nach 60 s ohne Programm alle Meldungen. Auch danach kommen Meldungen des Kernels nicht auf
+den Bildschirm (wie `quiet` bei Linux), nur seriell und in `dmesg`; Ausgaben der Programme und Abstuerze von
+Programmen schon. Bei den Selbsttests immer Text.
 
 ## Echte Hardware und VMware
 

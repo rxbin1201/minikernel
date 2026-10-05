@@ -268,6 +268,32 @@ void snap_win(Win *w, int where)
     anim_start(w, ANIM_ZOOM, from, to, 220);
 }
 
+void fit_windows(void)
+{
+    for (int i = 0; i < MAXW; i++) {
+        Win *w = &wins[i];
+        if (!w->used)
+            continue;
+        w->anim = ANIM_NONE;
+        if (w->zoomed) {
+            int r[4];
+            snap_rect(w->zoomed, r);
+            w->x = r[0];
+            w->y = r[1];
+            w->w = r[2];
+            w->h = r[3];
+            win_dirty_all(w); /* die neue Groesse erfaehrt das Programm nach dem Bild (apps_frame) */
+        }
+        int *x = w->zoomed ? &w->zx : &w->x, *y = w->zoomed ? &w->zy : &w->y;
+        int ww = w->zoomed ? w->zw : w->w, wh = w->zoomed ? w->zh : w->h;
+        if (*x + ww > W) *x = W - ww;
+        if (*x < 0) *x = 0;
+        if (*y + wh > dock_top()) *y = dock_top() - wh;
+        if (*y < MENUBAR_H) *y = MENUBAR_H;
+    }
+    damage_all();
+}
+
 void zoom_win(Win *w)
 {
     snap_win(w, w->zoomed ? SNAP_NONE : SNAP_MAX);
@@ -756,6 +782,19 @@ void overlay_dirty(int x, int y, int w, int h)
         ov_stale = 1;
     else
         ov_dirty[nov++] = r;
+}
+
+/* neue Bildschirmgroesse: die Ebene fuer die GPU (so gross wie der Bildschirm) neu anlegen lassen */
+void ov_free(void)
+{
+    gsurf_free(&ov_layer);
+    if (ov_black.px)
+        surface_free(&ov_black);
+    if (ov_white.px)
+        surface_free(&ov_white);
+    gsurf_free(&ov_dim);
+    ov_failed = 0;
+    ov_stale = 1;
 }
 
 static int ov_ready(void)

@@ -79,16 +79,35 @@ int igd_front_surface(uint32_t *gtt, uint32_t *pitch, uint32_t *w, uint32_t *h);
 #define IGD_3D_LINEAR      2 /* Textur bilinear (sonst naechster Texel) */
 #define IGD_3D_CLEAR_COLOR 4
 #define IGD_3D_CLEAR_DEPTH 8
+#define IGD_3D_CULL_BACK   16 /* Rueckseiten weglassen (vorn = auf dem Bildschirm gegen den Uhrzeigersinn) */
+#define IGD_3D_CULL_FRONT  32 /* Vorderseiten weglassen (beide: alle Dreiecke) */
+#define IGD_3D_BLEND       64 /* mischen mit den Faktoren in blend (Quelle | Ziel << 8, BLENDFACTOR_*) */
+#define IGD_3D_NO_DEPTH_WRITE 128 /* Tiefentest ohne Schreiben */
+#define IGD_3D_KEEP_ALPHA  256 /* Alpha im Ziel nicht schreiben */
 #define IGD_3D_MAX_VERT    1365 /* passt in 64 KiB (48 Bytes je Eckpunkt), Vielfaches von 3 */
 typedef struct {
     uint32_t        rt_gtt, w, h, pitch, mocs;
     uint32_t        depth_gtt, depth_pitch;
     uint32_t        tex_gtt, tex_w, tex_h, tex_pitch;
-    uint32_t        flags, clear_color, clear_depth;
+    uint32_t        flags, clear_color, clear_depth, blend;
     uint32_t        m[16], l[3], amb, dif;
     uint32_t        nvert;
     const uint32_t *verts;
+    const struct IgdVb3d *vb;          /* statt nvert/verts: Eckpunkte aus Puffern (SYS_GPUCOMP 9), sonst 0 */
 } IgdDraw3d;
+/* Formate der Attribute (wie GPU3D_F_* in user.h) */
+#define IGD_F_FLOAT1  1
+#define IGD_F_FLOAT2  2
+#define IGD_F_FLOAT3  3
+#define IGD_F_FLOAT4  4
+#define IGD_F_UBYTE4N 5 /* 4 Byte, 0-255 = 0.0-1.0 */
+/* Eckpunkte aus Puffern: Attribute 0 Position, 1 Textur, 2 Normale, 3 Farbe (gtt 0: fester Wert aus value) */
+typedef struct IgdVb3d {
+    uint32_t gtt[4], size[4], stride[4], format[4];
+    uint32_t value[4][4];                  /* float-Bitmuster */
+    uint32_t index_gtt, index_size, index_type; /* index_type 0 ohne Indizes, sonst Bytes je Index (1, 2, 4) */
+    uint32_t prim, first, count;           /* PRIM_*: Liste, Streifen, Faecher; erster Index/Eckpunkt, Anzahl */
+} IgdVb3d;
 int igd_rcs_draw3d(const IgdDraw3d *g);
 
 /* Doppelpufferung (igd.c): A = Framebuffer der Firmware, B = zweiter Puffer im RAM */

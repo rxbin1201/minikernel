@@ -37,10 +37,12 @@ int tty_interrupt(void)
 int64_t tty_write(const void *buf, uint64_t len)
 {
     const char *s = buf;
+    if (len)
+        console_splash_end(0); /* ein Programm schreibt in die Konsole (z.B. die Shell): Startanimation weg */
     for (uint64_t i = 0; i < len;) {
         uint64_t f = irq_save(); /* kleine Stuecke am Stueck, damit sich Ausgaben nicht vermischen */
         for (int n = 0; n < 128 && i < len; n++, i++)
-            kputc(s[i]);
+            kputc_user(s[i]);
         irq_restore(f);
     }
     return (int64_t)len;
@@ -49,7 +51,7 @@ int64_t tty_write(const void *buf, uint64_t len)
 static void echo(char c)
 {
     uint64_t f = irq_save();
-    kputc(c);
+    kputc_user(c);
     irq_restore(f);
 }
 

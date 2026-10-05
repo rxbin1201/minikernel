@@ -118,6 +118,7 @@ struct FdObj *process_fd_hold(Process *p, int fd);     /* wie process_fd_get, mi
 int process_fd_install(Process *p, struct FdObj *obj); /* kleinster freier fd (uebernimmt die Referenz; bei Fehler freigegeben) */
 int     process_fd_open(Process *p, const char *abs_path, int flags); /* fd oder negativer Fehler */
 int     process_fd_close(Process *p, int fd);
+int     process_fd_closefrom(Process *p, int first); /* alle Deskriptoren ab first schliessen */
 int     process_fd_dup(Process *p, int old_fd);
 int     process_fd_dup2(Process *p, int old_fd, int new_fd);
 int     process_pipe(Process *p, int fds[2]);

@@ -72,8 +72,9 @@ void test_vfs(BootInfo *info)
         kprintf(" %s", vfs_basename(e->path));
     kprintf("\n");
     check("readdir(/bin) listet die Programme", count >= 5);
-    check("readdir(/) enthaelt bin, etc, share und README.txt",
-          vfs_readdir("/", 3) != 0 && vfs_readdir("/", 4) == 0 && vfs_lookup("/share/klang.wav"));
+    unsigned top = vfs_lookup("/firmware") ? 5 : 4; /* /firmware nur, wenn firmware/ beim Bauen da war */
+    check("readdir(/) enthaelt bin, etc, share und README.txt (und ggf. firmware)",
+          vfs_readdir("/", top - 1) != 0 && vfs_readdir("/", top) == 0 && vfs_lookup("/share/klang.wav"));
 }
 
 static uint8_t pat(uint32_t i, uint8_t seed)

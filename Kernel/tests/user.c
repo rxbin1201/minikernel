@@ -604,6 +604,13 @@ void test_graphics(void)
     check("view: Bild anzeigen und beenden", pid > 0 && process_wait(pid, 0, &code, &faulted, 8000) == 0 && code == 0 && !faulted);
     fs_unlink("/disk/GT.BMP");
 
+    /* gltest: kleines OpenGL mit der CPU - Abschneiden an nah/fern/Schutzstreifen, Rueckseiten weglassen, Mischen */
+    pid = process_spawn("/bin/gltest", "gltest", 0);
+    check("gltest (3D: Abschneiden, Rueckseiten, Mischen, Puffer und Vertex-Arrays)",
+          pid > 0 && process_wait(pid, 0, &code, &faulted, 30000) == 0 && code == 0 && !faulted);
+    if (pid > 0 && code != 0)
+        kprintf("  gltest: Pruefung %d fehlgeschlagen\n", code);
+
     /* desktop: im Terminal-Fenster laeuft eine Shell. Das Terminal ist ein eigenes Programm (desktop -> term -> sh):
      * erst tippen, wenn dessen Shell laeuft (Start dauert unterschiedlich lange) */
     fs_unlink("/disk/DT.TXT");

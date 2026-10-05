@@ -59,6 +59,52 @@ void ui_doc_icon(Surface *s, int x, int y, int sz, u32 accent)
 }
 
 /* Programmsymbole (gezeichnet, in jeder Groesse) */
+/* ---------- Hintergrund ---------- */
+
+static const struct {
+    const char *name;
+    u32         col[5];
+} themes[UI_WALLPAPERS] = {
+    {"Abendrot", {0x1B2A6B, 0x5B3FC4, 0xC64B9E, 0xF28C5A, 0xFBD28B}},
+    {"Ozean", {0x0B1E3F, 0x0E4C7A, 0x1F8FB5, 0x55C6C9, 0xC9F2E7}},
+    {"Wald", {0x0F2A1D, 0x1E5A3A, 0x3E8E4E, 0x9BC46A, 0xE9F0B5}},
+    {"Lavendel", {0x241B4B, 0x4B3A8F, 0x8C6FD1, 0xC9A8EE, 0xF3E6FF}},
+    {"Graphit", {0x16181D, 0x2B2F38, 0x4A505C, 0x7D8593, 0xC9CED6}},
+};
+
+const char *ui_wallpaper_name(int theme)
+{
+    return themes[theme >= 0 && theme < UI_WALLPAPERS ? theme : 0].name;
+}
+
+u32 ui_wallpaper_at(int theme, float u, float v)
+{
+    static const float stop[] = {0.0f, 0.30f, 0.55f, 0.78f, 1.0f};
+    const u32 *col = themes[theme >= 0 && theme < UI_WALLPAPERS ? theme : 0].col;
+    float wave = 0.10f * ui_sin(6.2831853f * (u * 1.1f + 0.15f)) + 0.06f * ui_sin(6.2831853f * (u * 2.3f + v * 0.7f));
+    float t = v * 0.85f + u * 0.30f + wave - 0.08f;
+    u32 c;
+    if (t <= 0) {
+        c = col[0];
+    } else if (t >= 1) {
+        c = col[4];
+    } else {
+        int i = 0;
+        while (t > stop[i + 1])
+            i++;
+        float f = (t - stop[i]) / (stop[i + 1] - stop[i]);
+        f = f * f * (3 - 2 * f);
+        c = gfx_mix(col[i], col[i + 1], (int)(f * 255));
+    }
+    float hx = u - 0.78f, hy = v - 0.18f; /* heller Schein oben rechts */
+    float glow = 1.0f - (hx * hx * 2.2f + hy * hy * 5.0f);
+    if (glow > 0)
+        c = gfx_mix(c, 0xFFFFFF, (int)(glow * glow * 70));
+    return c;
+}
+
+/* ---------- Programmsymbole ---------- */
+
 void ui_app_icon(Surface *s, int icon, int x, int y, int size)
 {
     float S = (float)size;
@@ -157,6 +203,18 @@ void ui_app_icon(Surface *s, int icon, int x, int y, int size)
         gfx_capsule(s, nx + n * 0.39f, ny + n * 0.78f, nx + n * 0.39f, ny + n * 0.22f, n * 0.06f, 0xFFFFFF, 255);
         gfx_capsule(s, nx + n * 0.81f, ny + n * 0.70f, nx + n * 0.81f, ny + n * 0.14f, n * 0.06f, 0xFFFFFF, 255);
         gfx_capsule(s, nx + n * 0.39f, ny + n * 0.24f, nx + n * 0.81f, ny + n * 0.16f, n * 0.10f, 0xFFFFFF, 255);
+        break;
+    }
+    case ICON_SETTINGS: { /* Zahnrad auf grauem Grund */
+        gfx_round_rect_grad(s, x, y, size, size, r, 0xB8BCC6, 0x6E7280, 255);
+        float cx = x + S / 2, cy = y + S / 2, R = S * 0.27f;
+        for (int i = 0; i < 8; i++) {
+            float a = 6.2831853f * (float)i / 8, sx = ui_sin(a), sy = ui_cos(a);
+            gfx_capsule(s, cx + sx * R * 0.9f, cy - sy * R * 0.9f, cx + sx * R * 1.32f, cy - sy * R * 1.32f, S * 0.11f,
+                        0xF4F4F6, 255);
+        }
+        gfx_disc(s, cx, cy, R, 0xF4F4F6, 255);
+        gfx_disc(s, cx, cy, R * 0.42f, 0x8A8E99, 255);
         break;
     }
     case ICON_TEXT:

@@ -1,4 +1,5 @@
 #include "core/syscall.h"
+#include "drivers/net/iwl.h"
 #include "arch/x86_64/apic.h"
 #include "console/console.h"
 #include "arch/x86_64/cpu.h"
@@ -443,6 +444,7 @@ static void syscall_do(SyscallFrame *f)
     case SYS_GETTID:     ret = process_thread_self(process_current()); break;
     case SYS_FUTEX_WAIT: ret = process_futex_wait(process_current(), f->rdi, (uint32_t)f->rsi, f->rdx); break;
     case SYS_FUTEX_WAKE: ret = process_futex_wake(process_current(), f->rdi, (uint32_t)f->rsi); break;
+    case SYS_CLOSEFROM: ret = process_fd_closefrom(process_current(), (int)f->rdi); break;
     case SYS_MMAP_FILE:
         ret = process_mmap_file(process_current(), (int)(uint32_t)f->rdi, f->rsi, f->rdx, (int)((f->rdi >> 32) & 1));
         break;
@@ -514,6 +516,19 @@ static void syscall_do(SyscallFrame *f)
             ret = ERR_NOENT;
         else {
             memcpy((void *)f->rsi, &pi, sizeof(pi));
+            ret = 0;
+        }
+        break;
+    }
+    case SYS_WLAN: {
+        WlanInfo wi;
+        if (f->rdi != 0)
+            ret = ERR_INVAL;
+        else if (!process_user_range_ok(process_current(), f->rsi, sizeof(wi), 1))
+            ret = ERR_FAULT;
+        else {
+            iwl_info(&wi);
+            memcpy((void *)f->rsi, &wi, sizeof(wi));
             ret = 0;
         }
         break;
@@ -714,6 +729,11 @@ static void syscall_do(SyscallFrame *f)
                 igd_cursor_move((int16_t)(f->rsi & 0xFFFF), (int16_t)((f->rsi >> 16) & 0xFFFF), (int)((f->rsi >> 32) & 1));
                 ret = 0;
             }
+        } else if (f->rdi == 5) { /* Groesse des Mauszeigers in Prozent setzen (0 = nach der Schrift); fuer alle */
+            console_cursor_size((uint32_t)(f->rsi > 250 ? 250 : f->rsi));
+            ret = 0;
+        } else if (f->rdi == 6) { /* ... abfragen */
+            ret = console_cursor_pct();
         } else if (f->rdi == 2) {
             if (console_gfx_owner(pid)) {
                 console_gfx_release(pid);

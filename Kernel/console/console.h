@@ -59,6 +59,17 @@ int         console_clipboard_set(const char *text, uint32_t len); /* 0, -1 = zu
 
 /* Mauszeiger (nur Framebuffer, nicht im Abbild): Position der Spitze in Pixeln; visible = 0 blendet ihn aus */
 void     console_cursor_set(int x, int y, int visible);
+/* Groesse des Mauszeigers in Prozent (0 = nach der Schriftgroesse wie bisher, sonst 100-250); gilt fuer den
+ * Hardware-Zeiger (igd.c), den Zeiger der Konsole und - ueber SYS_GFX 6 abgefragt - den der Grafikbibliothek */
+/* Startanimation (splash.c) statt der Meldungen: die Konsole schreibt dann nur ins Abbild (dmesg zeigt alles). Endet,
+ * wenn ein Programm den Bildschirm nimmt oder etwas ausgibt (console_splash_end(0): leere Konsole) oder bei einem
+ * Fehler des Kernels (console_splash_end(1): mit allen Meldungen) */
+void     console_splash_start(void);
+void     console_splash_progress(int percent); /* Ladebalken: so weit ist der Start (steigt nur) */
+void     console_splash_end(int show_log);
+int      console_splash_active(void);
+void     console_cursor_size(uint32_t pct);
+uint32_t console_cursor_pct(void);
 void     console_set_tick(void (*hook)(void));
 
 /* Grafikmodus: ein Programm uebernimmt den Bildschirm (die Konsole schreibt dann nur in ihr Abbild und kommt beim

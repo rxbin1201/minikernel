@@ -3,6 +3,7 @@
 
 #include "drivers/serial.h"
 #include "console/console.h"
+#include "console/splash.h"
 #include "lib/kprintf.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/idt.h"
@@ -31,6 +32,7 @@
 #include "drivers/gpu/igd.h"
 #include "drivers/sound/hda.h"
 #include "tests/selftest.h"
+#include "lib/string.h"
 
 /* ---------- Datentraeger ---------- */
 
@@ -93,12 +95,29 @@ static void init_storage(BootInfo *info)
     }
 }
 
+/* Steht das Wort (allein oder mit "=...") in der Kommandozeile des Bootloaders? Fuer die Zeit vor cmdline_init */
+static int boot_word(const char *cmd, const char *w)
+{
+    size_t n = strlen(w);
+    for (size_t i = 0; cmd[i]; i++)
+        if ((i == 0 || cmd[i - 1] == ' ') && memcmp(cmd + i, w, n) == 0 &&
+            (cmd[i + n] == 0 || cmd[i + n] == ' ' || cmd[i + n] == '='))
+            return 1;
+    return 0;
+}
+
 /* Aufgerufen von entry.S auf dem eigenen Kernel-Stack. */
 void kmain(BootInfo *info)
 {
     smp_early_init(); /* Per-CPU-Daten der Boot-CPU (GS), Big Kernel Lock */
     serial_init();
     console_init(&info->fb);
+    /* Startanimation statt der Meldungen ("verbose" zeigt sie; bei den Selbsttests immer Text) */
+    if (!boot_word(info->cmdline, "verbose") && !boot_word(info->cmdline, "selftest")) {
+        splash_logo(info->logo, info->logo_size, info->logo_x, info->logo_y, info->logo_scr_w, info->logo_scr_h);
+        console_splash_start();
+        kprintf_quiet(1); /* Meldungen nur seriell und in dmesg */
+    }
     kprintf("Kernel gestartet (Framebuffer %ux%u @ %#lx)\n", info->fb.width, info->fb.height, (unsigned long)info->fb.base);
 
     gdt_init(smp_cpu(0));
@@ -115,6 +134,7 @@ void kmain(BootInfo *info)
     paging_harden();
     heap_init();
     kstack_init();
+    console_splash_progress(10);
     console_enable_shadow(); /* ab hier scrollt die Konsole im RAM statt im (langsamen) Framebuffer */
 
     cmdline_init(info->cmdline);
@@ -131,20 +151,27 @@ void kmain(BootInfo *info)
             video_mode_count(), console_scale(), console_cols(), console_rows());
 
     if (init_interrupts(info) != 0) {
+        kprintf_quiet(0);
+        console_splash_end(1);
         kprintf("Ohne Timer kann der Kernel nicht weiterlaufen, angehalten.\n");
         halt_forever();
     }
+    console_splash_progress(20);
     fpu_init();   /* FPU/SSE fuer Programme (die weiteren CPUs uebernehmen CR0/CR4 beim Start) */
     sched_init();
     smp_init(); /* weitere CPUs: laufen ab jetzt Threads aus der gemeinsamen Run-Queue */
     console_start_thread(); /* blaettert im Verlauf (Shift+Bild hoch/runter), zeichnet den Mauszeiger */
+    console_splash_progress(30);
     mouse_init();
     rtc_init();
     init_storage(info);
+    console_splash_progress(60);
     igd_init(info); /* Intel-Grafik: vorerst nur erkennen und auslesen */
+    console_splash_progress(75);
     hda_init();     /* Ton: Intel High Definition Audio */
     net_init(); /* Netzwerkkarten; DHCP laeuft im Hintergrund */
     syscall_init();
+    console_splash_progress(90);
 
     if (cmdline_has("selftest")) {
         run_selftests(info);
@@ -170,6 +197,8 @@ void kmain(BootInfo *info)
             while (process_wait(pid, 0, 0, 0, 3600 * 1000) == -1 && process_poll(pid, 0) == 0)
                 ;
         } else {
+            kprintf_quiet(0);
+            console_splash_end(1);
             kprintf("init '%s' laesst sich nicht starten\n", init);
             thread_sleep_ms(1000);
         }

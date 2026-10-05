@@ -81,6 +81,8 @@ typedef unsigned int       u32;
 #define SYS_FUTEX_WAIT    72
 #define SYS_FUTEX_WAKE    73
 #define SYS_MMAP_FILE     74
+#define SYS_CLOSEFROM     75
+#define SYS_WLAN          76
 #define ERR_NOENT     (-2)
 #define ERR_IO        (-5)
 #define ERR_EXIST     (-17)
@@ -281,8 +283,22 @@ static inline s64 sys_kill(int pid)                           { return syscall3(
 static inline s64 sys_procinfo(u64 index, ProcInfo *pi)       { return syscall3(SYS_PROCINFO, index, (u64)pi, 0); }
 static inline s64 sys_mountinfo(u64 index, MountInfo *info) { return syscall3(SYS_MOUNTINFO, index, (u64)info, 0); }
 static inline s64 sys_usbinfo(u64 index, UsbInfo *info)      { return syscall3(SYS_USBINFO, index, (u64)info, 0); }
+/* WLAN (Intel AX200, Kernel/drivers/net/iwl.c): Karte, Register, zerlegte Firmware */
+typedef struct {
+    unsigned       present;
+    unsigned char  bus, dev, fn, pad;
+    unsigned short vendor, device, sub_vendor, sub_device;
+    u64            bar;
+    unsigned       hw_rev, rf_id, gp_cntrl, hw_if_config;
+    unsigned       fw_found, fw_api, fw_lmac, fw_umac, fw_paging, fw_bytes, fw_paging_bytes;
+    unsigned       fw_cpus, fw_capa, fw_api_flags, fw_scan_channels, fw_major, fw_minor, fw_local;
+    char           fw_name[64], fw_human[64];
+    char           state[64];
+} WlanInfo;
+static inline s64 sys_wlan_info(WlanInfo *wi)                 { return syscall3(SYS_WLAN, 0, (u64)wi, 0); }
 static inline s64 sys_read(int fd, void *buf, u64 len)        { return syscall3(SYS_READ, fd, (u64)buf, len); }
 static inline s64 sys_close(int fd)                           { return syscall3(SYS_CLOSE, fd, 0, 0); }
+static inline s64 sys_closefrom(int fd)                       { return syscall3(SYS_CLOSEFROM, fd, 0, 0); } /* alle ab fd schliessen */
 static inline s64 sys_readdir(const char *path, u64 index, DirEnt *ent) { return syscall3(SYS_READDIR, (u64)path, index, (u64)ent); }
 static inline s64 sys_spawn(const char *path, const char *cmdline)      { return syscall3(SYS_SPAWN, (u64)path, (u64)cmdline, 0); }
 static inline s64 sys_wait(int pid, int *code)                { return syscall3(SYS_WAIT, pid, (u64)code, 0); }
@@ -324,10 +340,28 @@ static inline s64 sys_gpucomp(u64 op, u64 a, u64 b)          { return syscall3(S
 #define GPU3D_LINEAR      2 /* Textur bilinear */
 #define GPU3D_CLEAR_COLOR 4
 #define GPU3D_CLEAR_DEPTH 8
+#define GPU3D_CULL_BACK   16 /* Rueckseiten weglassen (vorn = auf dem Bildschirm gegen den Uhrzeigersinn) */
+#define GPU3D_CULL_FRONT  32 /* Vorderseiten weglassen (beide: alle Dreiecke) */
+#define GPU3D_BLEND       64 /* mischen: Ergebnis = Quelle * Faktor blend & 0xFF + Ziel * Faktor blend >> 8 */
+#define GPU3D_NO_DEPTH_WRITE 128 /* Tiefentest ohne Schreiben (glDepthMask(GL_FALSE)) */
+#define GPU3D_KEEP_ALPHA  256 /* Byte 3 im Ziel nicht schreiben (Fenster ohne Alpha-Kanal, bleibt deckend) */
+/* Faktoren fuer GPU3D_BLEND (Codes der Hardware, BLENDFACTOR_*) */
+#define GPU3D_BF_ONE           0x01
+#define GPU3D_BF_SRC_COLOR     0x02
+#define GPU3D_BF_SRC_ALPHA     0x03
+#define GPU3D_BF_DST_ALPHA     0x04
+#define GPU3D_BF_DST_COLOR     0x05
+#define GPU3D_BF_SRC_ALPHA_SAT 0x06
+#define GPU3D_BF_ZERO          0x11
+#define GPU3D_BF_INV_SRC_COLOR 0x12
+#define GPU3D_BF_INV_SRC_ALPHA 0x13
+#define GPU3D_BF_INV_DST_ALPHA 0x14
+#define GPU3D_BF_INV_DST_COLOR 0x15
 #define GPU3D_MAX_VERT    1365
 typedef struct {
     unsigned short dst, depth, tex, flags;      /* Flaechen (depth 0 = keiner), GPU3D_* */
-    unsigned short tex_w, tex_h, pad0, pad1;    /* benutzter Teil der Textur (0 = ganze Flaeche) */
+    unsigned short tex_w, tex_h;                /* benutzter Teil der Textur (0 = ganze Flaeche) */
+    unsigned short blend, pad1;                 /* GPU3D_BLEND: Faktor Quelle | Faktor Ziel << 8 (GPU3D_BF_*) */
     int            x, y, w, h;                  /* Zeichenbereich im Ziel, x Vielfaches von 16 */
     unsigned       clear_color;                 /* 0xAARRGGBB */
     float          clear_depth;
@@ -337,6 +371,32 @@ typedef struct {
     const float   *verts;                       /* je Eckpunkt x, y, z, u, v, nx, ny, nz, r, g, b, a */
 } Gpu3dDraw;
 static inline s64 sys_gpu3d(const Gpu3dDraw *d)               { return syscall3(SYS_GPUCOMP, 8, (u64)d, 0); }
+/* 3D aus Puffern (SYS_GPUCOMP 9): Eckpunkte und Indizes liegen in angemeldeten Flaechen (geteilter Speicher, bleibt
+ * ueber viele Bilder) statt im Auftrag. Je Attribut (0 Position, 1 Textur u, v, 2 Normale, 3 Farbe) ein Puffer mit
+ * Anfang und Abstand je Eckpunkt oder surf = 0: fester Wert aus value. Fehlende Komponenten: Position z = 0,
+ * Textur v = 0, Farbe a = 1. Die GPU liest nur innerhalb der Flaechen (dahinter 0). Kein Abschneiden an der nahen
+ * Ebene - das prueft gl.c vorher (Kasten um die Eckpunkte). */
+#define GPU3D_F_FLOAT1  1
+#define GPU3D_F_FLOAT2  2
+#define GPU3D_F_FLOAT3  3
+#define GPU3D_F_FLOAT4  4
+#define GPU3D_F_UBYTE4N 5               /* 4 Byte r, g, b, a: 0-255 = 0.0-1.0 */
+#define GPU3D_PRIM_TRIANGLES 4
+#define GPU3D_PRIM_STRIP     5
+#define GPU3D_PRIM_FAN       6
+typedef struct {
+    unsigned short surf, format;        /* Flaeche (0 = fester Wert), GPU3D_F_* */
+    unsigned       offset, stride;      /* Bytes, Vielfache von 4; stride hoechstens 2048 */
+} Gpu3dAttr;
+typedef struct {
+    Gpu3dDraw      d;                   /* wie bei sys_gpu3d, nvert und verts unbenutzt */
+    Gpu3dAttr      attr[4];
+    float          value[4][4];
+    unsigned short index_surf, index_size; /* 0 = ohne Indizes; sonst Bytes je Index (1, 2, 4) */
+    unsigned       index_offset;
+    unsigned       prim, first, count;  /* GPU3D_PRIM_*; erster Index (bzw. Eckpunkt), Anzahl */
+} Gpu3dDrawVB;
+static inline s64 sys_gpu3d_vb(const Gpu3dDrawVB *d)          { return syscall3(SYS_GPUCOMP, 9, (u64)d, 0); }
 /* Benannte Dienste: anmelden, abmelden, verbinden (fds: lesen, schreiben), annehmen (fds: lesen, schreiben, PID;
  * ERR_AGAIN = niemand wartet). Damit finden Programme aus dem Terminal den Desktop. */
 static inline s64 sys_service_register(const char *name)     { return syscall3(SYS_SERVICE, 0, (u64)name, 0); }
