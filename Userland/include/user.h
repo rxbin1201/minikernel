@@ -303,6 +303,10 @@ typedef struct {
     unsigned       iommu_gsts[4], iommu_pmen[4];
     unsigned       ltr_before, ltr_after;
     unsigned       pci_cmd, bridges_fixed;
+    unsigned       init_step, init_complete, rx_packets; /* Stufe 3: 5 = fertig */
+    unsigned char  mac[6], mac_pad[2];
+    unsigned       nvm_flags, nvm_version, nvm_board, nvm_hw_addrs, nvm_sku, nvm_tx_chains, nvm_rx_chains, nvm_lar;
+    unsigned       nvm_channels;
 } WlanInfo;
 static inline s64 sys_wlan_info(WlanInfo *wi)                 { return syscall3(SYS_WLAN, 0, (u64)wi, 0); }
 static inline s64 sys_wlan_wake(void)                         { return syscall3(SYS_WLAN, 1, 0, 0); }

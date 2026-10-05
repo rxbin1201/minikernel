@@ -37,11 +37,17 @@ typedef struct {
     uint32_t iommu_gsts[4], iommu_pmen[4];
     uint32_t ltr_before, ltr_after;
     uint32_t pci_cmd, bridges_fixed;          /* PCI Kommando/Status der Karte, Bruecken mit neu gesetztem Bus-Master */
+    /* Stufe 3 (nach ALIVE): 1 INIT_EXTENDED_CFG, 2 NVM_ACCESS_COMPLETE, 3 INIT_COMPLETE, 4 NVM_GET_INFO, 5 fertig */
+    uint32_t init_step, init_complete, rx_packets;
+    uint8_t  mac[6], mac_pad[2];
+    uint32_t nvm_flags, nvm_version, nvm_board, nvm_hw_addrs, nvm_sku, nvm_tx_chains, nvm_rx_chains, nvm_lar;
+    uint32_t nvm_channels;
 } WlanInfo;
 
 void iwl_probe(void);
 int  iwl_info(WlanInfo *out); /* 0 = gefuellt (auch ohne Karte: dann present = 0) */
-int  iwl_load_fw(void);       /* Stufe 2b; 0 = erste Nachricht da, -3 keine, -4 keine Firmware, -5 kein Speicher */
+int  iwl_load_fw(void);       /* Stufe 2b+3; 0 = Firmware bereit, -3 kein ALIVE, -4 keine Firmware, -5 kein Speicher,
+                               * -6 Befehl ohne Antwort (init_step sagt, welcher) */
 int  iwl_wake_test(void);     /* Stufe 2a; 0 = Zugriff bekommen, -1 = keine Karte, -2 kein Takt, -3 kein Zugriff */
 
 #endif

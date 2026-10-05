@@ -485,6 +485,20 @@ static void iommu_check(void)
 #define CSR_LTR_LONG_VAL_AD 0x0D4
 #define LTR_250US           ((1u << 31) | (2u << 26) | (250u << 16) | (1u << 15) | (2u << 10) | 250u)
 
+/* Puffer fuer Laden und Betrieb (identisch eingeblendet: virtuelle = physische Adresse) */
+#define CMD_SLOT 512 /* Platz je Befehl: Kopf (8) + Daten */
+static CtxtInfo          *ci;
+static uint64_t          *free_rbd;
+static uint32_t          *used_rbd;
+static volatile uint16_t *status;   /* Zahl der geschlossenen Empfangspuffer (closed_rb_num) */
+static uint8_t           *cmdq, *cmdbuf;
+static uint8_t           *rb[RX_RING];
+static uint8_t           *secbuf[3][MAX_SEC];
+static uint32_t           rx_read, rx_write, tx_write;
+static int                rx_skip; /* den ersten Puffer nur zurueckgeben (ALIVE schon gelesen) */
+
+static int fw_init(void);
+
 int iwl_load_fw(void)
 {
     if (!info.present || !regs)
@@ -496,28 +510,39 @@ int iwl_load_fw(void)
     if (iwl_wake_test() == -2) /* Bereitschaft, Reset, Grundeinstellungen, Takt (Zugriff wird wieder abgegeben) */
         return -2;
 
-    /* Firmware-Abschnitte, Empfang, Befehle, Context Info */
-    CtxtInfo *ci = dma(sizeof(CtxtInfo));
-    uint64_t *free_rbd = dma(RX_RING * 8);
-    uint32_t *used_rbd = dma(RX_RING * 4);
-    uint16_t *status = dma(64);
-    uint8_t *cmdq = dma(CMD_RING * TFD_SIZE);
-    static uint8_t *rb[RX_RING];
-    if (!ci || !free_rbd || !used_rbd || !status || !cmdq)
-        return -5;
+    /* Firmware-Abschnitte, Empfang, Befehle, Context Info - einmal angelegt, bei jedem Laden neu gefuellt */
+    if (!ci) {
+        ci = dma(sizeof(CtxtInfo));
+        free_rbd = dma(RX_RING * 8);
+        used_rbd = dma(RX_RING * 4);
+        status = dma(64);
+        cmdq = dma(CMD_RING * TFD_SIZE);
+        cmdbuf = dma(CMD_RING * CMD_SLOT);
+        if (!ci || !free_rbd || !used_rbd || !status || !cmdq || !cmdbuf) {
+            ci = 0;
+            return -5;
+        }
+    }
+    memset(ci, 0, sizeof(CtxtInfo));
+    memset(used_rbd, 0, RX_RING * 4);
+    memset((void *)status, 0, 64);
+    memset(cmdq, 0, CMD_RING * TFD_SIZE);
     for (int i = 0; i < RX_RING; i++) {
         if (!rb[i] && !(rb[i] = dma(4096)))
             return -5;
+        memset(rb[i], 0, 4096);
         free_rbd[i] = (uint64_t)rb[i] | (uint64_t)(i + 1); /* Kennung (vid) 1..64 in den unteren Bits */
     }
+    rx_read = 0;
+    rx_write = (RX_RING - 1) & ~7u;
+    tx_write = 0;
     uint64_t *img[3] = {ci->lmac_img, ci->umac_img, ci->virtual_img};
     for (int p = 0; p < 3; p++)
         for (int i = 0; i < nsec[p]; i++) {
-            uint8_t *b = dma(sec[p][i].len);
-            if (!b)
+            if (!secbuf[p][i] && !(secbuf[p][i] = dma(sec[p][i].len)))
                 return -5;
-            memcpy(b, sec[p][i].data, sec[p][i].len);
-            img[p][i] = (uint64_t)b;
+            memcpy(secbuf[p][i], sec[p][i].data, sec[p][i].len);
+            img[p][i] = (uint64_t)secbuf[p][i];
         }
     ci->version.mac_id = (uint16_t)rd(CSR_HW_REV);
     ci->version.version = 0;
@@ -585,16 +610,16 @@ int iwl_load_fw(void)
         uint32_t ci_int = rd(CSR_INT), fh_int = rd(CSR_FH_INT_STATUS);
         if (ci_int != last_int) {
             kprintf("iwl:   nach %u ms: CSR_INT %#x, FH_INT %#x, Status %u\n", ms, ci_int, fh_int,
-                    *(volatile uint16_t *)status);
+                    *status);
             last_int = ci_int;
         }
         if (!stocked && (ci_int || fh_int || ms >= 500)) {
-            wr(RFH_Q0_FRBDCB_WIDX_TRG, (RX_RING - 1) & ~7u);
+            wr(RFH_Q0_FRBDCB_WIDX_TRG, rx_write);
             stocked = 1;
             kprintf("iwl:   nach %u ms: %u freie Empfangspuffer gemeldet (%s)\n", ms, (RX_RING - 1) & ~7u,
                     ci_int || fh_int ? "nach Interrupt" : "ohne Interrupt");
         }
-        if (*(volatile uint16_t *)status) {
+        if (*status) {
             info.load_alive = 1;
             break;
         }
@@ -608,7 +633,7 @@ int iwl_load_fw(void)
             pst & (1u << 12) ? ", Target Abort empfangen" : "", pst & (1u << 14) ? ", Systemfehler gemeldet" : "",
             pst & (1u << 15) ? ", Paritaetsfehler" : "");
     info.load_int = rd(CSR_INT);
-    info.load_status = *(volatile uint16_t *)status;
+    info.load_status = *status;
     if (!info.load_alive) {
         kprintf("iwl: keine Nachricht der Firmware nach %u ms (CSR_INT %#x%s, GP_CNTRL %#x)\n", info.load_ms, info.load_int,
                 info.load_int & (1u << 29) ? " = Hardware-Fehler" : info.load_int & (1u << 25) ? " = Firmware-Fehler" : "",
@@ -625,5 +650,252 @@ int iwl_load_fw(void)
     kprintf("iwl: erste Nachricht nach %u ms: Puffer %u, Laenge %u, Befehl %#x, Gruppe %#x, Status %#x%s\n",
             info.load_ms, vid, info.alive_len, info.alive_cmd, info.alive_group, info.alive_status,
             info.alive_cmd == 1 && info.alive_status == 0xCAFE ? " - ALIVE, Firmware laeuft" : "");
+    if (info.alive_cmd != 1 || info.alive_status != 0xCAFE)
+        return -3;
+    rx_skip = 1; /* ALIVE ist schon ausgewertet */
+    return fw_init();
+}
+
+/* ---------- Stufe 3: Befehle an die Firmware, Antworten und Meldungen ----------
+ * Befehle: Warteschlange 0 (32 TFDs zu 256 Byte). Jeder TFD zeigt auf bis zu 25 Puffer (tb_len 16 Bit, Adresse
+ * 64 Bit); der erste hoechstens 20 Byte, wie bei Linux. Ein Befehl beginnt mit dem breiten Kopf (Befehl, Gruppe,
+ * Folgenummer = Warteschlange << 8 | Index, Laenge der Daten, 0, Version). Dann Schreibzeiger (0..255) nach
+ * HBUS_TARG_WRPTR, Warteschlange in Bit 16..
+ * Empfang: Der Status nennt die Zahl der geschlossenen Puffer; je Puffer steht im Ring der benutzten Puffer die
+ * Kennung (vid). In einem Puffer koennen mehrere Pakete liegen (Laenge | Flags, Kopf: Befehl, Gruppe, Folgenummer,
+ * Daten), je auf 64 Byte ausgerichtet; 0x55550000 beendet die Liste. Antworten tragen die Folgenummer des Befehls,
+ * Meldungen der Firmware haben Bit 15 (SEQ_RX_FRAME) gesetzt. */
+#define HBUS_TARG_WRPTR    0x460
+#define SEQ_RX_FRAME       0x8000
+#define RX_FRAME_INVALID   0x55550000u
+#define GRP_LEGACY         0x0
+#define GRP_SYSTEM         0x2
+#define GRP_NVM            0xC
+#define CMD_ALIVE          0x01
+#define CMD_REPLY_ERROR    0x02
+#define CMD_INIT_COMPLETE  0x04
+#define CMD_INIT_EXT_CFG   0x03 /* SYSTEM_GROUP */
+#define CMD_NVM_ACCESS_END 0x00 /* REGULATORY_AND_NVM_GROUP: NVM_ACCESS_COMPLETE */
+#define CMD_NVM_GET_INFO   0x02
+#define CMD_DEBUG_LOG      0xF7
+#define INIT_NVM           (1u << 1) /* INIT_EXTENDED_CFG: der Treiber schickt NVM-Befehle */
+#define CSR_INT_SW_ERR     (1u << 25)
+#define CSR_INT_HW_ERR     (1u << 29)
+
+static struct {
+    int      active, got, seq; /* seq < 0: Meldung, jede Folgenummer */
+    uint8_t  group, cmd;
+    uint32_t len;
+    uint8_t  data[512];
+} want;
+static uint32_t logged;
+
+static void rx_packet(const uint8_t *pkt, uint32_t len)
+{
+    uint8_t cmd = pkt[4], grp = pkt[5];
+    uint16_t seq = (uint16_t)(pkt[6] | pkt[7] << 8);
+    uint32_t plen = len - 4;
+    const uint8_t *d = pkt + 8;
+    info.rx_packets++;
+    if (grp == GRP_LEGACY && cmd == CMD_INIT_COMPLETE)
+        info.init_complete = 1;
+    if (want.active && !want.got && grp == want.group && cmd == want.cmd &&
+        (want.seq < 0 ? (seq & SEQ_RX_FRAME) != 0 : seq == (uint16_t)want.seq)) {
+        want.len = plen < sizeof(want.data) ? plen : sizeof(want.data);
+        memcpy(want.data, d, want.len);
+        want.got = 1;
+    }
+    if (grp == GRP_LEGACY && cmd == CMD_DEBUG_LOG)
+        return; /* Protokoll der Firmware: zu viel fuers Log */
+    if (logged++ < 40)
+        kprintf("iwl:   <- %s %#x.%#x, Folge %#x, %u Byte: %08x %08x %08x %08x\n",
+                seq & SEQ_RX_FRAME ? "Meldung" : "Antwort", grp, cmd, seq, plen, plen >= 4 ? le32(d) : 0,
+                plen >= 8 ? le32(d + 4) : 0, plen >= 12 ? le32(d + 8) : 0, plen >= 16 ? le32(d + 12) : 0);
+}
+
+/* Geschlossene Empfangspuffer auswerten, geleert wieder in den Ring der freien Puffer stellen */
+static void rx_poll(void)
+{
+    uint32_t closed = *status & (RX_RING - 1);
+    __sync_synchronize(); /* erst den Status, dann die Puffer lesen */
+    int n = 0;
+    while (rx_read != closed) {
+        uint32_t vid = used_rbd[rx_read] & 0xFFF;
+        if (vid >= 1 && vid <= RX_RING) {
+            uint8_t *b = rb[vid - 1];
+            if (!rx_skip)
+                for (uint32_t off = 0; off + 12 <= 4096;) {
+                    uint32_t lnf = le32(b + off), len = lnf & 0x3FFF;
+                    if (lnf == RX_FRAME_INVALID || len < 4 || off + 4 + len > 4096)
+                        break;
+                    rx_packet(b + off, len);
+                    off += (len + 4 + 63) & ~63u;
+                }
+            rx_skip = 0;
+            memset(b, 0, 4096);
+            free_rbd[rx_write] = (uint64_t)b | vid;
+            rx_write = (rx_write + 1) & (RX_RING - 1);
+        } else {
+            kprintf("iwl:   Empfang: ungueltige Kennung %u an Stelle %u\n", vid, rx_read);
+        }
+        rx_read = (rx_read + 1) & (RX_RING - 1);
+        n++;
+    }
+    if (n) {
+        __sync_synchronize(); /* Ring vor dem Schreibzeiger fertig */
+        wr(RFH_Q0_FRBDCB_WIDX_TRG, rx_write & ~7u);
+    }
+}
+
+static int send_cmd(uint8_t group, uint8_t cmd, const void *data, uint32_t len)
+{
+    if (len + 8 > CMD_SLOT)
+        return -1;
+    uint32_t idx = tx_write & (CMD_RING - 1);
+    uint8_t *c = cmdbuf + idx * CMD_SLOT, *tfd = cmdq + idx * TFD_SIZE;
+    uint16_t seq = (uint16_t)(tx_write & 0xFF); /* Warteschlange 0 */
+    c[0] = cmd;
+    c[1] = group;
+    c[2] = (uint8_t)seq;
+    c[3] = (uint8_t)(seq >> 8);
+    c[4] = (uint8_t)len;
+    c[5] = (uint8_t)(len >> 8);
+    c[6] = 0;
+    c[7] = 0;
+    memcpy(c + 8, data, len);
+    memset(tfd, 0, TFD_SIZE);
+    uint32_t total = 8 + len, first = total < 20 ? total : 20, n = 0;
+    uint64_t addr[2] = {(uint64_t)c, (uint64_t)c + first};
+    uint32_t tlen[2] = {first, total - first};
+    for (int i = 0; i < 2; i++) {
+        if (!tlen[i])
+            continue;
+        uint8_t *tb = tfd + 2 + n * 10;
+        tb[0] = (uint8_t)tlen[i];
+        tb[1] = (uint8_t)(tlen[i] >> 8);
+        memcpy(tb + 2, &addr[i], 8);
+        n++;
+    }
+    tfd[0] = (uint8_t)n;
+    tfd[1] = 0;
+    tx_write = (tx_write + 1) & 0xFF;
+    __sync_synchronize(); /* Befehl und TFD stehen im Speicher, bevor die Karte davon erfaehrt */
+    wr(HBUS_TARG_WRPTR, tx_write | (0u << 16));
+    return seq;
+}
+
+/* bis die Antwort (seq >= 0) bzw. Meldung da ist; Laenge der Daten oder -1 (Zeit um), -2 (Fehler der Firmware) */
+static int wait_for(uint8_t group, uint8_t cmd, int seq, uint32_t ms, const char *what)
+{
+    uint64_t t0 = time_us();
+    for (;;) {
+        rx_poll();
+        if (want.got)
+            break;
+        uint32_t ci_int = rd(CSR_INT);
+        if (ci_int & (CSR_INT_SW_ERR | CSR_INT_HW_ERR)) {
+            kprintf("iwl:   %s: %s-Fehler (CSR_INT %#x)\n", what, ci_int & CSR_INT_SW_ERR ? "Firmware" : "Hardware",
+                    ci_int);
+            fw_state((uint32_t)((time_us() - t0) / 1000));
+            want.active = 0;
+            return -2;
+        }
+        if (time_us() - t0 > (uint64_t)ms * 1000) {
+            kprintf("iwl:   %s: keine Antwort nach %u ms (%#x.%#x)\n", what, ms, group, cmd);
+            fw_state(ms);
+            want.active = 0;
+            return -1;
+        }
+        thread_sleep_ms(1);
+    }
+    want.active = 0;
+    kprintf("iwl:   %s: Antwort nach %u ms, %u Byte\n", what, (uint32_t)((time_us() - t0) / 1000), want.len);
+    (void)seq;
+    return (int)want.len;
+}
+
+static int cmd_sync(uint8_t group, uint8_t cmd, const void *data, uint32_t len, const char *what)
+{
+    want.active = 1;
+    want.got = 0;
+    want.group = group;
+    want.cmd = cmd;
+    want.seq = 0x7FFFFFFF; /* noch keine: die Antwort kann erst nach dem Absenden kommen */
+    int seq = send_cmd(group, cmd, data, len);
+    if (seq < 0)
+        return -1;
+    want.seq = seq;
+    kprintf("iwl:   -> %s (%#x.%#x, Folge %#x, %u Byte)\n", what, group, cmd, seq, len);
+    return wait_for(group, cmd, seq, 1000, what);
+}
+
+static int valid_mac(const uint8_t *m)
+{
+    return !(m[0] & 1) && (m[0] | m[1] | m[2] | m[3] | m[4] | m[5]);
+}
+
+/* MAC-Adresse aus den Registern der Karte (Linux: iwl_set_hw_address_from_csr, Basis 0x380 bei der Familie 22000):
+ * erst die vom Hersteller gesetzte (STRAP), sonst die aus dem OTP-Speicher. Byte-Reihenfolge vertauscht. */
+static void read_mac(void)
+{
+    static const uint32_t regs_[2][2] = {{0x388, 0x38C}, {0x380, 0x384}};
+    for (int k = 0; k < 2; k++) {
+        uint32_t a = rd(regs_[k][0]), b = rd(regs_[k][1]);
+        uint8_t m[6] = {(uint8_t)(a >> 24), (uint8_t)(a >> 16), (uint8_t)(a >> 8), (uint8_t)a, (uint8_t)(b >> 8),
+                        (uint8_t)b};
+        kprintf("iwl:   MAC-Register %#x/%#x: %08x %08x -> %02x:%02x:%02x:%02x:%02x:%02x\n", regs_[k][0], regs_[k][1], a,
+                b, m[0], m[1], m[2], m[3], m[4], m[5]);
+        if (valid_mac(m)) {
+            memcpy(info.mac, m, 6);
+            return;
+        }
+    }
+}
+
+/* Ablauf wie Linux (iwl_run_unified_mvm_ucode): INIT_EXTENDED_CFG (NVM folgt), NVM_ACCESS_COMPLETE, auf
+ * INIT_COMPLETE warten, dann NVM_GET_INFO: Faehigkeiten, Antennen, Kanaele. Dazu die MAC-Adresse. */
+static int fw_init(void)
+{
+    info.init_step = 1;
+    info.init_complete = 0;
+    info.rx_packets = 0;
+    logged = 0;
+    uint32_t flags = INIT_NVM, zero = 0;
+    if (cmd_sync(GRP_SYSTEM, CMD_INIT_EXT_CFG, &flags, 4, "INIT_EXTENDED_CFG") < 0)
+        return -6;
+    info.init_step = 2;
+    if (cmd_sync(GRP_NVM, CMD_NVM_ACCESS_END, &zero, 4, "NVM_ACCESS_COMPLETE") < 0)
+        return -6;
+    info.init_step = 3;
+    if (!info.init_complete) {
+        want.active = 1;
+        want.got = 0;
+        want.group = GRP_LEGACY;
+        want.cmd = CMD_INIT_COMPLETE;
+        want.seq = -1;
+        if (wait_for(GRP_LEGACY, CMD_INIT_COMPLETE, -1, 2000, "INIT_COMPLETE") < 0 && !info.init_complete)
+            return -6;
+    }
+    info.init_step = 4;
+    int n = cmd_sync(GRP_NVM, CMD_NVM_GET_INFO, &zero, 4, "NVM_GET_INFO");
+    if (n < 24)
+        return -6;
+    const uint8_t *d = want.data;
+    info.nvm_flags = le32(d);
+    info.nvm_version = (uint32_t)(d[4] | d[5] << 8);
+    info.nvm_board = d[6];
+    info.nvm_hw_addrs = d[7];
+    info.nvm_sku = le32(d + 8);
+    info.nvm_tx_chains = le32(d + 12);
+    info.nvm_rx_chains = le32(d + 16);
+    info.nvm_lar = le32(d + 20);
+    info.nvm_channels = n >= 28 && n != 132 ? le32(d + 24) : 51; /* Antwort v4 (472 Byte) nennt die Zahl, v3: 51 */
+    kprintf("iwl: NVM Version %#x, Flags %#x, %u MAC-Adressen, SKU %#x, Antennen TX %#x RX %#x, LAR %u, %u Kanaele\n",
+            info.nvm_version, info.nvm_flags, info.nvm_hw_addrs, info.nvm_sku, info.nvm_tx_chains, info.nvm_rx_chains,
+            info.nvm_lar, info.nvm_channels);
+    read_mac();
+    info.init_step = 5;
+    kprintf("iwl: Firmware bereit, MAC %02x:%02x:%02x:%02x:%02x:%02x\n", info.mac[0], info.mac[1], info.mac[2],
+            info.mac[3], info.mac[4], info.mac[5]);
     return 0;
 }

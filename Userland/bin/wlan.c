@@ -37,6 +37,24 @@ void _start(int argc, char **argv)
         else
             printf("Keine Nachricht der Firmware: Ladestatus %#x, Befehlszaehler UMAC %#x, LMAC %#x\n"
                    "(Verlauf: dmesg | grep iwl)\n", wi.st_load, wi.st_umac_pc, wi.st_lmac_pc);
+        if (wi.load_alive) {
+            static const char *steps[] = {"-", "INIT_EXTENDED_CFG", "NVM_ACCESS_COMPLETE", "INIT_COMPLETE", "NVM_GET_INFO",
+                                          "fertig"};
+            unsigned st = wi.init_step < 6 ? wi.init_step : 0;
+            printf("Init:      %s (%u Pakete empfangen)\n", st == 5 ? "fertig" : steps[st], wi.rx_packets);
+            if (st != 5)
+                printf("           bei diesem Schritt kam keine Antwort (Verlauf: dmesg | grep iwl)\n");
+        }
+        if (wi.init_step >= 5) {
+            unsigned k = wi.nvm_sku;
+            printf("MAC:       %02x:%02x:%02x:%02x:%02x:%02x\n", wi.mac[0], wi.mac[1], wi.mac[2], wi.mac[3], wi.mac[4],
+                   wi.mac[5]);
+            printf("NVM:       Version %#x, %u MAC-Adressen, Antennen TX %#x RX %#x, %u Kanaele, LAR %s\n",
+                   wi.nvm_version, wi.nvm_hw_addrs, wi.nvm_tx_chains, wi.nvm_rx_chains, wi.nvm_channels,
+                   wi.nvm_lar ? "an" : "aus");
+            printf("Kann:      %s%s%s%s%s%s\n", k & 1 ? "2,4 GHz " : "", k & 2 ? "5 GHz " : "", k & 4 ? "802.11n " : "",
+                   k & 8 ? "802.11ac " : "", k & 16 ? "802.11ax " : "", k & 32 ? "(ohne MIMO)" : "");
+        }
         sys_exit(r == 0 ? 0 : 1);
     }
     if (argc > 1 && strcmp(argv[1], "wake") == 0) {
