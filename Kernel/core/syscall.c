@@ -538,6 +538,29 @@ static void syscall_do(SyscallFrame *f)
                 memcpy((void *)f->rdx, &n, sizeof(n));
                 ret = 0;
             }
+        } else if (f->rdi == 5) { /* Stufe 5: verbinden (WlanConnect in rsi), wartet bis verbunden/gescheitert */
+            WlanConnect wc;
+            if (!process_user_range_ok(process_current(), f->rsi, sizeof(wc), 0))
+                ret = ERR_FAULT;
+            else {
+                memcpy(&wc, (const void *)f->rsi, sizeof(wc));
+                wc.ssid[sizeof(wc.ssid) - 1] = 0;
+                wc.pass[sizeof(wc.pass) - 1] = 0;
+                int r = iwl_connect(&wc);
+                memset(&wc, 0, sizeof(wc)); /* Passwort nicht auf dem Kernel-Stack liegen lassen */
+                ret = r == 0 ? 0 : r == -1 ? ERR_NOENT : r == -11 ? ERR_INVAL : r == -12 ? ERR_AGAIN : ERR_IO;
+            }
+        } else if (f->rdi == 6) { /* trennen */
+            ret = iwl_disconnect() == 0 ? 0 : ERR_NOENT;
+        } else if (f->rdi == 7) { /* Zustand der Verbindung nach rsi */
+            WlanStatus ws;
+            if (!process_user_range_ok(process_current(), f->rsi, sizeof(ws), 1))
+                ret = ERR_FAULT;
+            else {
+                iwl_status(&ws);
+                memcpy((void *)f->rsi, &ws, sizeof(ws));
+                ret = 0;
+            }
         } else if (f->rdi != 0)
             ret = ERR_INVAL;
         else if (!process_user_range_ok(process_current(), f->rsi, sizeof(wi), 1))

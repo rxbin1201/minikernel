@@ -67,8 +67,34 @@ so liest der Kernel sie ohne Datentraeger (wie Firmware in der initramfs bei Lin
 Stufe 1 (`Kernel/drivers/net/iwl.c`): die Karte (PCI 8086:2723) wird erkannt, BAR0 eingeblendet und die Kennungen
 gelesen (`CSR_HW_REV`, `CSR_HW_RF_ID`; die Karte wird noch nicht angefasst); die Firmware wird zerlegt (TLV-Format wie
 bei Linux: Laufzeit-Abschnitte fuer LMAC und UMAC, Paging, Faehigkeiten). `wlan` zeigt alles, dazu das
-Bluetooth-Geraet am USB (8087:0029). Naechste Stufen: Firmware laden ("alive"), Netze suchen, offen verbinden, WPA2,
-WLAN im Desktop, dann Bluetooth.
+Bluetooth-Geraet am USB (8087:0029). `wlan load` startet die Firmware, `wlan scan` sucht Netze.
+
+Stufe 5 (`Kernel/drivers/net/iwl_sta.c`, `Kernel/net/wpa.c`): verbinden mit offenen und WPA2-PSK-Netzen (auch
+WPA2/WPA3-gemischt), als `wlan0` im Netzwerk-Stack - danach holt DHCP die Adresse wie bei eth0:
+
+```sh
+wlan scan
+wlan connect "Mein Netz" "geheimes Passwort"
+wlan status          # Zustand, Kanal, Rate, Zaehler; bei Fehlern Schritt und Grund
+ifconfig             # wlan0 mit Adresse
+wlan disconnect
+```
+
+Ablauf wie iwlmvm in Linux: PHY-Kontext (Kanal), MAC-Kontext, Bindung, Station fuer den AP, je eine
+Sendewarteschlange fuer Verwaltung und Daten (`SCD_QUEUE_CONFIG`), Zeitfenster auf dem Kanal (`SESSION_PROTECTION`),
+Authentifizierung, Assoziierung; bei WPA2 der 4-Wege-Handshake (PBKDF2 fuer den PMK, PRF fuer den PTK, AES Key Wrap
+fuer den GTK; `Kernel/lib/crypto.c`), dann Paar- und Gruppenschluessel in die Firmware - sie ver- und entschluesselt
+CCMP selbst. Gruppenschluessel-Wechsel des AP beantwortet der Thread `wlan`. Die Strukturen folgen den
+Befehlsversionen der Firmware `cc-a0-77` (`ADD_STA` 12, `ADD_STA_KEY` 3, `TX_CMD` 9 mit neuem Ratenformat,
+`PHY_CONTEXT` 4, `SCD_QUEUE_CONFIG` 3, `RLC_CONFIG` 2).
+
+Bewusst einfach: die Karte tritt als 802.11a/g-Station auf (ohne HT/VHT/HE, ohne QoS und Aggregation), sendet mit
+fester Rate (nach der Signalstaerke, hoechstens 54 Mbit/s) und fragt den Empfang ab (ohne Interrupt). Nicht
+unterstuetzt: WEP, WPA1/TKIP, WPA3-only (SAE), Enterprise (802.1X), Pflicht-MFP (802.11w). Selbsttest `crypto`
+(17 Pruefungen: Testvektoren aus den RFCs und 802.11, dazu ein kompletter Handshake gegen einen simulierten AP, auch
+mit falschem Passwort). Getestet werden kann das Verbinden nur auf echter Hardware - QEMU hat keine AX200.
+Naechste Stufen: Ratenanpassung durch die Firmware (TLC) und HT, Interrupts statt Abfragen, automatisch verbinden
+beim Start, WLAN im Desktop, dann Bluetooth.
 
 ## Mehrere CPUs (SMP)
 
@@ -552,10 +578,10 @@ Kernel/
   drivers/            PCI, serielle Schnittstelle, Uhr, Tastatur, Maus, Grafik
     block/            AHCI, NVMe, virtio-blk, Partitionen (MBR/GPT)
     usb/              xHCI, Tastatur/Maus (HID), Massenspeicher
-    net/              Intel e1000/e1000e
+    net/              Intel e1000/e1000e, WLAN Intel AX200 (iwl.c: Firmware, Suche; iwl_sta.c: Verbinden, wlan0)
   fs/                 VFS, Dateisystem-Schicht; fat/: FAT12/16/32 und exFAT
-  net/                IPv4-Stack: ARP, ICMP, DHCP, UDP, TCP, DNS, NTP
-  lib/                string, kprintf, UTF-8
+  net/                IPv4-Stack: ARP, ICMP, DHCP, UDP, TCP, DNS, NTP; WPA2-Handshake (wpa.c)
+  lib/                string, kprintf, UTF-8, Kryptografie (SHA-1, HMAC, PBKDF2, AES, Key Wrap)
   tests/              Selbsttests, je Gruppe eine Datei
 
 Userland/

@@ -49,7 +49,7 @@ typedef struct {
 
 /* Ein gefundenes Netz (SYS_WLAN 4; gleiches Layout in Userland/include/user.h) */
 #define WLAN_MAX_NETS 64
-enum { WLAN_SEC_OPEN, WLAN_SEC_WEP, WLAN_SEC_WPA, WLAN_SEC_WPA2, WLAN_SEC_WPA3 };
+enum { WLAN_SEC_OPEN, WLAN_SEC_WEP, WLAN_SEC_WPA, WLAN_SEC_WPA2, WLAN_SEC_WPA3, WLAN_SEC_WPA2_3 /* beides */ };
 typedef struct {
     uint8_t  bssid[6];
     int8_t   signal;   /* dBm */
@@ -60,6 +60,38 @@ typedef struct {
     char     ssid[33];
     uint8_t  pad[3];
 } WlanNet;
+
+/* Stufe 5: verbinden (SYS_WLAN 5; gleiches Layout in Userland/include/user.h) */
+typedef struct {
+    char    ssid[33];
+    char    pass[65];  /* WPA2: Passphrase (8..63 Zeichen) oder 64 Hex-Zeichen; offenes Netz: leer */
+    uint8_t bssid[6];  /* 0: der staerkste AP mit diesem Namen */
+} WlanConnect;
+
+/* Zustand der Verbindung (SYS_WLAN 7) */
+enum { WLAN_ST_IDLE, WLAN_ST_CONNECTING, WLAN_ST_CONNECTED, WLAN_ST_FAILED };
+/* Schritte beim Verbinden: wie weit es kam */
+enum { WLAN_STEP_NONE, WLAN_STEP_FW, WLAN_STEP_SCAN, WLAN_STEP_PMK, WLAN_STEP_CONTEXT, WLAN_STEP_STATION,
+       WLAN_STEP_QUEUES, WLAN_STEP_PROTECT, WLAN_STEP_AUTH, WLAN_STEP_ASSOC, WLAN_STEP_KEYS, WLAN_STEP_DONE };
+typedef struct {
+    uint32_t state, step;          /* WLAN_ST_*, WLAN_STEP_* */
+    int32_t  error;                /* Ergebnis des letzten Verbindens (0 = ok) */
+    uint16_t status_code, reason;  /* Statuscode von Auth/Assoc, Grund einer Trennung durch den AP */
+    char     ssid[33];
+    uint8_t  bssid[6];
+    uint8_t  channel, security;
+    int8_t   signal;
+    uint8_t  pad[6];
+    uint32_t aid, rate_kbps, connect_ms; /* Assoziationsnummer, Senderate, Dauer des Verbindens */
+    uint32_t pad2;
+    uint64_t rx_frames, tx_frames, rx_dropped, tx_failed, rekeys;
+    char     msg[96];              /* letztes Ereignis im Klartext */
+} WlanStatus;
+
+int  iwl_connect(const WlanConnect *c); /* wartet, bis verbunden oder gescheitert: 0, -1 keine Karte, -11 ungueltig,
+                                         * -12 schon beim Verbinden, sonst <0 (Schritt und Text in WlanStatus) */
+int  iwl_disconnect(void);
+void iwl_status(WlanStatus *s);
 
 void iwl_probe(void);
 int  iwl_info(WlanInfo *out); /* 0 = gefuellt (auch ohne Karte: dann present = 0) */

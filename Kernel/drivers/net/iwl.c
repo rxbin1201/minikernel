@@ -8,6 +8,7 @@
  * nach 0xAAAABBBB die fuer das Paging (Seiten, die die Firmware bei Bedarf aus dem RAM holt). */
 
 #include "drivers/net/iwl.h"
+#include "drivers/net/iwl_internal.h"
 #include "drivers/pci.h"
 #include "fs/vfs.h"
 #include "lib/kprintf.h"
@@ -56,6 +57,8 @@ enum { TLV_SEC_RT = 19, TLV_NUM_OF_CPU = 27, TLV_API_CHANGES_SET = 29, TLV_ENABL
 #define SEP_PAGING    0xAAAABBBBu
 
 static WlanInfo         info;
+Mutex                   iwl_op_lock = MUTEX_INIT, iwl_ring_lock = MUTEX_INIT;
+static volatile int     rings_ok; /* Ringe eingerichtet und die Firmware laeuft: Empfang darf ausgewertet werden */
 /* Laufzeit-Abschnitte der Firmware (zeigen in die initrd): 0 LMAC, 1 UMAC, 2 Paging; Daten ohne die Zieladresse */
 #define MAX_SEC 64
 static struct {
@@ -99,6 +102,26 @@ static uint32_t enable_wfpm(void)
 static uint32_t le32(const uint8_t *p)
 {
     return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+uint32_t iwl_rd(uint32_t off)
+{
+    return rd(off);
+}
+
+void iwl_wr(uint32_t off, uint32_t v)
+{
+    wr(off, v);
+}
+
+uint32_t iwl_le32(const uint8_t *p)
+{
+    return le32(p);
+}
+
+const WlanInfo *iwl_state(void)
+{
+    return &info;
 }
 
 /* Firmware in der initrd suchen und zerlegen */
@@ -224,6 +247,8 @@ void iwl_probe(void)
             (info.hw_rev >> 4) & 0xFFF, (info.hw_rev >> 2) & 3, info.rf_id, info.gp_cntrl, info.hw_if_config);
     if (!info.state[0])
         ksnprintf(info.state, sizeof(info.state), "erkannt (Stufe 1: noch keine Firmware geladen)");
+    if (info.fw_found)
+        iwl_sta_register(); /* wlan0: Verbindung steht erst nach "wlan connect" */
 }
 
 /* Stufe 2a: die Karte meldet "Initialisierung fertig" (INIT_DONE) und bekommt ihren Takt; dann bittet der Treiber um
@@ -372,6 +397,11 @@ static void *dma(uint64_t bytes)
     return (void *)f;
 }
 
+void *iwl_dma(uint64_t bytes)
+{
+    return dma(bytes);
+}
+
 static void prph_write(uint32_t addr, uint32_t val)
 {
     wr(PRPH_WADDR, (addr & 0xFFFFFF) | (3u << 24));
@@ -501,10 +531,24 @@ static int fw_init(void);
 
 int iwl_load_fw(void)
 {
+    mutex_lock(&iwl_op_lock);
+    int r = iwl_load_fw_op();
+    mutex_unlock(&iwl_op_lock);
+    return r;
+}
+
+int iwl_load_fw_op(void)
+{
     if (!info.present || !regs)
         return -1;
     if (!info.fw_found)
         return -4;
+    /* Verbindung und Ringe vergessen: bis ALIVE wertet niemand den Empfang aus, und keiner sendet */
+    iwl_sta_fw_reset();
+    mutex_lock(&iwl_ring_lock);
+    rings_ok = 0;
+    mutex_unlock(&iwl_ring_lock);
+    info.init_step = 0;
     info.load_done = 1;
     info.load_alive = 0;
     if (iwl_wake_test() == -2) /* Bereitschaft, Reset, Grundeinstellungen, Takt (Zugriff wird wieder abgegeben) */
@@ -652,7 +696,10 @@ int iwl_load_fw(void)
             info.alive_cmd == 1 && info.alive_status == 0xCAFE ? " - ALIVE, Firmware laeuft" : "");
     if (info.alive_cmd != 1 || info.alive_status != 0xCAFE)
         return -3;
+    mutex_lock(&iwl_ring_lock);
     rx_skip = 1; /* ALIVE ist schon ausgewertet */
+    rings_ok = 1;
+    mutex_unlock(&iwl_ring_lock);
     return fw_init();
 }
 
@@ -664,13 +711,11 @@ int iwl_load_fw(void)
  * Empfang: Der Status nennt die Zahl der geschlossenen Puffer; je Puffer steht im Ring der benutzten Puffer die
  * Kennung (vid). In einem Puffer koennen mehrere Pakete liegen (Laenge | Flags, Kopf: Befehl, Gruppe, Folgenummer,
  * Daten), je auf 64 Byte ausgerichtet; 0x55550000 beendet die Liste. Antworten tragen die Folgenummer des Befehls,
- * Meldungen der Firmware haben Bit 15 (SEQ_RX_FRAME) gesetzt. */
+ * Meldungen der Firmware haben Bit 15 (SEQ_RX_FRAME) gesetzt. Lehnt die Firmware einen Befehl ab, kommt statt der
+ * Antwort REPLY_ERROR (Fehlerart, Befehl, Folgenummer). */
 #define HBUS_TARG_WRPTR    0x460
 #define SEQ_RX_FRAME       0x8000
 #define RX_FRAME_INVALID   0x55550000u
-#define GRP_LEGACY         0x0
-#define GRP_SYSTEM         0x2
-#define GRP_NVM            0xC
 #define CMD_ALIVE          0x01
 #define CMD_REPLY_ERROR    0x02
 #define CMD_INIT_COMPLETE  0x04
@@ -678,27 +723,62 @@ int iwl_load_fw(void)
 #define CMD_NVM_ACCESS_END 0x00 /* REGULATORY_AND_NVM_GROUP: NVM_ACCESS_COMPLETE */
 #define CMD_NVM_GET_INFO   0x02
 #define CMD_DEBUG_LOG      0xF7
-#define GRP_LONG           0x1  /* Befehle der alten Gruppe 0 schickt Linux mit Gruppe 1 (DEF_ID) */
 #define CMD_TX_ANT_CFG     0x98
 #define CMD_BT_CONFIG      0x9B
 #define CMD_MCC_UPDATE     0xC8
 #define CMD_SCAN_CFG       0x0C
 #define CMD_SCAN_REQ       0x0D
 #define CMD_SCAN_COMPLETE  0x0F
-#define CMD_RX_MPDU        0xC1
 #define INIT_NVM           (1u << 1) /* INIT_EXTENDED_CFG: der Treiber schickt NVM-Befehle */
 #define CSR_INT_SW_ERR     (1u << 25)
 #define CSR_INT_HW_ERR     (1u << 29)
 
 static void scan_frame(const uint8_t *d, uint32_t len);
+static int  scan_busy;
 
-static struct {
-    int      active, got, seq; /* seq < 0: Meldung, jede Folgenummer */
-    uint8_t  group, cmd;
-    uint32_t len;
-    uint8_t  data[512];
-} want;
+/* Worauf gewartet wird (es wartet immer nur einer: wer iwl_op_lock haelt): want auf die Antwort eines Befehls,
+ * want_n auf eine Meldung - die kann schon vor dem Absenden des Befehls scharf gemacht werden, denn sie kommt oft im
+ * selben Empfangspuffer wie die Antwort. Gefuellt beim Empfang, von dem Thread, der gerade den Ring auswertet. */
+typedef struct {
+    volatile int got, err; /* err: REPLY_ERROR fuer diesen Befehl (Fehlerart in data) */
+    int          active, seq; /* seq < 0: Meldung, jede Folgenummer */
+    uint8_t      group, cmd;
+    uint32_t     len;
+    uint8_t      data[512];
+} Want;
+static Want     want, want_n;
 static uint32_t logged;
+
+static void want_arm(Want *w, uint8_t group, uint8_t cmd, int seq)
+{
+    w->got = w->err = 0;
+    w->group = group;
+    w->cmd = cmd;
+    w->seq = seq;
+    w->active = 1;
+}
+
+static void want_set(uint8_t group, uint8_t cmd, int seq)
+{
+    want_arm(&want, group, cmd, seq);
+}
+
+static int want_match(Want *w, uint8_t grp, uint8_t cmd, uint16_t seq, const uint8_t *d, uint32_t plen)
+{
+    if (!w->active || w->got || cmd != w->cmd || !(w->group == GRP_ANY || w->seq >= 0 || grp == w->group) ||
+        !(w->seq < 0 ? (seq & SEQ_RX_FRAME) != 0 : seq == (uint16_t)w->seq))
+        return 0;
+    w->len = plen < sizeof(w->data) ? plen : sizeof(w->data);
+    memcpy(w->data, d, w->len);
+    __sync_synchronize();
+    w->got = 1;
+    return 1;
+}
+
+void iwl_expect_notif(uint8_t group, uint8_t cmd)
+{
+    want_arm(&want_n, group, cmd, -1);
+}
 
 static void rx_packet(const uint8_t *pkt, uint32_t len)
 {
@@ -709,14 +789,30 @@ static void rx_packet(const uint8_t *pkt, uint32_t len)
     info.rx_packets++;
     if (grp == GRP_LEGACY && cmd == CMD_INIT_COMPLETE)
         info.init_complete = 1;
-    if (want.active && !want.got && cmd == want.cmd && (want.group == 0xFF || want.seq >= 0 || grp == want.group) &&
-        (want.seq < 0 ? (seq & SEQ_RX_FRAME) != 0 : seq == (uint16_t)want.seq)) {
-        want.len = plen < sizeof(want.data) ? plen : sizeof(want.data);
-        memcpy(want.data, d, want.len);
-        want.got = 1;
+    want_match(&want, grp, cmd, seq, d, plen);
+    want_match(&want_n, grp, cmd, seq, d, plen);
+    if (cmd == CMD_REPLY_ERROR && plen >= 8) { /* Fehlerart, Befehl, reserviert, Folgenummer des Befehls */
+        uint16_t bad = (uint16_t)(d[6] | d[7] << 8);
+        kprintf("iwl:   REPLY_ERROR: Fehlerart %#x fuer Befehl %#x (Folge %#x), Dienst %#x\n", le32(d), d[4], bad,
+                plen >= 12 ? le32(d + 8) : 0);
+        if (want.active && !want.got && want.seq >= 0 && bad == (uint16_t)want.seq) {
+            want.len = 4;
+            memcpy(want.data, d, 4);
+            want.err = 1;
+            __sync_synchronize();
+            want.got = 1;
+        }
+        return;
     }
     if (cmd == CMD_RX_MPDU) {
-        scan_frame(d, plen);
+        if (scan_busy || !iwl_sta_wants_rx())
+            scan_frame(d, plen);
+        if (iwl_sta_wants_rx())
+            iwl_sta_rx_mpdu(d, plen);
+        return;
+    }
+    if (cmd == CMD_TX && !(seq & SEQ_RX_FRAME)) { /* gesendeter Rahmen: Ergebnis (Warteschlange im Folgefeld) */
+        iwl_sta_tx_resp(seq, d, plen);
         return;
     }
     if (grp == GRP_LEGACY && cmd == CMD_DEBUG_LOG)
@@ -727,9 +823,11 @@ static void rx_packet(const uint8_t *pkt, uint32_t len)
                 plen >= 8 ? le32(d + 4) : 0, plen >= 12 ? le32(d + 8) : 0, plen >= 16 ? le32(d + 12) : 0);
 }
 
-/* Geschlossene Empfangspuffer auswerten, geleert wieder in den Ring der freien Puffer stellen */
+/* Geschlossene Empfangspuffer auswerten, geleert wieder in den Ring der freien Puffer stellen (mit iwl_ring_lock) */
 static void rx_poll(void)
 {
+    if (!rings_ok)
+        return;
     uint32_t closed = *status & (RX_RING - 1);
     __sync_synchronize(); /* erst den Status, dann die Puffer lesen */
     int n = 0;
@@ -761,10 +859,25 @@ static void rx_poll(void)
     }
 }
 
-static int send_cmd(uint8_t group, uint8_t cmd, const void *data, uint32_t len)
+void iwl_poll(void)
+{
+    mutex_lock(&iwl_ring_lock);
+    rx_poll();
+    mutex_unlock(&iwl_ring_lock);
+}
+
+int iwl_fw_failed(void)
+{
+    return rings_ok && (rd(CSR_INT) & (CSR_INT_SW_ERR | CSR_INT_HW_ERR)) != 0;
+}
+
+/* Befehl in die Warteschlange; w (falls da) bekommt die Folgenummer, bevor die Karte vom Befehl erfaehrt - sonst
+ * koennte ein anderer Thread die Antwort schon abholen, bevor jemand auf sie wartet */
+static int send_cmd(uint8_t group, uint8_t cmd, const void *data, uint32_t len, Want *w)
 {
     if (len + 8 > CMD_SLOT)
         return -1;
+    mutex_lock(&iwl_ring_lock);
     uint32_t idx = tx_write & (CMD_RING - 1);
     uint8_t *c = cmdbuf + idx * CMD_SLOT, *tfd = cmdq + idx * TFD_SIZE;
     uint16_t seq = (uint16_t)(tx_write & 0xFF); /* Warteschlange 0 */
@@ -793,54 +906,75 @@ static int send_cmd(uint8_t group, uint8_t cmd, const void *data, uint32_t len)
     tfd[0] = (uint8_t)n;
     tfd[1] = 0;
     tx_write = (tx_write + 1) & 0xFF;
+    if (w)
+        w->seq = seq;
     __sync_synchronize(); /* Befehl und TFD stehen im Speicher, bevor die Karte davon erfaehrt */
     wr(HBUS_TARG_WRPTR, tx_write | (0u << 16));
+    mutex_unlock(&iwl_ring_lock);
     return seq;
 }
 
-/* bis die Antwort (seq >= 0) bzw. Meldung da ist; Laenge der Daten oder -1 (Zeit um), -2 (Fehler der Firmware) */
-static int wait_for(uint8_t group, uint8_t cmd, int seq, uint32_t ms, const char *what)
+/* bis die Antwort (seq >= 0) bzw. Meldung da ist; Laenge der Daten oder -1 (Zeit um), -2 (Fehler der Firmware),
+ * -3 (REPLY_ERROR). Zwischen dem Nachsehen schlaeft der Thread ohne iwl_ring_lock. */
+static int wait_for(Want *w, uint8_t group, uint8_t cmd, uint32_t ms, const char *what)
 {
     uint64_t t0 = time_us();
     for (;;) {
-        rx_poll();
-        if (want.got)
+        iwl_poll();
+        __sync_synchronize();
+        if (w->got)
             break;
         uint32_t ci_int = rd(CSR_INT);
         if (ci_int & (CSR_INT_SW_ERR | CSR_INT_HW_ERR)) {
             kprintf("iwl:   %s: %s-Fehler (CSR_INT %#x)\n", what, ci_int & CSR_INT_SW_ERR ? "Firmware" : "Hardware",
                     ci_int);
             fw_state((uint32_t)((time_us() - t0) / 1000));
-            want.active = 0;
+            w->active = 0;
             return -2;
         }
         if (time_us() - t0 > (uint64_t)ms * 1000) {
             kprintf("iwl:   %s: keine Antwort nach %u ms (%#x.%#x)\n", what, ms, group, cmd);
             fw_state(ms);
-            want.active = 0;
+            w->active = 0;
             return -1;
         }
         thread_sleep_ms(1);
     }
-    want.active = 0;
-    kprintf("iwl:   %s: Antwort nach %u ms, %u Byte\n", what, (uint32_t)((time_us() - t0) / 1000), want.len);
-    (void)seq;
-    return (int)want.len;
+    w->active = 0;
+    if (w->err)
+        return -3;
+    kprintf("iwl:   %s: Antwort nach %u ms, %u Byte\n", what, (uint32_t)((time_us() - t0) / 1000), w->len);
+    return (int)w->len;
 }
 
 static int cmd_sync(uint8_t group, uint8_t cmd, const void *data, uint32_t len, const char *what)
 {
-    want.active = 1;
-    want.got = 0;
-    want.group = group;
-    want.cmd = cmd;
-    want.seq = 0x7FFFFFFF; /* noch keine: die Antwort kann erst nach dem Absenden kommen */
-    int seq = send_cmd(group, cmd, data, len);
-    if (seq < 0)
+    want_set(group, cmd, 0x7FFFFFFF); /* Folgenummer setzt send_cmd */
+    int seq = send_cmd(group, cmd, data, len, &want);
+    if (seq < 0) {
+        want.active = 0;
         return -1;
-    want.seq = seq;
+    }
     kprintf("iwl:   -> %s (%#x.%#x, Folge %#x, %u Byte)\n", what, group, cmd, seq, len);
-    return wait_for(group, cmd, seq, 1000, what);
+    return wait_for(&want, group, cmd, 1000, what);
+}
+
+int iwl_cmd(uint8_t group, uint8_t cmd, const void *data, uint32_t len, const char *what, void *resp, uint32_t max)
+{
+    int n = cmd_sync(group, cmd, data, len, what);
+    if (n >= 0 && resp)
+        memcpy(resp, want.data, (uint32_t)n < max ? (uint32_t)n : max);
+    return n;
+}
+
+int iwl_wait_notif(uint8_t group, uint8_t cmd, uint32_t ms, const char *what, void *resp, uint32_t max)
+{
+    if (!want_n.active || want_n.group != group || want_n.cmd != cmd)
+        iwl_expect_notif(group, cmd); /* nicht vorher scharf gemacht */
+    int n = wait_for(&want_n, group, cmd, ms, what);
+    if (n >= 0 && resp)
+        memcpy(resp, want_n.data, (uint32_t)n < max ? (uint32_t)n : max);
+    return n;
 }
 
 static int valid_mac(const uint8_t *m)
@@ -881,15 +1015,9 @@ static int fw_init(void)
     if (cmd_sync(GRP_NVM, CMD_NVM_ACCESS_END, &zero, 4, "NVM_ACCESS_COMPLETE") < 0)
         return -6;
     info.init_step = 3;
-    if (!info.init_complete) {
-        want.active = 1;
-        want.got = 0;
-        want.group = GRP_LEGACY;
-        want.cmd = CMD_INIT_COMPLETE;
-        want.seq = -1;
-        if (wait_for(GRP_LEGACY, CMD_INIT_COMPLETE, -1, 2000, "INIT_COMPLETE") < 0 && !info.init_complete)
-            return -6;
-    }
+    if (!info.init_complete && iwl_wait_notif(GRP_LEGACY, CMD_INIT_COMPLETE, 2000, "INIT_COMPLETE", 0, 0) < 0 &&
+        !info.init_complete)
+        return -6;
     info.init_step = 4;
     int n = cmd_sync(GRP_NVM, CMD_NVM_GET_INFO, &zero, 4, "NVM_GET_INFO");
     if (n < 24)
@@ -980,8 +1108,8 @@ _Static_assert(sizeof(ScanReq) == 1940, "Scan: Groesse");
 
 #define RX_DESC 48 /* Laenge, Flags, Phy, Status (+12), Reihenfolge, dann v1: RSS, Filter, Rate, Energie A/B (+32), Kanal */
 static WlanNet nets[WLAN_MAX_NETS];
+static IwlBss   nets_x[WLAN_MAX_NETS]; /* dazu, was zum Verbinden noetig ist */
 static uint32_t n_nets, scan_frames;
-static int scan_busy;
 
 static const uint8_t scan_chans[] = {1,   2,   3,   4,   5,   6,   7,   8,   9,   10,  11,  12,  13,  36,  40,  44,  48,
                                      52,  56,  60,  64,  100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
@@ -1007,11 +1135,17 @@ static void scan_frame(const uint8_t *d, uint32_t len)
     uint16_t cap = (uint16_t)(body[10] | body[11] << 8);
     int sig = -(int)(energy_a && (!energy_b || energy_a < energy_b) ? energy_a : energy_b ? energy_b : 100);
     WlanNet n;
+    static IwlBss x;
     memset(&n, 0, sizeof(n));
+    memset(&x, 0, sizeof(x));
     memcpy(n.bssid, bssid, 6);
     n.signal = (int8_t)sig;
     n.channel = chan;
     n.security = cap & 0x10 ? WLAN_SEC_WEP : WLAN_SEC_OPEN;
+    x.cap = cap;
+    x.beacon_int = (uint16_t)(body[8] | body[9] << 8);
+    x.dtim_period = 1;
+    int psk = 0, sae = 0;
     for (uint32_t o = hdr + 12; o + 2 <= flen;) {
         uint8_t id = f[o], l = f[o + 1];
         if (o + 2 + l > flen)
@@ -1020,18 +1154,28 @@ static void scan_frame(const uint8_t *d, uint32_t len)
         if (id == 0 && l <= 32) {
             memcpy(n.ssid, v, l);
             n.ssid_len = l;
+        } else if ((id == 1 || id == 50) && x.n_rates + l <= sizeof(x.rates)) { /* (erweiterte) Datenraten */
+            memcpy(x.rates + x.n_rates, v, l);
+            x.n_rates = (uint8_t)(x.n_rates + l);
         } else if (id == 3 && l >= 1) {
             n.channel = v[0];
+        } else if (id == 5 && l >= 2 && v[1]) { /* TIM: DTIM-Zaehler, DTIM-Periode */
+            x.dtim_period = v[1];
         } else if (id == 48) {
             n.security = WLAN_SEC_WPA2;
-            /* AKM-Liste: 00-0F-AC-08 = SAE (WPA3) */
+            if (l + 2u <= sizeof(x.rsn)) {
+                memcpy(x.rsn, f + o, l + 2u);
+                x.rsn_len = (uint8_t)(l + 2);
+            }
+            /* AKM-Liste: 00-0F-AC-02 = PSK, 00-0F-AC-08 = SAE (WPA3) */
             if (l >= 8) {
                 uint32_t pc = (uint32_t)(v[6] | v[7] << 8), ak = 8 + pc * 4;
                 if (ak + 2 <= l) {
                     uint32_t na = (uint32_t)(v[ak] | v[ak + 1] << 8);
-                    for (uint32_t i = 0; i < na && ak + 2 + i * 4 + 4 <= l; i++)
-                        if (v[ak + 2 + i * 4 + 3] == 8)
-                            n.security = WLAN_SEC_WPA3;
+                    for (uint32_t i = 0; i < na && ak + 2 + i * 4 + 4 <= l; i++) {
+                        psk |= v[ak + 2 + i * 4 + 3] == 2;
+                        sae |= v[ak + 2 + i * 4 + 3] == 8;
+                    }
                 }
             }
         } else if (id == 221 && l >= 4 && v[0] == 0x00 && v[1] == 0x50 && v[2] == 0xF2 && v[3] == 1 &&
@@ -1040,25 +1184,49 @@ static void scan_frame(const uint8_t *d, uint32_t len)
         }
         o += 2 + l;
     }
+    if (n.security == WLAN_SEC_WPA2 && sae)
+        n.security = psk ? WLAN_SEC_WPA2_3 : WLAN_SEC_WPA3;
     for (uint32_t i = 0; i < n_nets; i++)
         if (memcmp(nets[i].bssid, n.bssid, 6) == 0) {
             if (n.signal > nets[i].signal)
                 nets[i].signal = n.signal;
             nets[i].seen++;
+            if (!nets[i].ssid_len && n.ssid_len) { /* verstecktes Netz: die Probe Response nennt den Namen */
+                memcpy(nets[i].ssid, n.ssid, sizeof(n.ssid));
+                nets[i].ssid_len = n.ssid_len;
+            }
             return;
         }
     if (n_nets < WLAN_MAX_NETS) {
         n.seen = 1;
+        nets_x[n_nets] = x;
         nets[n_nets++] = n;
     }
+}
+
+int iwl_scan_bss(unsigned i, WlanNet *n, IwlBss *x)
+{
+    if (i >= n_nets)
+        return -1;
+    *n = nets[i];
+    *x = nets_x[i];
+    return 0;
 }
 
 int iwl_scan(void)
 {
     if (scan_busy)
         return -7;
+    mutex_lock(&iwl_op_lock);
+    int r = iwl_scan_op();
+    mutex_unlock(&iwl_op_lock);
+    return r;
+}
+
+int iwl_scan_op(void)
+{
     if (info.init_step != 9) {
-        int r = iwl_load_fw();
+        int r = iwl_load_fw_op();
         if (r < 0)
             return r;
     }
@@ -1089,22 +1257,19 @@ int iwl_scan(void)
     scan_frames = 0;
     logged = 0;
     uint64_t t0 = time_us();
+    iwl_expect_notif(GRP_ANY, CMD_SCAN_COMPLETE); /* kann im selben Puffer wie die Antwort kommen */
     int r = cmd_sync(GRP_LONG, CMD_SCAN_REQ, &rq, sizeof(rq), "SCAN_REQ_UMAC");
     if (r >= 4 && le32(want.data) != 0) {
         kprintf("iwl: Suche abgelehnt, Status %#x\n", le32(want.data));
         r = -8;
     }
     if (r >= 0) {
-        want.active = 1;
-        want.got = 0;
-        want.group = 0xFF;
-        want.cmd = CMD_SCAN_COMPLETE;
-        want.seq = -1;
-        r = wait_for(0xFF, CMD_SCAN_COMPLETE, -1, 15000, "SCAN_COMPLETE");
+        r = wait_for(&want_n, GRP_ANY, CMD_SCAN_COMPLETE, 15000, "SCAN_COMPLETE");
         if (r >= 8)
             kprintf("iwl: Suche fertig nach %u ms: Status %u, %u Rahmen, %u Netze\n",
-                    (uint32_t)((time_us() - t0) / 1000), want.data[6], scan_frames, n_nets);
+                    (uint32_t)((time_us() - t0) / 1000), want_n.data[6], scan_frames, n_nets);
     }
+    want_n.active = 0;
     info.scan_ms = (uint32_t)((time_us() - t0) / 1000);
     info.scan_frames = scan_frames;
     info.scan_nets = n_nets;

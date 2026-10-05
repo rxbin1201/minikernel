@@ -4,7 +4,36 @@
  *               /firmware und das Bluetooth-Geraet am USB (8087:0029).
  * wlan wake     Stufe 2a: Karte aufwecken (Takt, Zugriff auf die inneren Register), eine Kennung lesen
  * wlan load     Stufe 2b/3: Firmware laden, ALIVE, erste Befehle (NVM, Land, Suche einrichten)
- * wlan scan     Stufe 4: Netze suchen (laedt die Firmware, falls noetig) und nach Signalstaerke sortiert zeigen */
+ * wlan scan     Stufe 4: Netze suchen (laedt die Firmware, falls noetig) und nach Signalstaerke sortiert zeigen
+ * wlan connect NAME [PASSWORT]
+ *               Stufe 5: mit dem Netz verbinden (offen oder WPA2-PSK); danach holt sich wlan0 per DHCP eine Adresse
+ * wlan disconnect, wlan status */
+
+static const char *const sec_name[] = {"offen", "WEP", "WPA", "WPA2", "WPA3", "WPA2/3"};
+static const char *const step_name[] = {"-", "Firmware", "Netz suchen", "Schluessel aus dem Passwort", "Kontexte",
+                                        "Station", "Warteschlangen", "Zeitfenster", "Authentifizierung",
+                                        "Assoziierung", "WPA2-Handshake", "verbunden"};
+
+static void show_status(const WlanStatus *s)
+{
+    static const char *const st[] = {"getrennt", "verbinde ...", "verbunden", "fehlgeschlagen"};
+    printf("Zustand:   %s\n", s->state < 4 ? st[s->state] : "?");
+    if (s->ssid[0])
+        printf("Netz:      '%s' (%02x:%02x:%02x:%02x:%02x:%02x), Kanal %u, %d dBm, %s\n", s->ssid, s->bssid[0],
+               s->bssid[1], s->bssid[2], s->bssid[3], s->bssid[4], s->bssid[5], s->channel, s->signal,
+               s->security < 6 ? sec_name[s->security] : "?");
+    if (s->state == WLAN_ST_CONNECTED)
+        printf("Verbindung: AID %u, senden mit %u Mbit/s, aufgebaut in %u ms\n", s->aid, s->rate_kbps / 1000,
+               s->connect_ms);
+    if (s->state == WLAN_ST_FAILED)
+        printf("Schritt:   %s (Fehler %d)\n", s->step < 12 ? step_name[s->step] : "?", s->error);
+    if (s->msg[0])
+        printf("Meldung:   %s\n", s->msg);
+    if (s->rx_frames || s->tx_frames)
+        printf("Rahmen:    %llu empfangen (%llu verworfen), %llu gesendet (%llu ohne Bestaetigung), %llu Schluesselwechsel\n",
+               (unsigned long long)s->rx_frames, (unsigned long long)s->rx_dropped, (unsigned long long)s->tx_frames,
+               (unsigned long long)s->tx_failed, (unsigned long long)s->rekeys);
+}
 
 static const char *hw_type(unsigned rev)
 {
@@ -60,6 +89,50 @@ void _start(int argc, char **argv)
         }
         sys_exit(r == 0 ? 0 : 1);
     }
+    if (argc > 1 && strcmp(argv[1], "connect") == 0) {
+        if (argc < 3) {
+            fprintf(2, "Aufruf: wlan connect NAME [PASSWORT]   (Namen mit Leerzeichen in Anfuehrungszeichen)\n");
+            sys_exit(1);
+        }
+        WlanConnect c;
+        memset(&c, 0, sizeof(c));
+        if (strlen(argv[2]) > 32 || (argc > 3 && strlen(argv[3]) > 64)) {
+            fprintf(2, "wlan: Name hoechstens 32, Passwort hoechstens 64 Zeichen\n");
+            sys_exit(1);
+        }
+        strcpy(c.ssid, argv[2]);
+        if (argc > 3)
+            strcpy(c.pass, argv[3]);
+        printf("Verbinde mit '%s' ...\n", c.ssid);
+        s64 r = sys_wlan_connect(&c);
+        memset(&c, 0, sizeof(c));
+        WlanStatus s;
+        sys_wlan_status(&s);
+        if (r == ERR_NOENT && s.step == 0) {
+            printf("wlan: keine Karte\n");
+            sys_exit(1);
+        }
+        show_status(&s);
+        if (r == 0)
+            printf("Die Adresse kommt per DHCP: ifconfig zeigt wlan0.\n");
+        else
+            printf("(Verlauf: dmesg | grep -e wlan -e iwl)\n");
+        sys_exit(r == 0 ? 0 : 1);
+    }
+    if (argc > 1 && strcmp(argv[1], "disconnect") == 0) {
+        s64 r = sys_wlan_disconnect();
+        printf(r == 0 ? "getrennt\n" : "wlan: keine Karte\n");
+        sys_exit(r == 0 ? 0 : 1);
+    }
+    if (argc > 1 && strcmp(argv[1], "status") == 0) {
+        WlanStatus s;
+        if (sys_wlan_status(&s) != 0) {
+            fprintf(2, "wlan: der Kernel kennt kein WLAN\n");
+            sys_exit(1);
+        }
+        show_status(&s);
+        sys_exit(0);
+    }
     if (argc > 1 && strcmp(argv[1], "scan") == 0) {
         printf("Suche auf 38 Kanaelen (2,4 und 5 GHz), dauert einige Sekunden ...\n");
         s64 r = sys_wlan_scan();
@@ -83,7 +156,6 @@ void _start(int argc, char **argv)
                 n[k] = n[k - 1];
                 n[k - 1] = t;
             }
-        static const char *sec[] = {"offen", "WEP", "WPA", "WPA2", "WPA3"};
         sys_wlan_info(&wi);
         printf("%d Netz(e) in %u ms (%u Rahmen empfangen)\n", cnt, wi.scan_ms, wi.scan_frames);
         printf("  %-32s  %-17s  %5s  %5s  %s\n", "Name", "BSSID", "Kanal", "dBm", "Schutz");
@@ -95,7 +167,7 @@ void _start(int argc, char **argv)
                 snprintf(name, sizeof(name), "%s", n[i].ssid);
             printf("  %-32s  %02x:%02x:%02x:%02x:%02x:%02x  %5u  %5d  %s\n", name, n[i].bssid[0], n[i].bssid[1],
                    n[i].bssid[2], n[i].bssid[3], n[i].bssid[4], n[i].bssid[5], n[i].channel, n[i].signal,
-                   n[i].security < 5 ? sec[n[i].security] : "?");
+                   n[i].security < 6 ? sec_name[n[i].security] : "?");
         }
         sys_exit(0);
     }
