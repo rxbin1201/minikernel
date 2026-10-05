@@ -295,6 +295,7 @@ typedef struct {
     char           fw_name[64], fw_human[64];
     char           state[64];
     unsigned       wake_done, wake_clock, wake_access, wake_us, gp_after, cnvi_id;
+    unsigned       wake_ready, hwif_after, cnvr_id;
 } WlanInfo;
 static inline s64 sys_wlan_info(WlanInfo *wi)                 { return syscall3(SYS_WLAN, 0, (u64)wi, 0); }
 static inline s64 sys_wlan_wake(void)                         { return syscall3(SYS_WLAN, 1, 0, 0); }

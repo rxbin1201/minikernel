@@ -14,6 +14,7 @@
 #include "lib/string.h"
 #include "mm/paging.h"
 #include "arch/x86_64/apic.h"
+#include "core/sched.h"
 
 #define CSR_HW_IF_CONFIG_REG 0x000
 #define CSR_GP_CNTRL         0x024
@@ -27,6 +28,12 @@
 #define GP_MAC_ACCESS_REQ    (1u << 3)
 #define GP_GOING_TO_SLEEP    (1u << 4)
 #define CNVI_AUX_MISC_CHIP   0xA200B0
+#define CNVR_AUX_MISC_CHIP   0xA2B800
+#define CSR_RESET            0x020
+#define RESET_SW             (1u << 7)
+/* Bits in CSR_HW_IF_CONFIG_REG */
+#define HWIF_NIC_READY       (1u << 22)
+#define HWIF_PREPARE         (1u << 27)
 
 enum { TLV_SEC_RT = 19, TLV_NUM_OF_CPU = 27, TLV_API_CHANGES_SET = 29, TLV_ENABLED_CAPABILITIES = 30,
        TLV_N_SCAN_CHANNELS = 31, TLV_PAGING = 32, TLV_FW_VERSION = 36 };
@@ -177,8 +184,16 @@ int iwl_wake_test(void)
         return -1;
     info.wake_done = 1;
     info.wake_clock = info.wake_access = 0;
-    info.cnvi_id = 0;
+    info.cnvi_id = info.cnvr_id = 0;
     uint64_t t0 = time_us();
+    /* 1. Bereitschaft anfordern: PREPARE setzen, bis die Karte NIC_READY meldet */
+    wr(CSR_HW_IF_CONFIG_REG, rd(CSR_HW_IF_CONFIG_REG) | HWIF_PREPARE);
+    info.wake_ready = WAIT_UNTIL(rd(CSR_HW_IF_CONFIG_REG) & HWIF_NIC_READY, 150);
+    info.hwif_after = rd(CSR_HW_IF_CONFIG_REG);
+    /* 2. per Software zuruecksetzen und kurz warten */
+    wr(CSR_RESET, rd(CSR_RESET) | RESET_SW);
+    thread_sleep_ms(6);
+    /* 3. Initialisierung fertig, Takt */
     wr(CSR_GP_CNTRL, rd(CSR_GP_CNTRL) | GP_INIT_DONE);
     info.wake_clock = WAIT_UNTIL(rd(CSR_GP_CNTRL) & GP_MAC_CLOCK_READY, 25);
     if (!info.wake_clock) {
@@ -193,10 +208,13 @@ int iwl_wake_test(void)
     if (info.wake_access) {
         wr(PRPH_RADDR, (CNVI_AUX_MISC_CHIP & 0xFFFFFF) | (3u << 24));
         info.cnvi_id = rd(PRPH_RDAT);
+        wr(PRPH_RADDR, (CNVR_AUX_MISC_CHIP & 0xFFFFFF) | (3u << 24));
+        info.cnvr_id = rd(PRPH_RDAT);
     }
     wr(CSR_GP_CNTRL, rd(CSR_GP_CNTRL) & ~GP_MAC_ACCESS_REQ);
-    kprintf("iwl: Aufwecken %s nach %u us, GP_CNTRL %#x, CNVI %#x\n", info.wake_access ? "ok" : "OHNE Zugriff",
-            info.wake_us, info.gp_after, info.cnvi_id);
+    kprintf("iwl: bereit %s (HW_IF_CONFIG %#x), Aufwecken %s nach %u us, GP_CNTRL %#x, CNVI %#x, CNVR %#x\n",
+            info.wake_ready ? "ja" : "NEIN", info.hwif_after, info.wake_access ? "ok" : "OHNE Zugriff", info.wake_us,
+            info.gp_after, info.cnvi_id, info.cnvr_id);
     return info.wake_access ? 0 : -3;
 }
 

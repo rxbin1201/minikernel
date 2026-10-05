@@ -23,6 +23,7 @@ typedef struct {
     uint32_t wake_done, wake_clock, wake_access; /* versucht, Takt bereit, Zugriff bekommen */
     uint32_t wake_us;                         /* bis zum Zugriff */
     uint32_t gp_after, cnvi_id;               /* GP_CNTRL danach, Kennung des CNVi (Peripherie-Register) */
+    uint32_t wake_ready, hwif_after, cnvr_id; /* NIC_READY nach PREPARE, HW_IF_CONFIG danach, Kennung des CNVr */
 } WlanInfo;
 
 void iwl_probe(void);

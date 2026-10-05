@@ -20,10 +20,12 @@ void _start(int argc, char **argv)
             printf("wlan: keine Karte\n");
             sys_exit(1);
         }
+        printf("Bereit:    %s (HW_IF_CONFIG %#010x)\n", wi.wake_ready ? "ja (NIC_READY)" : "NEIN", wi.hwif_after);
         printf("Takt:      %s\n", wi.wake_clock ? "bereit" : "KEINER (nach INIT_DONE)");
         printf("Zugriff:   %s nach %u us\n", wi.wake_access ? "bekommen" : "NICHT bekommen", wi.wake_us);
         printf("GP_CNTRL:  %#010x danach\n", wi.gp_after);
         printf("CNVI-ID:   %#010x\n", wi.cnvi_id);
+        printf("CNVR-ID:   %#010x\n", wi.cnvr_id);
         sys_exit(r == 0 ? 0 : 1);
     }
     if (sys_wlan_info(&wi) != 0) {
