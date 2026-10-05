@@ -131,11 +131,11 @@ static void isr_dispatch(InterruptFrame *f)
         if (process_cow_fault(process_current(), cr2))
             return;
     }
-    /* Seite fehlt (Fehlercode Bit 0 = 0): gehoert sie zu einer eingeblendeten Datei, jetzt aus der Datei laden */
+    /* Seite fehlt (Fehlercode Bit 0 = 0): eingeblendete Datei (jetzt laden) oder der Stack waechst */
     if (f->vector == 14 && !(f->error_code & 1)) {
         uint64_t cr2;
         __asm__ __volatile__("mov %%cr2, %0" : "=r"(cr2));
-        if (process_file_fault(process_current(), cr2, (f->error_code & 2) != 0))
+        if (process_page_fault(process_current(), cr2, (f->error_code & 2) != 0))
             return;
     }
 

@@ -6,12 +6,34 @@
 #define KSTACK_BASE 0x0000018000000000ULL /* 1,5 TiB: eigener Top-Level-Slot */
 #define PAGE        4096ULL
 #define SLOT_SIZE   ((KSTACK_PAGES + 1) * PAGE) /* Guard + Stack */
-#define MAX_SLOTS   4096
-#define FREE_LIST   128
+#define MAX_SLOTS   65536 /* Kernel-Threads gleichzeitig (1,3 GiB Adressraum, belegt wird nur, was laeuft) */
 
-static uint32_t next_slot;
-static uint32_t free_slots[FREE_LIST];
-static unsigned free_count;
+/* Belegte Plaetze als Bitmap (frueher eine Freiliste mit 128 Eintraegen: wurden mehr Stacks auf einmal frei, gingen
+ * die uebrigen Plaetze fuer immer verloren). Unter dem BKL (thread_create, reap_dead). */
+static uint64_t used_slots[MAX_SLOTS / 64];
+static uint32_t slot_hint; /* Wort, ab dem gesucht wird */
+
+static int slot_take(uint32_t *slot)
+{
+    for (uint32_t n = 0; n < MAX_SLOTS / 64; n++) {
+        uint32_t w = (slot_hint + n) % (MAX_SLOTS / 64);
+        if (used_slots[w] != ~0ULL) {
+            uint32_t bit = (uint32_t)__builtin_ctzll(~used_slots[w]);
+            used_slots[w] |= 1ULL << bit;
+            slot_hint = w;
+            *slot = w * 64 + bit;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void slot_give(uint32_t slot)
+{
+    used_slots[slot / 64] &= ~(1ULL << (slot % 64));
+    if (slot / 64 < slot_hint)
+        slot_hint = slot / 64;
+}
 
 void kstack_init(void)
 {
@@ -23,11 +45,7 @@ uint64_t kstack_alloc(void)
     uint64_t f = irq_save();
 
     uint32_t slot;
-    if (free_count)
-        slot = free_slots[--free_count];
-    else if (next_slot < MAX_SLOTS)
-        slot = next_slot++;
-    else {
+    if (!slot_take(&slot)) {
         irq_restore(f);
         return 0;
     }
@@ -45,8 +63,7 @@ uint64_t kstack_alloc(void)
                     pmm_free_frame(phys);
                 }
             }
-            if (free_count < FREE_LIST)
-                free_slots[free_count++] = slot;
+            slot_give(slot);
             irq_restore(f);
             return 0;
         }
@@ -68,8 +85,6 @@ void kstack_free(uint64_t top)
             pmm_free_frame(phys);
         }
     }
-    uint32_t slot = (uint32_t)((base - PAGE - KSTACK_BASE) / SLOT_SIZE);
-    if (free_count < FREE_LIST)
-        free_slots[free_count++] = slot;
+    slot_give((uint32_t)((base - PAGE - KSTACK_BASE) / SLOT_SIZE));
     irq_restore(f);
 }

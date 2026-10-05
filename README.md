@@ -67,7 +67,7 @@ In der Shell: `burn 5000 & burn 5000 & cpus` zeigt zwei ausgelastete CPUs.
 
 ### Threads in Programmen
 
-Ein Programm kann bis zu 16 Threads haben (`Userland/include/thread.h`). Sie teilen Speicher, Datei-Deskriptoren und
+Ein Programm kann bis zu 1024 Threads haben (`Userland/include/thread.h`). Sie teilen Speicher, Datei-Deskriptoren und
 Arbeitsverzeichnis und rechnen auf mehreren CPUs gleichzeitig:
 
 ```c
@@ -87,7 +87,7 @@ thread_join(t, &ergebnis);               // wartet aufs Ende und gibt den Stack 
   beim naechsten Eintritt in den Kernel, wartende werden geweckt. `thread_exit` beendet nur den eigenen Thread, mit dem
   letzten endet das Programm (Code 0).
 - **fork** uebernimmt nur den aufrufenden Thread, **exec** geht nur mit einem Thread (sonst `ERR_AGAIN`).
-- **Kernel:** Platz 0..15 je Prozess (`process.c`), der letzte Thread raeumt den Prozess ab. `brk`/`mmap`/`munmap`
+- **Kernel:** Nummer 0..1023 je Prozess (`process.c`), der letzte Thread raeumt den Prozess ab. `brk`/`mmap`/`munmap`
   laufen bei mehreren Threads mit BKL. Ausgeblendete Seiten werden erst frei, wenn jede CPU, auf der gerade ein
   anderer Thread des Programms lief, ihren TLB geleert hat (IPI `VECTOR_TLB`, ohne darauf zu warten). Ein blockierendes
   `read` haelt sein Dateiobjekt fest, auch wenn ein anderer Thread den Deskriptor schliesst.
@@ -97,6 +97,27 @@ thread_join(t, &ergebnis);               // wartet aufs Ende und gibt den Stack 
 Threads nutzen: `gl.c` (die CPU zeichnet mit einem Thread je CPU, hoechstens 4, jeder nimmt jede n-te Bildzeile -
 `gldemo -cpu` in QEMU etwa 2,7-mal schneller) und `files` (Kopieren und Verschieben laufen im Hintergrund, die
 Fusszeile zeigt den Fortschritt, Esc bricht ab).
+
+### Grenzen
+
+Die Tabellen fuer Prozesse, Deskriptoren, Threads und Einblendungen wachsen bei Bedarf (`process.c`); feste Grenzen
+gibt es nur noch gegen Ausreisser - ein Programm, das endlos Dateien oeffnet, soll nicht den Kernel-Heap belegen:
+
+| | frueher | jetzt |
+|---|---|---|
+| Prozesse gleichzeitig | 64 | 4096 |
+| offene Deskriptoren je Prozess | 32 | 1024 (wie `ulimit -n` unter Linux) |
+| Threads je Prozess | 16 | 1024 |
+| Datei-Einblendungen / geteilter Speicher je Prozess | 32 / 80 | 1024 / 1024 |
+| geteilte Speicherobjekte im System | 192 | 4096 |
+| Stack | 64 KiB | waechst bei Bedarf bis 8 MiB (Seitenfehler) |
+| Kommandozeile | 16 Woerter, 512 Byte | 256 Woerter, 4 KiB (Shell: Eingabezeile 2048 Zeichen) |
+| Pipe in der Shell / Hintergrund-Jobs | 16 / 8 | 64 / 64 |
+| Kernel-Threads im System | 4096 | 65536 |
+
+Prozess-Eintraege und Thread-Bloecke werden nie freigegeben, sondern wiederverwendet: so koennen Interrupts (Strg+C)
+die Listen ohne BKL durchgehen. Selbsttest: `limittest` (14 Pruefungen, u.a. genau 1024 offene Dateien und Threads,
+100 Prozesse gleichzeitig, 4 MiB Stack).
 
 ### fork mit Copy-on-Write
 

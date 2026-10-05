@@ -3,7 +3,7 @@
 
 #include "user.h"
 
-/* Threads in Programmen: teilen Speicher und Datei-Deskriptoren. Bis zu 16 je Prozess (mit dem ersten und mit
+/* Threads in Programmen: teilen Speicher und Datei-Deskriptoren. Bis zu 1024 je Prozess (mit dem ersten und mit
  * beendeten, noch nicht abgeholten). Jeder neue Thread bekommt einen eigenen Stack von 64 KiB (per mmap, darunter
  * eine ungemappte Luecke als Schutz), thread_join gibt ihn wieder frei.
  *

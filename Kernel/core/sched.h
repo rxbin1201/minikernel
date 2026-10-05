@@ -33,6 +33,7 @@ void *thread_data(const Thread *t);
 void thread_yield(void);
 void thread_sleep_ms(uint64_t ms);
 void thread_exit(void) __attribute__((noreturn)); /* wird auch beim Rueckkehr aus entry aufgerufen */
+void sched_reap(void); /* beendete Threads gleich aufraeumen (mit BKL; sonst tut es der Idle-Thread) */
 
 Thread     *thread_current(void);
 uint32_t    thread_id(const Thread *t);

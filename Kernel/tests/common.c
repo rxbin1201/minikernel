@@ -10,6 +10,9 @@
 #include "drivers/mouse.h"
 #include "lib/utf8.h"
 #include "tests/selftest.h"
+#include "mm/pmm.h"
+#include "mm/heap.h"
+#include "mm/paging.h"
 
 unsigned selftest_ok, selftest_failed;
 
@@ -126,4 +129,18 @@ int run_sh(const char *cmdline)
     int pid = process_spawn("/bin/sh", cmdline, 0);
     int code = 0, faulted = 0;
     return pid > 0 && process_wait(pid, 0, &code, &faulted, 20000) == 0 && !faulted ? code : -1;
+}
+
+int64_t frames_missing(uint64_t frames, uint64_t heap0, uint64_t tables0)
+{
+    int64_t miss = 0;
+    for (int i = 0; i < 50; i++) {
+        sched_reap();
+        uint64_t grown = (heap_total_bytes() - heap0) / 4096 + (paging_table_frames() - tables0); /* Heap gibt nichts zurueck */
+        miss = (int64_t)(frames - pmm_free_frame_count()) - (int64_t)grown;
+        if (miss == 0)
+            break;
+        thread_sleep_ms(10);
+    }
+    return miss;
 }

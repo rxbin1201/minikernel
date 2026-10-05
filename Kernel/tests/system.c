@@ -423,8 +423,7 @@ static void smp_stress(unsigned n)
     check("Stresstest ohne BKL: lief auf mehreren CPUs", cpus >= 2);
     check("Stresstest ohne BKL: kein Block/Frame doppelt vergeben oder ueberschrieben", stress_bad == 0);
     check("Stresstest ohne BKL: Heap konsistent", heap_check());
-    uint64_t grown = (heap_total_bytes() - heap0) / 4096 + (paging_table_frames() - tables0); /* Heap gibt nichts zurueck */
-    check("Stresstest ohne BKL: alle Frames zurueck", frames - pmm_free_frame_count() == grown);
+    check("Stresstest ohne BKL: alle Frames zurueck", frames_missing(frames, heap0, tables0) == 0);
 }
 
 /* Mehrere CPUs: alle gestarteten CPUs laufen, und User-Programme rechnen wirklich gleichzeitig. Dazu laufen einige
@@ -498,8 +497,6 @@ void test_smp(void)
         if (mpids[i] <= 0 || process_wait(mpids[i], 0, &code, &faulted, 20000) != 0 || code != 0 || faulted)
             mok = 0;
     }
-    thread_sleep_ms(50); /* Idle-Thread raeumt Adressraeume und Stacks auf */
-    uint64_t grown = (heap_total_bytes() - heap0) / 4096 + (paging_table_frames() - tables0);
     check("brk/mmap/munmap ohne BKL: mehrere memtest gleichzeitig fehlerfrei", mok);
-    check("brk/mmap/munmap ohne BKL: alle Frames zurueck", frames - pmm_free_frame_count() == grown);
+    check("brk/mmap/munmap ohne BKL: alle Frames zurueck", frames_missing(frames, heap0, tables0) == 0);
 }

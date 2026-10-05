@@ -155,6 +155,12 @@ void test_user(BootInfo *info)
           pid > 0 && process_wait(pid, 0, &code, &faulted, 60000) == 0 && code == 0 && !faulted);
     if (pid > 0 && code != 0)
         kprintf("  mmaptest: Pruefung %d fehlgeschlagen\n", code);
+    /* Grenzen: weit ueber den frueheren festen Tabellen, die neuen Obergrenzen greifen genau */
+    pid = process_spawn("/bin/limittest", "limittest", 0);
+    check("limittest (Deskriptoren, Threads, Prozesse, Stack, Einblendungen, Kommandozeile)",
+          pid > 0 && process_wait(pid, 0, &code, &faulted, 120000) == 0 && code == 0 && !faulted);
+    if (pid > 0 && code != 0)
+        kprintf("  limittest: Pruefung %d fehlgeschlagen\n", code);
     /* MP3 dekodieren (play liest die eingeblendete Datei): 3 s Stereo, 44,1 kHz, zwei Sinustoene */
     {
         void *wav = 0;
@@ -313,12 +319,10 @@ void test_user(BootInfo *info)
     check("Testdateien wieder geloescht", !dir_has("/disk", "O5.TXT", 0) && !dir_has("/disk", "O10.TXT", 0) &&
                                           !dir_has("/disk", "O9.TXT", 0) && !dir_has("/disk", "O11.TXT", 0));
 
-    thread_sleep_ms(100);
-    uint64_t grown = (heap_total_bytes() - heap_before) / 4096 + (paging_table_frames() - tables_before);
-    uint64_t used = frames_before - pmm_free_frame_count();
-    if (used != grown)
-        kprintf("  (%ld Frames weniger frei, davon %lu fuer Heap und Kernel-Page-Tables)\n", (long)used, (unsigned long)grown);
-    check("Keine Frames verloren (Adressraeume/Stacks freigegeben)", used == grown);
+    int64_t missing = frames_missing(frames_before, heap_before, tables_before);
+    if (missing)
+        kprintf("  (%ld Frames fehlen, ohne Heap und Kernel-Page-Tables)\n", (long)missing);
+    check("Keine Frames verloren (Adressraeume/Stacks freigegeben)", missing == 0);
     check("Kernel-Heap konsistent", heap_check());
 }
 

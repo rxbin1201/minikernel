@@ -23,7 +23,11 @@ struct FdObj;
 
 /* User-Speicherlayout (relativ zu USER_BASE = 0x7F8000000000):
  *   ELF-Segmente, dahinter der brk-Heap (waechst bis +32 GiB),
- *   mmap-Bereich +64 GiB .. +256 GiB, Stack: die obersten 64 KiB vor USER_END. */
+ *   mmap-Bereich +64 GiB .. +256 GiB, Stack: unter USER_END, anfangs 64 KiB, waechst bei Bedarf bis 8 MiB.
+ *
+ * Tabellen (Prozesse, Deskriptoren, Threads, Einblendungen) wachsen bei Bedarf; Obergrenzen nur gegen Ausreisser:
+ * 4096 Prozesse, je Prozess 1024 Deskriptoren, 1024 Threads, 1024 Datei- und 1024 Speicher-Einblendungen.
+ * Kommandozeilen bis 4 KiB und 256 Woerter. */
 #define USER_BRK_LIMIT   (USER_BASE + (32ULL << 30))
 #define USER_MMAP_BASE   (USER_BASE + (64ULL << 30))
 #define USER_MMAP_LIMIT  (USER_BASE + (256ULL << 30))
@@ -41,8 +45,11 @@ int process_spawn(const char *path, const char *cmdline, uint32_t parent);
  * Das Kind laeuft mit den Registern aus `f` weiter und bekommt 0 als Rueckgabewert. Liefert im Elternprozess die PID. */
 int process_fork(const SyscallFrame *f);
 
-/* exec: ersetzt das Programm des aktuellen Prozesses. Kehrt nur bei einem Fehler zurueck (dann bleibt alles unveraendert). */
-int process_exec(const char *path, const char *cmdline);
+/* exec: ersetzt das Programm des aktuellen Prozesses. Kehrt nur bei einem Fehler zurueck (dann bleibt alles unveraendert).
+ * release (kmalloc-Speicher oder 0) wird beim Erfolg kurz vor dem Sprung ins neue Programm freigegeben. */
+int process_exec(const char *path, const char *cmdline, void *release);
+
+#define PROCESS_CMDLINE_MAX 4096 /* Kommandozeile fuer spawn/exec (256 Woerter) */
 
 /* Wartet, bis der Prozess beendet ist. `parent` != 0: nur eigene Kinder (sonst -2). 0 = beendet, -1 = Timeout
  * oder unbekannte PID, -4 = unterbrochen. *faulted: 0 = normal, 1 = durch Fehler, 2 = per Ctrl-C/kill beendet.
@@ -97,7 +104,8 @@ int     process_munmap(Process *p, uint64_t addr, uint64_t len);   /* auch Teile
 /* Datei einblenden (SYS_MMAP_FILE): Seiten kommen erst beim Zugriff aus der Datei; privat (Schreiben aendert die Datei
  * nicht). offset seitenausgerichtet. Adresse oder Fehler (ERR_BADF: keine Datei) */
 int64_t process_mmap_file(Process *p, int fd, uint64_t len, uint64_t offset, int writable);
-int     process_file_fault(Process *p, uint64_t addr, int write); /* Seitenfehler auf einer Datei-Seite behoben? */
+/* Fehlende Seite bereitstellen: eingeblendete Datei (laedt sie) oder der Stack (waechst bis 8 MiB). 1 = behoben */
+int     process_page_fault(Process *p, uint64_t addr, int write);
 /* Geteilter Speicher (SYS_SHM): 0 anlegen (bytes, u32 *nummer) -> Adresse, 1 einblenden (nummer) -> Adresse,
  * 2 ausblenden (adresse), 3 Groesse (nummer) -> Bytes */
 int64_t process_shm(Process *p, uint64_t op, uint64_t a, uint64_t b);

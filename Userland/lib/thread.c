@@ -1,8 +1,8 @@
 /* Threads und Stacks, siehe thread.h */
 
 #include "thread.h"
+#include "malloc.h"
 
-#define MAX_THREADS 16
 #define STACK_SIZE  (64 * 1024)
 
 typedef struct {
@@ -10,8 +10,28 @@ typedef struct {
     void    *arg;
 } Start;
 
-static Mutex lock = MUTEX_INIT;
-static void *stacks[MAX_THREADS]; /* Stack je Thread-Nummer, frei bei thread_join */
+static Mutex  lock = MUTEX_INIT;
+static void **stacks; /* Stack je Thread-Nummer, frei bei thread_join; die Tabelle waechst mit den Nummern */
+static int    nstacks;
+
+/* Platz fuer Nummer tid (mit lock); 0 = kein Speicher */
+static int stacks_fit(int tid)
+{
+    if (tid < nstacks)
+        return 1;
+    int n = nstacks ? nstacks : 16;
+    while (n <= tid)
+        n *= 2;
+    void **t = u_malloc(sizeof(void *) * (u64)n);
+    if (!t)
+        return 0;
+    for (int i = 0; i < n; i++)
+        t[i] = i < nstacks ? stacks[i] : 0;
+    u_free(stacks);
+    stacks = t;
+    nstacks = n;
+    return 1;
+}
 
 static void start(void *p)
 {
@@ -30,8 +50,8 @@ int thread_create(ThreadFn fn, void *arg)
     u_threaded = 1;
     mutex_lock(&lock);
     s64 tid = sys_thread_create(start, s, s);
-    if (tid >= 0 && tid < MAX_THREADS)
-        stacks[tid] = (void *)base;
+    if (tid >= 0 && stacks_fit((int)tid))
+        stacks[tid] = (void *)base; /* (ohne Platz bleibt der Stack bis zum Programmende eingeblendet) */
     mutex_unlock(&lock);
     if (tid < 0)
         sys_munmap((void *)base, STACK_SIZE);
@@ -40,18 +60,20 @@ int thread_create(ThreadFn fn, void *arg)
 
 int thread_join(int tid, void **result)
 {
-    if (tid < 0 || tid >= MAX_THREADS)
+    if (tid < 0)
         return ERR_INVAL;
     /* Stack vorher austragen: nach dem Abholen kann ein anderer Thread die Nummer sofort neu vergeben */
     mutex_lock(&lock);
-    void *st = stacks[tid];
-    stacks[tid] = 0;
+    void *st = tid < nstacks ? stacks[tid] : 0;
+    if (tid < nstacks)
+        stacks[tid] = 0;
     mutex_unlock(&lock);
     u64 v = 0;
     s64 r = sys_thread_join(tid, &v);
     if (r != 0) {
         mutex_lock(&lock);
-        stacks[tid] = st;
+        if (tid < nstacks)
+            stacks[tid] = st;
         mutex_unlock(&lock);
         return (int)r;
     }

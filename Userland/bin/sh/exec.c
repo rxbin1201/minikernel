@@ -216,7 +216,8 @@ static int is_script(const char *path)
 /* Programm starten (im Kindprozess). Kehrt nicht zurueck. */
 static void exec_external(int argc, char **argv)
 {
-    char path[512], cmdline[1024];
+    char path[512];
+    static char cmdline[CMD_MAX]; /* im Kindprozess, kurz vor exec: statisch statt auf dem Stack */
     if (resolve_command(argv[0], path, sizeof(path)) != 0) {
         fprintf(2, "%ssh: %s: Befehl nicht gefunden%s\n", ERRC, argv[0], RSTC);
         sys_exit(127);
@@ -376,8 +377,8 @@ static int exec_pipe(Node *n, int bg, const char *desc)
         int st = exec_node(n->items[0]);
         return n->negate ? !st : st;
     }
-    int pids[16], started = 0, first = 0, prev_read = -1;
-    for (int i = 0; i < n->nitems && i < 16; i++) {
+    int pids[MAX_CMDS], started = 0, first = 0, prev_read = -1;
+    for (int i = 0; i < n->nitems && i < MAX_CMDS; i++) {
         int fds[2] = {-1, -1};
         if (i < n->nitems - 1 && sys_pipe(fds) < 0) {
             fprintf(2, "%ssh: keine Pipe mehr moeglich%s\n", ERRC, RSTC);

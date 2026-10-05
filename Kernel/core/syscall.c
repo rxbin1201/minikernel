@@ -26,6 +26,7 @@
 #include "drivers/video.h"
 #include "fs/vfs.h"
 #include "core/service.h"
+#include "mm/heap.h"
 
 #define MSR_EFER   0xC0000080
 #define MSR_STAR   0xC0000081
@@ -194,29 +195,42 @@ static int64_t sys_pipe(uint64_t ufds)
 
 /* ---------- Prozesse ---------- */
 
+/* Kommandozeile (bis PROCESS_CMDLINE_MAX) auf den Heap holen: der Kernel-Stack hat nur 16 KiB */
+static char *get_cmdline(Process *p, uint64_t ucmd, int64_t *err)
+{
+    char *cmd = kmalloc(PROCESS_CMDLINE_MAX);
+    *err = !cmd ? ERR_NOMEM : process_copy_string(p, ucmd, cmd, PROCESS_CMDLINE_MAX) < 0 ? ERR_FAULT : 0;
+    if (*err) {
+        kfree(cmd);
+        return 0;
+    }
+    return cmd;
+}
+
 static int64_t sys_spawn(uint64_t upath, uint64_t ucmd)
 {
     Process *p = process_current();
-    char path[VFS_PATH_MAX], cmd[512];
-    int r = get_path(upath, path);
-    if (r < 0)
+    char path[VFS_PATH_MAX];
+    int64_t r = get_path(upath, path);
+    char *cmd = r < 0 ? 0 : get_cmdline(p, ucmd, &r);
+    if (!cmd)
         return r;
-    if (process_copy_string(p, ucmd, cmd, sizeof(cmd)) < 0)
-        return ERR_FAULT;
     int pid = process_spawn(path, cmd, process_pid(p));
+    kfree(cmd);
     return pid < 0 ? ERR_NOENT : pid;
 }
 
 static int64_t sys_exec(uint64_t upath, uint64_t ucmd)
 {
     Process *p = process_current();
-    char path[VFS_PATH_MAX], cmd[512];
-    int r = get_path(upath, path);
-    if (r < 0)
+    char path[VFS_PATH_MAX];
+    int64_t r = get_path(upath, path);
+    char *cmd = r < 0 ? 0 : get_cmdline(p, ucmd, &r);
+    if (!cmd)
         return r;
-    if (process_copy_string(p, ucmd, cmd, sizeof(cmd)) < 0)
-        return ERR_FAULT;
-    return process_exec(path, cmd); /* kehrt nur bei einem Fehler zurueck */
+    r = process_exec(path, cmd, cmd); /* kehrt nur bei einem Fehler zurueck (beim Erfolg gibt es cmd frei) */
+    kfree(cmd);
+    return r;
 }
 
 static int64_t sys_wait(uint64_t pid, uint64_t ucode, uint64_t flags)
