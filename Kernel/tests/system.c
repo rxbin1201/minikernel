@@ -471,7 +471,9 @@ void test_smp(void)
     }
     kprintf("  (Syscalls waehrenddessen: %lu ohne BKL, %lu mit BKL)\n", (unsigned long)(su1 - su0),
             (unsigned long)(sb1 - sb0));
-    check("burn: Syscalls laufen ueberwiegend ohne BKL (sys_ticks)", su1 - su0 > 1000 && su1 - su0 > 10 * (sb1 - sb0));
+    /* burn fragt die Uhr einmal je Million Schleifendurchlaeufe: wie viele Syscalls das sind, haengt von der Rechenleistung
+     * ab (QEMU ohne KVM: etwa 900-1100). Es zaehlt das Verhaeltnis. */
+    check("burn: Syscalls laufen ueberwiegend ohne BKL (sys_ticks)", su1 - su0 > 200 && su1 - su0 > 10 * (sb1 - sb0));
     uint64_t bkl_ticks = bkl_after - bkl_before;
     kprintf("  (%u x burn 1500 ms: %lu User-Ticks, %u CPU(s) mit mindestens 50; davon %lu Timer-Ticks mit BKL)\n", k,
             (unsigned long)sum, busy, (unsigned long)bkl_ticks);

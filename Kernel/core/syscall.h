@@ -48,7 +48,8 @@
                           * warten_ms (hoechstens 1000): am Leseende einer leeren Pipe so lange auf Daten warten (wacht sofort auf) */
 #define SYS_STATFS    46 /* (pfad, u64 out[2]) -> 0: Groesse und freier Platz in Bytes */
 #define SYS_MOUSEMODE 44 /* (1 = Programm wertet die Maus aus, 0 = Konsole) */
-#define SYS_CLIPBOARD 45 /* (0, buf, max) -> Laenge der Zwischenablage (kopiert hoechstens max Bytes); (1, text, len) -> 0: setzen */
+#define SYS_CLIPBOARD 45 /* (0, buf, max) -> Laenge der Zwischenablage (kopiert hoechstens max Bytes); (1, text, len) -> 0: setzen
+                          * (bis 4 MiB, groesser: ERR_NOMEM) */
 #define SYS_KEYMAP    43 /* (name oder 0, out[16]) -> 0 / ERR_INVAL: Layout setzen (us, de, uk) und/oder abfragen */
 #define SYS_MOUSE     42 /* (MouseInfo*) -> 0: Position, Tasten, Rad (seit dem letzten Aufruf), Zaehler */
 #define SYS_TIME      39 /* () -> Sekunden seit 1970-01-01 (Zeit wie in der RTC, meist Ortszeit), 0 = unbekannt */

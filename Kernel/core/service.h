@@ -8,7 +8,7 @@
  * "annehmen" ab (ohne zu warten). Endet der Anbieter, verschwindet der Dienst; noch nicht angenommene Verbindungen
  * sehen das Ende ihrer Pipes. */
 
-#define SERVICE_NAME_MAX 16
+#define SERVICE_NAME_MAX 64 /* Name mit abschliessender 0; bis zu 256 Dienste mit je 256 wartenden Verbindungen */
 
 int64_t service_register(const char *name);                  /* 0, ERR_EXIST (vergeben), ERR_NOMEM */
 int64_t service_unregister(const char *name);                /* nur der Anbieter */

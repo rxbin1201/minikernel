@@ -88,6 +88,7 @@ typedef unsigned int       u32;
 #define ERR_AGAIN     (-11)
 #define ERR_INTR      (-4)
 #define ERR_BADF      (-9)
+#define ERR_NOMEM     (-12)
 #define ERR_NAMETOOLONG (-36) /* Pfad laenger als PATH_MAX - 1 */
 #define PATH_MAX      1024  /* laengster Pfad (mit der abschliessenden 0), wie im Kernel (VFS_PATH_MAX) */
 #define ERR_NOSYS     (-38)

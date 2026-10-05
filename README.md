@@ -116,13 +116,17 @@ gibt es nur noch gegen Ausreisser - ein Programm, das endlos Dateien oeffnet, so
 | Pipe in der Shell / Hintergrund-Jobs | 16 / 8 | 64 / 64 |
 | Kernel-Threads im System | 4096 | 65536 |
 | Pfadlaenge | 127 Zeichen (laengere still gekuerzt) | 1023 Zeichen, laengere: `ERR_NAMETOOLONG` |
+| Pfad im Fensterprotokoll (`WP_OPEN`, z.B. Doppelklick in den Dateien) | 255 Zeichen | 1023 Zeichen |
+| Zwischenablage | 16 KiB (still gekuerzt) | 4 MiB (groesser: `ERR_NOMEM`) |
+| benannte Dienste / wartende Verbindungen je Dienst / Name | 8 / 8 / 15 Zeichen | 256 / 256 / 63 Zeichen |
 
 Prozess-Eintraege und Thread-Bloecke werden nie freigegeben, sondern wiederverwendet: so koennen Interrupts (Strg+C)
 die Listen ohne BKL durchgehen. Pfade: `VFS_PATH_MAX` (Kernel) und `PATH_MAX` (Userland, `user.h`) sind 1024; die
 initrd speichert ihre Knoten weiter mit 256 Zeichen (mehr kann tar nicht). Frueher liess `vfs_normalize` zu lange
 Teile stillschweigend weg - ein zu langer Pfad konnte so auf eine andere Datei zeigen. Selbsttest: `limittest`
-(20 Pruefungen, u.a. genau 1024 offene Dateien und Threads, 100 Prozesse gleichzeitig, 4 MiB Stack, ein Pfad mit gut
-1000 Zeichen auf FAT, 1023 Zeichen erlaubt, 1024 abgelehnt).
+(25 Pruefungen, u.a. genau 1024 offene Dateien und Threads, 100 Prozesse gleichzeitig, 4 MiB Stack, ein Pfad mit gut
+1000 Zeichen auf FAT, 1023 Zeichen erlaubt, 1024 abgelehnt, 1 MiB Zwischenablage, 20 Dienste mit 40 wartenden
+Verbindungen).
 
 ### fork mit Copy-on-Write
 

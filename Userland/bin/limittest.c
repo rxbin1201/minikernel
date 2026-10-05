@@ -1,10 +1,13 @@
 #include "libc.h"
+#include "malloc.h"
 #include "thread.h"
 
 /* Prueft, dass die frueheren festen Grenzen weg sind und die neuen Obergrenzen (nur gegen Ausreisser) greifen:
  * offene Deskriptoren (frueher 32, jetzt 1024), Threads (16 -> 1024), gleichzeitige Prozesse (64 -> 4096), der Stack
  * (64 KiB -> waechst bis 8 MiB), Datei-Einblendungen (32 -> 1024), geteilter Speicher (80 -> 1024), Kommandozeilen
- * (16 Woerter / 512 Byte -> 256 / 4 KiB) und Pfade (128 -> 1023 Zeichen; laengere werden abgelehnt, nicht gekuerzt).
+ * (16 Woerter / 512 Byte -> 256 / 4 KiB), Pfade (128 -> 1023 Zeichen; laengere werden abgelehnt, nicht gekuerzt),
+ * die Zwischenablage (16 KiB -> 4 MiB) und benannte Dienste (8 mit je 8 wartenden Verbindungen, Namen bis 15 Zeichen
+ * -> 256 mit je 256, Namen bis 63 Zeichen).
  * Exit-Code 0 = alles in Ordnung, sonst die Nummer der ersten fehlgeschlagenen Pruefung. */
 
 static int failed, checks;
@@ -222,6 +225,50 @@ void _start(int argc, char **argv)
     for (int i = 3; i >= 0; i--)
         sys_unlink(d[i]);
     check(20, sys_stat(d[0], &st) == ERR_NOENT);
+
+    /* 9. Zwischenablage: 1 MiB hinein und wieder heraus; mehr als 4 MiB wird abgelehnt (nicht still gekuerzt) */
+    u64 big = 1 << 20;
+    char *clip = u_malloc(big), *back = u_malloc(big);
+    ok = clip && back;
+    for (u64 i = 0; ok && i < big; i++)
+        clip[i] = (char)('a' + i % 23);
+    ok = ok && sys_clipboard_set(clip, big) == 0 && sys_clipboard_get(0, 0) == (s64)big &&
+         sys_clipboard_get(back, big) == (s64)big && memcmp(clip, back, big) == 0;
+    check(21, ok);
+    check(22, sys_clipboard_set(clip, (4u << 20) + 1) == ERR_NOMEM && sys_clipboard_get(0, 0) == (s64)big);
+    sys_clipboard_set("", 0);
+    u_free(clip);
+    u_free(back);
+
+    /* 10. Dienste: 20 mit langen Namen (frueher 8, bis 15 Zeichen), 40 wartende Verbindungen auf einen (frueher 8) */
+    static char sname[20][64];
+    ok = 1;
+    for (int i = 0; i < 20; i++) {
+        snprintf(sname[i], sizeof(sname[i]), "limittest-dienst-mit-einem-recht-langen-namen-nummer-%02d", i);
+        ok = ok && strlen(sname[i]) > 50 && sys_service_register(sname[i]) == 0;
+    }
+    check(23, ok);
+    int cfd[40][2], afd[3];
+    ok = 1;
+    for (int i = 0; ok && i < 40; i++)
+        ok = sys_service_connect(sname[7], cfd[i]) == 0;
+    int accepted = 0;
+    while (sys_service_accept(sname[7], afd) == 0) {
+        char x = (char)accepted;
+        ok = ok && sys_write(cfd[accepted][1], &x, 1) == 1 && sys_read(afd[0], &x, 1) == 1 && x == (char)accepted;
+        sys_close(afd[0]);
+        sys_close(afd[1]);
+        accepted++;
+    }
+    check(24, ok && accepted == 40);
+    for (int i = 0; i < 40; i++) {
+        sys_close(cfd[i][0]);
+        sys_close(cfd[i][1]);
+    }
+    ok = 1;
+    for (int i = 0; i < 20; i++)
+        ok = ok && sys_service_unregister(sname[i]) == 0;
+    check(25, ok && sys_service_connect(sname[3], cfd[0]) == ERR_NOENT);
 
     if (!failed)
         printf("[limittest] alle %d Pruefungen OK\n", checks);

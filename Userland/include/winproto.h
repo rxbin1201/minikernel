@@ -45,7 +45,7 @@ enum { WPC_MOVE = 1, WPC_MINIMIZE, WPC_ZOOM, WPC_CLOSE }; /* MOVE: mit der gedru
 
 #define WPF_RESIZABLE 1 /* Groesse aenderbar (und zoombar) */
 #define WPF_FRAMELESS 2 /* ohne Titelleiste (das Programm zeichnet seine Knoepfe selbst) */
-#define WP_PATH_MAX   256
+#define WP_PATH_MAX   1024 /* Pfad bei WP_OPEN (mit 0), wie PATH_MAX; kommt in 32 Stuecken zu 32 Byte */
 
 typedef struct {
     int  type;

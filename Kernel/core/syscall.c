@@ -762,9 +762,9 @@ static void syscall_do(SyscallFrame *f)
     case SYS_CLIPBOARD: {
         Process *p = process_current();
         uint64_t len = f->rdx;
-        if (len > 16383)
-            len = 16383;
-        if (!process_user_range_ok(p, f->rsi, len, f->rdi == 0)) {
+        if (f->rdi != 0 && len > CONSOLE_CLIP_MAX) {
+            ret = ERR_NOMEM; /* zu gross fuer die Zwischenablage */
+        } else if (!process_user_range_ok(p, f->rsi, len, f->rdi == 0)) {
             ret = ERR_FAULT;
         } else if (f->rdi == 0) {
             uint32_t n;
@@ -772,8 +772,7 @@ static void syscall_do(SyscallFrame *f)
             memcpy((void *)f->rsi, c, n < len ? n : len);
             ret = n;
         } else {
-            console_clipboard_set((const char *)f->rsi, (uint32_t)len);
-            ret = 0;
+            ret = console_clipboard_set((const char *)f->rsi, (uint32_t)len) == 0 ? 0 : ERR_NOMEM;
         }
         break;
     }
