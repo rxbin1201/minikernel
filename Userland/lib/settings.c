@@ -90,3 +90,61 @@ int settings_save(const Settings *s)
     sys_close((int)fd);
     return w == n ? 0 : -1;
 }
+
+/* ---------- zuletzt verbundenes WLAN ---------- */
+
+static const char *wlan_file(char *buf, int max)
+{
+    const char *p = settings_file();
+    if (!p[0])
+        return 0;
+    snprintf(buf, max, "%s", p);
+    char *slash = strrchr(buf, '/');
+    if (!slash)
+        return 0;
+    snprintf(slash + 1, (u64)(max - (slash + 1 - buf)), "wlan.cfg");
+    return buf;
+}
+
+int wlan_cfg_load(char ssid[33], char pass[65])
+{
+    char fn[72], buf[256];
+    ssid[0] = pass[0] = 0;
+    if (!wlan_file(fn, sizeof(fn)))
+        return -1;
+    s64 fd = sys_open(fn, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    s64 n = sys_read((int)fd, buf, sizeof(buf) - 1);
+    sys_close((int)fd);
+    if (n <= 0)
+        return -1;
+    buf[n] = 0;
+    for (char *line = buf; *line;) {
+        char *end = line;
+        while (*end && *end != '\n')
+            end++;
+        char save = *end;
+        *end = 0;
+        if (strncmp(line, "ssid=", 5) == 0 && strlen(line + 5) <= 32)
+            strcpy(ssid, line + 5);
+        else if (strncmp(line, "pass=", 5) == 0 && strlen(line + 5) <= 64)
+            strcpy(pass, line + 5);
+        line = save ? end + 1 : end;
+    }
+    return ssid[0] ? 0 : -1;
+}
+
+int wlan_cfg_save(const char *ssid, const char *pass)
+{
+    char fn[72], buf[160];
+    if (!wlan_file(fn, sizeof(fn)) || strchr(ssid, '\n') || strchr(pass, '\n'))
+        return -1;
+    int n = snprintf(buf, sizeof(buf), "# zuletzt verbundenes WLAN (Desktop, wlan connect)\nssid=%s\npass=%s\n", ssid, pass);
+    s64 fd = sys_open(fn, O_WRONLY | O_CREAT | O_TRUNC);
+    if (fd < 0)
+        return -1;
+    s64 w = sys_write((int)fd, buf, (u64)n);
+    sys_close((int)fd);
+    return w == n ? 0 : -1;
+}

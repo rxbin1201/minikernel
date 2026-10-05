@@ -1,4 +1,5 @@
 #include "libc.h"
+#include "settings.h"
 
 /* wlan [info]   WLAN-Karte (Intel AX200) und Bluetooth: was der Kernel erkannt hat, die zerlegte Firmware aus
  *               /firmware und das Bluetooth-Geraet am USB (8087:0029).
@@ -6,7 +7,9 @@
  * wlan load     Stufe 2b/3: Firmware laden, ALIVE, erste Befehle (NVM, Land, Suche einrichten)
  * wlan scan     Stufe 4: Netze suchen (laedt die Firmware, falls noetig) und nach Signalstaerke sortiert zeigen
  * wlan connect NAME [PASSWORT]
- *               Stufe 5: mit dem Netz verbinden (offen oder WPA2-PSK); danach holt sich wlan0 per DHCP eine Adresse
+ *               Stufe 5: mit dem Netz verbinden (offen oder WPA2-PSK); danach holt sich wlan0 per DHCP eine Adresse.
+ *               Klappt es, merkt sich wlan.cfg das Netz (der Desktop verbindet sich beim Start damit);
+ *               "wlan connect" ohne Namen nimmt das gemerkte
  * wlan disconnect, wlan status */
 
 static const char *const sec_name[] = {"offen", "WEP", "WPA", "WPA2", "WPA3", "WPA2/3"};
@@ -90,21 +93,26 @@ void _start(int argc, char **argv)
         sys_exit(r == 0 ? 0 : 1);
     }
     if (argc > 1 && strcmp(argv[1], "connect") == 0) {
-        if (argc < 3) {
-            fprintf(2, "Aufruf: wlan connect NAME [PASSWORT]   (Namen mit Leerzeichen in Anfuehrungszeichen)\n");
-            sys_exit(1);
-        }
         WlanConnect c;
         memset(&c, 0, sizeof(c));
-        if (strlen(argv[2]) > 32 || (argc > 3 && strlen(argv[3]) > 64)) {
-            fprintf(2, "wlan: Name hoechstens 32, Passwort hoechstens 64 Zeichen\n");
-            sys_exit(1);
+        if (argc < 3) {
+            if (wlan_cfg_load(c.ssid, c.pass) != 0) {
+                fprintf(2, "Aufruf: wlan connect NAME [PASSWORT]   (Namen mit Leerzeichen in Anfuehrungszeichen)\n");
+                sys_exit(1);
+            }
+        } else {
+            if (strlen(argv[2]) > 32 || (argc > 3 && strlen(argv[3]) > 64)) {
+                fprintf(2, "wlan: Name hoechstens 32, Passwort hoechstens 64 Zeichen\n");
+                sys_exit(1);
+            }
+            strcpy(c.ssid, argv[2]);
+            if (argc > 3)
+                strcpy(c.pass, argv[3]);
         }
-        strcpy(c.ssid, argv[2]);
-        if (argc > 3)
-            strcpy(c.pass, argv[3]);
         printf("Verbinde mit '%s' ...\n", c.ssid);
         s64 r = sys_wlan_connect(&c);
+        if (r == 0)
+            wlan_cfg_save(c.ssid, c.pass);
         memset(&c, 0, sizeof(c));
         WlanStatus s;
         sys_wlan_status(&s);

@@ -364,8 +364,14 @@ Milchglas ueber einem berechneten Farbverlauf:
   startet, Pfeile waehlen); die Lupe oeffnet dasselbe. Das Fenstermenue listet alle Fenster und die Befehle fuer das
   aktive (minimieren, zoomen, anordnen, schliessen)
 - **Uhrzeit und Datum:** ein Klick oeffnet die Uhr
-- **System:** Netzwerk, Lautstaerke (Klick: stumm/zurueck, Mausrad: lauter/leiser) und ^ (Ueber MiniKernel, Neu
-  starten, Ausschalten, Zur Konsole)
+- **System:** Netzwerk (Kabel), WLAN, Lautstaerke (Klick: stumm/zurueck, Mausrad: lauter/leiser) und ^ (Ueber
+  MiniKernel, Neu starten, Ausschalten, Zur Konsole)
+- **WLAN** (nur mit AX200 und Firmware; `desktop/wlan.c`): das Symbol zeigt die Signalstaerke (blass: verbindet bzw.
+  noch ohne Adresse, durchgestrichen: getrennt). Das Menue nennt Zustand, Netz, IP-Adresse und Signal, darunter die
+  gefundenen Netze (je Name der staerkste AP, mit Signal und Verschluesselung), "Trennen" und "Netze suchen". Ein Klick
+  auf ein offenes Netz verbindet, bei WPA2 fragt das Menue nach dem Passwort (Enter verbindet). Suchen und Verbinden
+  laufen in einem eigenen Thread, die Oberflaeche wartet nie. Das zuletzt verbundene Netz steht in `wlan.cfg` neben
+  `settings.cfg` (Passwort im Klartext, wie bei wpa_supplicant); damit verbindet sich der Desktop beim Start
 
 Menues oeffnen sich nach oben ueber ihrem Knopf, Esc schliesst sie. Fenster haben runde Ecken, weiche Schatten und
 eine helle Titelleiste mit dem Titel links und rechts Minimieren, Maximieren/Wiederherstellen, Schliessen (wie bei

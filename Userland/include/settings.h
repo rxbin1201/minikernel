@@ -20,4 +20,9 @@ int         settings_load(Settings *s);       /* 0 = gelesen; sonst gelten die S
 int         settings_save(const Settings *s); /* 0 = gespeichert */
 const char *settings_file(void);              /* Pfad der Datei, "" = kein Ort zum Speichern */
 
+/* Zuletzt verbundenes WLAN (wlan.cfg neben settings.cfg, Zeilen ssid=... und pass=...): der Desktop verbindet sich
+ * beim Start damit. Das Passwort steht im Klartext darin - wie bei wpa_supplicant.conf. */
+int wlan_cfg_load(char ssid[33], char pass[65]); /* 0 = gelesen */
+int wlan_cfg_save(const char *ssid, const char *pass);
+
 #endif
