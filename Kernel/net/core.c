@@ -410,10 +410,20 @@ int net_register(const NetDev *d)
     Iface *f = &net_ifs[net_nif];
     memset(f, 0, sizeof(*f));
     f->dev = *d;
-    ksnprintf(f->dev.name, sizeof(f->dev.name), "eth%d", net_nif);
+    if (!d->name[0]) /* sonst behaelt das Geraet seinen Namen (wlan0) */
+        ksnprintf(f->dev.name, sizeof(f->dev.name), "eth%d", net_nif);
     f->want_dhcp = !cmdline_has("nodhcp") && !(net_nif == 0 && static_from_cmdline(f));
     net_nif++;
     return 0;
+}
+
+void net_set_mac(const char *name, const uint8_t mac[6])
+{
+    mutex_lock(&net_lock);
+    for (int i = 0; i < net_nif; i++)
+        if (strcmp(net_ifs[i].dev.name, name) == 0)
+            memcpy(net_ifs[i].dev.mac, mac, 6);
+    mutex_unlock(&net_lock);
 }
 
 void net_init(void)

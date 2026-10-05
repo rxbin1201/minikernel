@@ -175,7 +175,8 @@ static void pad(Sink *s, char c, int n)
         put(s, c);
 }
 
-static void number(Sink *s, u64 v, int negative, int base, int upper, int width, int left, int zero)
+/* prefix: Vorzeichen oder "0x" (bei %#x) - steht vor den Nullen zum Auffuellen und zaehlt zur Breite */
+static void number(Sink *s, u64 v, const char *prefix, int base, int upper, int width, int left, int zero)
 {
     char digits[24];
     int n = 0;
@@ -185,11 +186,11 @@ static void number(Sink *s, u64 v, int negative, int base, int upper, int width,
         v /= (u64)base;
     } while (v);
 
-    int len = n + (negative ? 1 : 0);
+    int len = n + (int)strlen(prefix);
     if (!left && !zero)
         pad(s, ' ', width - len);
-    if (negative)
-        put(s, '-');
+    while (*prefix)
+        put(s, *prefix++);
     if (!left && zero)
         pad(s, '0', width - len);
     while (n)
@@ -207,12 +208,14 @@ static void format(Sink *s, const char *fmt, va_list ap)
         }
         fmt++;
 
-        int left = 0, zero = 0, width = 0, precision = -1, longs = 0;
+        int left = 0, zero = 0, alt = 0, width = 0, precision = -1, longs = 0;
         for (;; fmt++) {
             if (*fmt == '-')
                 left = 1;
             else if (*fmt == '0')
                 zero = 1;
+            else if (*fmt == '#')
+                alt = 1;
             else
                 break;
         }
@@ -243,20 +246,19 @@ static void format(Sink *s, const char *fmt, va_list ap)
         case 'd':
         case 'i': {
             s64 v = longs ? va_arg(ap, long long) : va_arg(ap, int);
-            number(s, v < 0 ? (u64)-v : (u64)v, v < 0, 10, 0, width, left, zero);
+            number(s, v < 0 ? (u64)-v : (u64)v, v < 0 ? "-" : "", 10, 0, width, left, zero);
             break;
         }
         case 'u':
         case 'x':
         case 'X': {
             u64 v = longs ? va_arg(ap, unsigned long long) : va_arg(ap, unsigned int);
-            number(s, v, 0, *fmt == 'u' ? 10 : 16, *fmt == 'X', width, left, zero);
+            const char *pre = alt && v && *fmt != 'u' ? (*fmt == 'X' ? "0X" : "0x") : "";
+            number(s, v, pre, *fmt == 'u' ? 10 : 16, *fmt == 'X', width, left, zero);
             break;
         }
         case 'p':
-            put(s, '0');
-            put(s, 'x');
-            number(s, (u64)va_arg(ap, void *), 0, 16, 0, 0, 0, 0);
+            number(s, (u64)va_arg(ap, void *), "0x", 16, 0, width, left, 0);
             break;
         case 'c':
             pad(s, ' ', left ? 0 : width - 1);

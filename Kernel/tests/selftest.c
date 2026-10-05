@@ -80,6 +80,7 @@ void run_selftests(BootInfo *info)
     RUN("script", test_script());
     RUN("tools", test_tools());
     RUN("graphics", test_graphics());
+    RUN("crypto", test_crypto());
     RUN("net", test_net());
     if (test_filter && strstr_(test_filter, "netpeer")) /* nur ausdruecklich (braucht die Test-Gegenstelle) */
         RUN("netpeer", test_netpeer());

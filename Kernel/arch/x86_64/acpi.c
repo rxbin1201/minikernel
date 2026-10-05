@@ -38,6 +38,8 @@ typedef struct {
 } __attribute__((packed)) Madt;
 
 static AcpiInfo info;
+static const SdtHeader *root_tbl; /* XSDT bzw. RSDT, fuer acpi_table */
+static int root_xsdt;
 
 /* Aus der FADT (Signatur "FACP") und dem _S5_-Objekt der DSDT */
 static struct {
@@ -211,6 +213,8 @@ int acpi_init(void *rsdp_ptr)
         return -1;
     }
 
+    root_tbl = root;
+    root_xsdt = use_xsdt;
     uint32_t entry_size = use_xsdt ? 8 : 4;
     uint32_t entries    = (root->length - sizeof(SdtHeader)) / entry_size;
     const uint8_t *tbl  = (const uint8_t *)root + sizeof(SdtHeader);
@@ -242,6 +246,24 @@ int acpi_init(void *rsdp_ptr)
 
     kprintf("acpi: LAPIC @ %#lx, %d CPU(s), %d IOAPIC(s), %d Override(s)\n",
             info.lapic_addr, info.cpu_count, info.ioapic_count, info.iso_count);
+    return 0;
+}
+
+const void *acpi_table(const char *sig, uint32_t *len)
+{
+    if (!root_tbl)
+        return 0;
+    uint32_t entries = (root_tbl->length - sizeof(SdtHeader)) / (root_xsdt ? 8 : 4);
+    const uint8_t *tbl = (const uint8_t *)root_tbl + sizeof(SdtHeader);
+    for (uint32_t i = 0; i < entries; i++) {
+        uint64_t addr = root_xsdt ? *(const uint64_t *)(tbl + i * 8) : *(const uint32_t *)(tbl + i * 4);
+        const SdtHeader *h = map_table(addr);
+        if (h && memcmp(h->signature, sig, 4) == 0) {
+            if (len)
+                *len = h->length;
+            return h;
+        }
+    }
     return 0;
 }
 

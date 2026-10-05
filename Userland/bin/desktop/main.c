@@ -38,6 +38,11 @@ static void close_menu(void)
 
 void do_action(int a)
 {
+    if (is_wlan_action(a)) { /* WLAN-Menue: bleibt meist offen (Passwort, Fortschritt) */
+        if (!wlan_action(a))
+            close_menu();
+        return;
+    }
     close_menu();
     if (a >= A_WINSEL && a < A_WINSEL + MAXW) { /* Fenster aus dem Fenstermenue nach vorn */
         if (wins[a - A_WINSEL].used)
@@ -380,6 +385,7 @@ void _start(int argc, char **argv)
     W = gfx_screen.w;
     H = gfx_screen.h;
     now_us = sys_time_us();
+    wlan_init(); /* vor desk_init: der WLAN-Knopf gehoert zur Taskleiste */
     desk_init();
     make_background();
     sys_service_register("desktop"); /* Grafikprogramme aus dem Terminal finden ihn so */
@@ -446,6 +452,7 @@ void _start(int argc, char **argv)
         }
         power_tick();
         net_tick();
+        wlan_tick();
         anim_tick();
         draw_all(); /* direkt nach dem Bildwechsel: was sich geaendert hat, steht bis zum naechsten Bild */
         /* Programme, die auf ein Bild warten (gfx_vsync), schon jetzt weiterzeichnen lassen - sonst kaeme ihr naechstes

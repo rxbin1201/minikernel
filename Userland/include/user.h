@@ -294,8 +294,63 @@ typedef struct {
     unsigned       fw_cpus, fw_capa, fw_api_flags, fw_scan_channels, fw_major, fw_minor, fw_local;
     char           fw_name[64], fw_human[64];
     char           state[64];
+    unsigned       wake_done, wake_clock, wake_access, wake_us, gp_after, cnvi_id;
+    unsigned       wake_ready, hwif_after, prph_load, prph_cpu1;
+    unsigned       load_done, load_alive, load_ms, load_int, load_status, reset_before, reset_after;
+    unsigned       wfpm_before, wfpm_after, int_after, st_load, st_umac_pc, st_lmac_pc;
+    unsigned       alive_len, alive_cmd, alive_group, alive_status;
+    unsigned       dmar_found, dmar_flags, iommu_units, iommu_active, iommu_off; /* IOMMU (VT-d) vor dem Start */
+    unsigned       iommu_gsts[4], iommu_pmen[4];
+    unsigned       ltr_before, ltr_after;
+    unsigned       pci_cmd, bridges_fixed;
+    unsigned       init_step, init_complete, rx_packets; /* Stufe 3: 5 = fertig */
+    unsigned char  mac[6], mac_pad[2];
+    unsigned       nvm_flags, nvm_version, nvm_board, nvm_hw_addrs, nvm_sku, nvm_tx_chains, nvm_rx_chains, nvm_lar;
+    unsigned       nvm_channels;
+    unsigned       mcc, mcc_status, mcc_channels; /* Land (zwei Buchstaben), Status, erlaubte Kanaele */
+    unsigned       scan_ms, scan_frames, scan_nets;
 } WlanInfo;
+/* Gefundenes Netz (SYS_WLAN 4) */
+enum { WLAN_SEC_OPEN, WLAN_SEC_WEP, WLAN_SEC_WPA, WLAN_SEC_WPA2, WLAN_SEC_WPA3, WLAN_SEC_WPA2_3 };
+typedef struct {
+    unsigned char  bssid[6];
+    signed char    signal; /* dBm */
+    unsigned char  channel, security, ssid_len;
+    unsigned short seen;
+    char           ssid[33];
+    unsigned char  pad[3];
+} WlanNet;
 static inline s64 sys_wlan_info(WlanInfo *wi)                 { return syscall3(SYS_WLAN, 0, (u64)wi, 0); }
+static inline s64 sys_wlan_wake(void)                         { return syscall3(SYS_WLAN, 1, 0, 0); }
+static inline s64 sys_wlan_load(void)                         { return syscall3(SYS_WLAN, 2, 0, 0); }
+static inline s64 sys_wlan_scan(void)                         { return syscall3(SYS_WLAN, 3, 0, 0); } /* -> Zahl */
+static inline s64 sys_wlan_net(u64 i, WlanNet *n)             { return syscall3(SYS_WLAN, 4, i, (u64)n); }
+/* Verbinden (SYS_WLAN 5): wartet, bis die Verbindung steht oder scheitert (Grund in WlanStatus) */
+typedef struct {
+    char          ssid[33];
+    char          pass[65];  /* WPA2: Passphrase 8..63 Zeichen oder 64 Hex-Zeichen; offen: leer */
+    unsigned char bssid[6];  /* 0: der staerkste AP mit diesem Namen */
+} WlanConnect;
+enum { WLAN_ST_IDLE, WLAN_ST_CONNECTING, WLAN_ST_CONNECTED, WLAN_ST_FAILED };
+enum { WLAN_STEP_NONE, WLAN_STEP_FW, WLAN_STEP_SCAN, WLAN_STEP_PMK, WLAN_STEP_CONTEXT, WLAN_STEP_STATION,
+       WLAN_STEP_QUEUES, WLAN_STEP_PROTECT, WLAN_STEP_AUTH, WLAN_STEP_ASSOC, WLAN_STEP_KEYS, WLAN_STEP_DONE };
+typedef struct {
+    unsigned       state, step;          /* WLAN_ST_*, WLAN_STEP_* */
+    int            error;
+    unsigned short status_code, reason; /* Status von Auth/Assoc, Grund einer Trennung durch den AP */
+    char           ssid[33];
+    unsigned char  bssid[6];
+    unsigned char  channel, security;
+    signed char    signal;
+    unsigned char  pad[6];
+    unsigned       aid, rate_kbps, connect_ms;
+    unsigned       pad2;
+    u64            rx_frames, tx_frames, rx_dropped, tx_failed, rekeys;
+    char           msg[96];
+} WlanStatus;
+static inline s64 sys_wlan_connect(const WlanConnect *c)      { return syscall3(SYS_WLAN, 5, (u64)c, 0); }
+static inline s64 sys_wlan_disconnect(void)                   { return syscall3(SYS_WLAN, 6, 0, 0); }
+static inline s64 sys_wlan_status(WlanStatus *s)              { return syscall3(SYS_WLAN, 7, (u64)s, 0); }
 static inline s64 sys_read(int fd, void *buf, u64 len)        { return syscall3(SYS_READ, fd, (u64)buf, len); }
 static inline s64 sys_close(int fd)                           { return syscall3(SYS_CLOSE, fd, 0, 0); }
 static inline s64 sys_closefrom(int fd)                       { return syscall3(SYS_CLOSEFROM, fd, 0, 0); } /* alle ab fd schliessen */

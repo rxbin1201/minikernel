@@ -36,6 +36,9 @@ int acpi_init(void *rsdp);
 
 const AcpiInfo *acpi_info(void);
 
+/* Tabelle mit der Signatur sig (4 Zeichen, z.B. "DMAR") samt Kopf, Laenge nach *len (darf 0 sein); 0 = keine */
+const void *acpi_table(const char *sig, uint32_t *len);
+
 /* Ausschalten (ACPI S5) bzw. Neustart. Beides versucht mehrere Wege nacheinander (ACPI-Register, dann bekannte
  * Emulator-/Chipsatz-Ports) und kehrt nur zurueck, wenn keiner geholfen hat. Interrupts werden abgeschaltet. */
 void acpi_shutdown(void);

@@ -32,7 +32,8 @@ struct NetDev {
 void net_init(void);
 
 /* --- fuer Treiber --- */
-int  net_register(const NetDev *d); /* Kopie wird abgelegt; -1, wenn kein Platz */
+int  net_register(const NetDev *d); /* Kopie wird abgelegt; -1, wenn kein Platz. Ohne Namen: eth0, eth1, ... */
+void net_set_mac(const char *name, const uint8_t mac[6]); /* MAC-Adresse erst spaeter bekannt (WLAN: nach der Firmware) */
 void net_wake(void);                /* aus dem Interrupt-Handler: Pakete oder Verbindungswechsel - Netzwerk-Thread wecken */
 uint64_t net_irq_count(void);
 void e1000_probe(void);
