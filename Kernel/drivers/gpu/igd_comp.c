@@ -20,7 +20,8 @@
 #include "lib/string.h"
 #include "mm/pmm.h"
 
-#define COMP_SURFS   96
+#define COMP_SURFS   640         /* angemeldete Flaechen (der Desktop: je Fenster bis zu 4); ob sie in den GGTT-Bereich
+                                  * passen, entscheidet ihre Groesse - sonst setzt die CPU zusammen */
 #define COMP_CHUNK   64          /* Auftraege, die auf einmal aus dem Programm geholt werden */
 #define COMP_MAX_W   4096        /* Pixel: Breite in Bytes passt in den Surface State (16384) */
 #define COMP_MAX_H   16384

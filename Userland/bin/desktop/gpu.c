@@ -9,7 +9,7 @@
 int gpu_mode;
 FrameProf prof;
 
-#define GMAX 96
+#define GMAX (4 * MAXW + 16) /* je Fenster Bild und zwei Schattenstreifen, dazu Bildschirm und Hintergrund */
 static struct {
     u32 *px;
     int  handle; /* 0 = nicht angemeldet (dann nur CPU) */

@@ -11,7 +11,7 @@
 
 #include "desktop.h"
 
-#define MAXPEND 8
+#define MAXPEND 32 /* gestartete Programme, deren Fenster noch nicht da ist */
 #define MAXREAP 32
 
 typedef struct {

@@ -119,6 +119,8 @@ gibt es nur noch gegen Ausreisser - ein Programm, das endlos Dateien oeffnet, so
 | Pfad im Fensterprotokoll (`WP_OPEN`, z.B. Doppelklick in den Dateien) | 255 Zeichen | 1023 Zeichen |
 | Zwischenablage | 16 KiB (still gekuerzt) | 4 MiB (groesser: `ERR_NOMEM`) |
 | benannte Dienste / wartende Verbindungen je Dienst / Name | 8 / 8 / 15 Zeichen | 256 / 256 / 63 Zeichen |
+| Fenster im Desktop / gerade startende Programme | 16 / 8 | 128 / 32 (Taskleiste: so viele minimierte, wie passen; Fenstermenue: die 30 obersten) |
+| GPU-Flaechen zum Zusammensetzen | 96 | 640 (passen sie nicht in den GGTT-Bereich, setzt die CPU zusammen) |
 
 Prozess-Eintraege und Thread-Bloecke werden nie freigegeben, sondern wiederverwendet: so koennen Interrupts (Strg+C)
 die Listen ohne BKL durchgehen. Pfade: `VFS_PATH_MAX` (Kernel) und `PATH_MAX` (Userland, `user.h`) sind 1024; die
