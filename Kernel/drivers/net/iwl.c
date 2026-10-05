@@ -34,6 +34,11 @@
 /* Bits in CSR_HW_IF_CONFIG_REG */
 #define HWIF_NIC_READY       (1u << 22)
 #define HWIF_PREPARE         (1u << 27)
+#define HWIF_HAP_WAKE_L1A    (1u << 19)
+#define CSR_GIO_CHICKEN_BITS 0x100
+#define GIO_L1A_NO_L0S_RX    (1u << 23)
+#define GIO_DIS_L0S_TIMER    (1u << 29)
+#define CSR_DBG_HPET_MEM     0x240
 
 enum { TLV_SEC_RT = 19, TLV_NUM_OF_CPU = 27, TLV_API_CHANGES_SET = 29, TLV_ENABLED_CAPABILITIES = 30,
        TLV_N_SCAN_CHANNELS = 31, TLV_PAGING = 32, TLV_FW_VERSION = 36 };
@@ -190,15 +195,25 @@ int iwl_wake_test(void)
     wr(CSR_HW_IF_CONFIG_REG, rd(CSR_HW_IF_CONFIG_REG) | HWIF_PREPARE);
     info.wake_ready = WAIT_UNTIL(rd(CSR_HW_IF_CONFIG_REG) & HWIF_NIC_READY, 150);
     info.hwif_after = rd(CSR_HW_IF_CONFIG_REG);
+    kprintf("iwl: 1 bereit %s, HW_IF_CONFIG %#x, GP_CNTRL %#x\n", info.wake_ready ? "ja" : "NEIN", info.hwif_after,
+            rd(CSR_GP_CNTRL));
     /* 2. per Software zuruecksetzen und kurz warten */
     wr(CSR_RESET, rd(CSR_RESET) | RESET_SW);
     thread_sleep_ms(6);
-    /* 3. Initialisierung fertig, Takt */
+    kprintf("iwl: 2 nach Reset: RESET %#x, HW_IF_CONFIG %#x, GP_CNTRL %#x\n", rd(CSR_RESET), rd(CSR_HW_IF_CONFIG_REG),
+            rd(CSR_GP_CNTRL));
+    /* 3. Grundeinstellungen nach dem Reset: kein L0s beim Empfang in L1a, Weck-Bit fuer L1a, Hilfsregister
+     *    (wie beim Einschalten durch einen Treiber), dann Initialisierung fertig und auf den Takt warten */
+    wr(CSR_GIO_CHICKEN_BITS, rd(CSR_GIO_CHICKEN_BITS) | GIO_L1A_NO_L0S_RX | GIO_DIS_L0S_TIMER);
+    wr(CSR_DBG_HPET_MEM, rd(CSR_DBG_HPET_MEM) | 0xFFFF0000u);
+    wr(CSR_HW_IF_CONFIG_REG, rd(CSR_HW_IF_CONFIG_REG) | HWIF_HAP_WAKE_L1A);
     wr(CSR_GP_CNTRL, rd(CSR_GP_CNTRL) | GP_INIT_DONE);
-    info.wake_clock = WAIT_UNTIL(rd(CSR_GP_CNTRL) & GP_MAC_CLOCK_READY, 25);
+    uint64_t tc = time_us();
+    info.wake_clock = WAIT_UNTIL(rd(CSR_GP_CNTRL) & GP_MAC_CLOCK_READY, 200);
+    kprintf("iwl: 3 Takt %s nach %u us, GP_CNTRL %#x, GIO_CHICKEN %#x\n", info.wake_clock ? "bereit" : "NICHT bereit",
+            (uint32_t)(time_us() - tc), rd(CSR_GP_CNTRL), rd(CSR_GIO_CHICKEN_BITS));
     if (!info.wake_clock) {
         info.gp_after = rd(CSR_GP_CNTRL);
-        kprintf("iwl: kein Takt nach INIT_DONE (GP_CNTRL %#x)\n", info.gp_after);
         return -2;
     }
     wr(CSR_GP_CNTRL, rd(CSR_GP_CNTRL) | GP_MAC_ACCESS_REQ);
