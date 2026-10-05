@@ -247,8 +247,7 @@ static int start_shell(void)
         sys_dup2(in[0], 0);
         sys_dup2(out[1], 1);
         sys_dup2(out[1], 2);
-        for (int fd = 3; fd < 32; fd++) /* auch die Pipes zum Desktop nicht vererben */
-            sys_close(fd);
+        sys_closefrom(3); /* auch die Pipes zum Desktop nicht vererben */
         sys_exec("/bin/sh", "sh");
         sys_exit(127);
     }

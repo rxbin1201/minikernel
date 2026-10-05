@@ -94,6 +94,7 @@
 #define SYS_FUTEX_WAIT    72 /* (u32 *adr, wert, timeout_ms; 0 = ohne Grenze) -> 0 geweckt, ERR_AGAIN *adr != wert,
                               * ERR_TIMEDOUT; nur Threads desselben Prozesses */
 #define SYS_FUTEX_WAKE    73 /* (u32 *adr, anzahl) -> geweckte Threads */
+#define SYS_CLOSEFROM     75 /* (fd) -> 0: alle Deskriptoren ab fd schliessen (vor exec: nichts erben, was man nicht kennt) */
 #define SYS_MMAP_FILE     74 /* (fd | schreibbar << 32, laenge, offset) -> Adresse: Datei einblenden, Seiten werden erst beim
                               * Zugriff gelesen; privat (Schreiben aendert die Datei nicht), offset Vielfaches von 4096,
                               * hinter dem Dateiende Nullen; freigeben mit munmap. ERR_BADF: fd ist keine Datei */

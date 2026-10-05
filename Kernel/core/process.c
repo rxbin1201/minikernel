@@ -1751,6 +1751,17 @@ int process_fd_close(Process *p, int fd)
     return 0;
 }
 
+int process_fd_closefrom(Process *p, int first)
+{
+    for (int fd = first < 0 ? 0 : first; fd < p->nfds; fd++)
+        if (p->fds[fd]) {
+            FdObj *o = p->fds[fd];
+            p->fds[fd] = 0;
+            fdobj_unref(o);
+        }
+    return 0;
+}
+
 int process_fd_dup(Process *p, int old_fd)
 {
     FdObj *o = process_fd_get(p, old_fd);

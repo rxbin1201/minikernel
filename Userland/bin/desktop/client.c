@@ -133,12 +133,12 @@ void launch_app(const char *path, const char *cmdline, int action, const char *n
     write_all(ev[1], &hello, sizeof(hello)); /* liegt bereit, bevor das Programm nachsieht */
     s64 pid = sys_fork();
     if (pid == 0) {
-        sys_dup2(ev[0], 30); /* erst nach oben, falls ein Ende schon auf 3 oder 4 liegt */
-        sys_dup2(rq[1], 31);
-        sys_dup2(30, WP_FD_IN);
-        sys_dup2(31, WP_FD_OUT);
-        for (int fd = 5; fd < 32; fd++) /* keine Pipes anderer Fenster erben */
-            sys_close(fd);
+        /* Die beiden Enden auf 3 und 4 legen. Liegt das Schreibende schon auf 3, erst wegkopieren (frueher ging das
+         * ueber die festen Nummern 30 und 31 - ab etwa 13 Fenstern lagen dort schon Pipes anderer Fenster) */
+        int out = rq[1] == WP_FD_IN ? (int)sys_dup(rq[1]) : rq[1];
+        sys_dup2(ev[0], WP_FD_IN);
+        sys_dup2(out, WP_FD_OUT);
+        sys_closefrom(WP_FD_OUT + 1); /* keine Pipes anderer Fenster erben (es koennen Hunderte sein) */
         sys_setpgid(0, 0);
         sys_exec(path, cmdline);
         sys_exit(127);

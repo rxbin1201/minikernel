@@ -81,6 +81,7 @@ typedef unsigned int       u32;
 #define SYS_FUTEX_WAIT    72
 #define SYS_FUTEX_WAKE    73
 #define SYS_MMAP_FILE     74
+#define SYS_CLOSEFROM     75
 #define ERR_NOENT     (-2)
 #define ERR_IO        (-5)
 #define ERR_EXIST     (-17)
@@ -283,6 +284,7 @@ static inline s64 sys_mountinfo(u64 index, MountInfo *info) { return syscall3(SY
 static inline s64 sys_usbinfo(u64 index, UsbInfo *info)      { return syscall3(SYS_USBINFO, index, (u64)info, 0); }
 static inline s64 sys_read(int fd, void *buf, u64 len)        { return syscall3(SYS_READ, fd, (u64)buf, len); }
 static inline s64 sys_close(int fd)                           { return syscall3(SYS_CLOSE, fd, 0, 0); }
+static inline s64 sys_closefrom(int fd)                       { return syscall3(SYS_CLOSEFROM, fd, 0, 0); } /* alle ab fd schliessen */
 static inline s64 sys_readdir(const char *path, u64 index, DirEnt *ent) { return syscall3(SYS_READDIR, (u64)path, index, (u64)ent); }
 static inline s64 sys_spawn(const char *path, const char *cmdline)      { return syscall3(SYS_SPAWN, (u64)path, (u64)cmdline, 0); }
 static inline s64 sys_wait(int pid, int *code)                { return syscall3(SYS_WAIT, pid, (u64)code, 0); }

@@ -443,6 +443,7 @@ static void syscall_do(SyscallFrame *f)
     case SYS_GETTID:     ret = process_thread_self(process_current()); break;
     case SYS_FUTEX_WAIT: ret = process_futex_wait(process_current(), f->rdi, (uint32_t)f->rsi, f->rdx); break;
     case SYS_FUTEX_WAKE: ret = process_futex_wake(process_current(), f->rdi, (uint32_t)f->rsi); break;
+    case SYS_CLOSEFROM: ret = process_fd_closefrom(process_current(), (int)f->rdi); break;
     case SYS_MMAP_FILE:
         ret = process_mmap_file(process_current(), (int)(uint32_t)f->rdi, f->rsi, f->rdx, (int)((f->rdi >> 32) & 1));
         break;
