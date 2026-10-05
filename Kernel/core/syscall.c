@@ -307,8 +307,8 @@ static void sys_sleep(uint64_t ms)
 
 static void syscall_do(SyscallFrame *f);
 
-/* Syscalls, die nur Daten des eigenen Prozesses anfassen (ein Prozess hat genau einen Thread, sein Speicher und der
- * User-Teil seiner Seitentabellen gehoeren nur ihm) oder Teile mit eigenem Lock (PMM, Heap, Scheduler, Uhr): sie
+/* Syscalls, die nur Daten des eigenen Prozesses anfassen (brk/mmap/munmap nur mit einem Thread: sein Speicher und der
+ * User-Teil seiner Seitentabellen gehoeren dann nur ihm) oder Teile mit eigenem Lock (PMM, Heap, Scheduler, Uhr): sie
  * laufen ohne Big Kernel Lock und damit auf allen CPUs gleichzeitig. 1 = erledigt, 0 = normaler Weg mit BKL.
  * Ein Kill wird hier nicht geprueft; das holt der naechste Timer-Tick oder Syscall mit BKL nach. */
 static int syscall_unlocked(SyscallFrame *f)
@@ -324,9 +324,14 @@ static int syscall_unlocked(SyscallFrame *f)
             return 0; /* ein anderer Thread wartet: wechseln geht nur mit BKL */
         ret = 0;
         break;
-    case SYS_BRK:    ret = process_brk(p, f->rdi); break;
-    case SYS_MMAP:   ret = process_mmap(p, f->rdi); break;
-    case SYS_MUNMAP: ret = process_munmap(p, f->rdi, f->rsi); break;
+    case SYS_BRK: /* mit mehreren Threads mit BKL: sonst koennten zwei gleichzeitig dieselben Tabellen aendern */
+    case SYS_MMAP:
+    case SYS_MUNMAP:
+        if (process_threads(p) != 1)
+            return 0;
+        ret = f->rax == SYS_BRK ? process_brk(p, f->rdi)
+            : f->rax == SYS_MMAP ? process_mmap(p, f->rdi) : process_munmap(p, f->rdi, f->rsi);
+        break;
     case SYS_CPUINFO: {
         Cpu *c = smp_cpu((unsigned)f->rdi);
         if (!process_user_range_ok(p, f->rsi, sizeof(CpuInfo), 1))
@@ -407,6 +412,23 @@ static void syscall_do(SyscallFrame *f)
     case SYS_EXEC:     ret = sys_exec(f->rdi, f->rsi); break;
     case SYS_PIPE:     ret = sys_pipe(f->rdi); break;
     case SYS_SHM:      ret = process_shm(process_current(), f->rdi, f->rsi, f->rdx); break;
+    case SYS_THREAD_CREATE: ret = process_thread_create(process_current(), f->rdi, f->rsi, f->rdx); break;
+    case SYS_THREAD_EXIT:   process_thread_exit(process_current(), f->rdi);
+    case SYS_THREAD_JOIN: {
+        Process *p = process_current();
+        uint64_t v = 0;
+        if (f->rsi && !process_user_range_ok(p, f->rsi, 8, 1)) {
+            ret = ERR_FAULT;
+            break;
+        }
+        ret = process_thread_join(p, (int)f->rdi, &v);
+        if (ret == 0 && f->rsi && process_user_range_ok(p, f->rsi, 8, 1)) /* waehrend des Wartens vielleicht ausgeblendet */
+            *(uint64_t *)f->rsi = v;
+        break;
+    }
+    case SYS_GETTID:     ret = process_thread_self(process_current()); break;
+    case SYS_FUTEX_WAIT: ret = process_futex_wait(process_current(), f->rdi, (uint32_t)f->rsi, f->rdx); break;
+    case SYS_FUTEX_WAKE: ret = process_futex_wake(process_current(), f->rdi, (uint32_t)f->rsi); break;
     case SYS_GPUCOMP:  ret = igd_comp_sys(process_pid(process_current()), f->rdi, f->rsi, f->rdx); break;
     case SYS_SERVICE:  ret = sys_service(f->rdi, f->rsi, f->rdx); break;
     case SYS_DUP:      ret = process_fd_dup(process_current(), (int)f->rdi); break;
@@ -566,7 +588,7 @@ static void syscall_do(SyscallFrame *f)
     case SYS_SENDTO:
     case SYS_RECVFROM: {
         Process *p = process_current();
-        FdObj *o = process_fd_get(p, (int)f->rdi);
+        FdObj *o = process_fd_hold(p, (int)f->rdi); /* recvfrom blockiert: Referenz gegen close aus einem anderen Thread */
         SockMsg m;
         if (!o || o->kind != FD_UDP) {
             ret = ERR_BADF;
@@ -584,6 +606,8 @@ static void syscall_do(SyscallFrame *f)
                     memcpy((void *)f->rsi, &m, sizeof(m));
             }
         }
+        if (o)
+            fdobj_unref(o);
         break;
     }
     case SYS_SOCKPORT: {
@@ -694,8 +718,10 @@ static void syscall_do(SyscallFrame *f)
         break;
     }
     case SYS_FDAVAIL: {
-        FdObj *o = process_fd_get(process_current(), (int)f->rdi);
+        FdObj *o = process_fd_hold(process_current(), (int)f->rdi);
         ret = o ? fdobj_wait(o, f->rsi > 1000 ? 1000 : f->rsi) : ERR_BADF;
+        if (o)
+            fdobj_unref(o);
         break;
     }
     case SYS_STATFS: {

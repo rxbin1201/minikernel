@@ -84,6 +84,15 @@
                             3 ausfuehren (GpuOp *, anzahl) -> 0, erst zurueck, wenn alles fertig ist;
                             4 Messwert melden (0 CPU / 1 GPU, mikrosekunden | pixel << 32) */
 #define SYS_KLOG      61 /* (u64 *pos, buf, max) -> Bytes aus dem Kernel-Log ab *pos (wird weitergezaehlt), 0 = Ende */
+/* Threads (process.h): teilen Speicher und Deskriptoren; Nummer 0..15, 0 = erster Thread */
+#define SYS_THREAD_CREATE 68 /* (entry, stack_top, arg) -> Nummer: neuer Thread startet bei entry(arg) mit rsp = stack_top - 8;
+                              * ERR_AGAIN = alle 16 Plaetze belegt (auch beendete, nicht abgeholte) */
+#define SYS_THREAD_EXIT   69 /* (wert): nur diesen Thread beenden; mit dem letzten endet der Prozess (Code 0) */
+#define SYS_THREAD_JOIN   70 /* (nummer, u64 *wert) -> 0: wartet auf das Ende, holt den Wert ab, gibt die Nummer frei */
+#define SYS_GETTID        71 /* () -> eigene Nummer */
+#define SYS_FUTEX_WAIT    72 /* (u32 *adr, wert, timeout_ms; 0 = ohne Grenze) -> 0 geweckt, ERR_AGAIN *adr != wert,
+                              * ERR_TIMEDOUT; nur Threads desselben Prozesses */
+#define SYS_FUTEX_WAKE    73 /* (u32 *adr, anzahl) -> geweckte Threads */
 
 /* Argument fuer SYS_SENDTO/SYS_RECVFROM (gleiches Layout in Userland/user.h) */
 typedef struct {
@@ -187,6 +196,7 @@ typedef struct {
 typedef struct {
     uint32_t pid, ppid, pgid, state;
     char     name[32];
+    uint32_t threads, pad; /* laufende Threads */
 } ProcInfo;
 
 /* Gesicherte Register beim syscall (Layout muss zu den Pushes in syscall_entry.S passen, niedrigste Adresse zuerst).

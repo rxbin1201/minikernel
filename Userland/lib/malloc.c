@@ -1,10 +1,37 @@
 /* First-Fit-Allocator, siehe malloc.h */
 
 #include "malloc.h"
+#include "thread.h"
 
 static UBlock *u_first, *u_last;
+static Mutex   u_lock = MUTEX_INIT;
+volatile int   u_threaded; /* thread_create setzt es: ab dann sperren (vorher kostet es nichts) */
+
+static void *malloc_locked(u64 n);
+static void  free_locked(void *p);
 
 void *u_malloc(u64 n)
+{
+    if (!u_threaded)
+        return malloc_locked(n);
+    mutex_lock(&u_lock);
+    void *p = malloc_locked(n);
+    mutex_unlock(&u_lock);
+    return p;
+}
+
+void u_free(void *p)
+{
+    if (!u_threaded) {
+        free_locked(p);
+        return;
+    }
+    mutex_lock(&u_lock);
+    free_locked(p);
+    mutex_unlock(&u_lock);
+}
+
+static void *malloc_locked(u64 n)
 {
     if (!n)
         return 0;
@@ -47,7 +74,7 @@ void *u_malloc(u64 n)
     return nb + 1;
 }
 
-void u_free(void *p)
+static void free_locked(void *p)
 {
     if (!p)
         return;

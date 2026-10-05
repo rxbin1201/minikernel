@@ -144,8 +144,11 @@ static void schedule_locked(void)
     if (next->kstack_top)
         gdt_set_kernel_stack(next->kstack_top);
     AddressSpace *target = next->as ? next->as : as_kernel();
-    if (target != as_current())
+    c->cur_as = target;
+    if (target != as_current()) {
         as_switch(target);
+        __atomic_add_fetch(&c->tlb_flushes, 1, __ATOMIC_RELEASE); /* User-TLB ist leer (process.c: tlb_retire) */
+    }
 
     __asm__ __volatile__("fxsave64 (%0)" : : "r"(FPU(prev)) : "memory");
     __asm__ __volatile__("fxrstor64 (%0)" : : "r"(FPU(next)) : "memory");
