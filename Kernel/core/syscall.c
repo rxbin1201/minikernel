@@ -522,8 +522,8 @@ static void syscall_do(SyscallFrame *f)
     }
     case SYS_WLAN: {
         WlanInfo wi;
-        if (f->rdi == 1) { /* Stufe 2a: aufwecken */
-            int r = iwl_wake_test();
+        if (f->rdi == 1 || f->rdi == 2) { /* Stufe 2a: aufwecken, 2b: Firmware laden */
+            int r = f->rdi == 1 ? iwl_wake_test() : iwl_load_fw();
             ret = r == -1 ? ERR_NOENT : r < 0 ? ERR_IO : 0;
         } else if (f->rdi != 0)
             ret = ERR_INVAL;

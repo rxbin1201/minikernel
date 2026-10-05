@@ -2,7 +2,8 @@
 
 /* wlan [info]   WLAN-Karte (Intel AX200) und Bluetooth: was der Kernel erkannt hat, die zerlegte Firmware aus
  *               /firmware und das Bluetooth-Geraet am USB (8087:0029).
- * wlan wake     Stufe 2a: Karte aufwecken (Takt, Zugriff auf die inneren Register), eine Kennung lesen */
+ * wlan wake     Stufe 2a: Karte aufwecken (Takt, Zugriff auf die inneren Register), eine Kennung lesen
+ * wlan load     Stufe 2b: Firmware laden und auf ihre erste Nachricht (ALIVE) warten */
 
 static const char *hw_type(unsigned rev)
 {
@@ -13,6 +14,22 @@ static const char *hw_type(unsigned rev)
 void _start(int argc, char **argv)
 {
     WlanInfo wi;
+    if (argc > 1 && strcmp(argv[1], "load") == 0) {
+        s64 r = sys_wlan_load();
+        sys_wlan_info(&wi);
+        if (r == ERR_NOENT) {
+            printf("wlan: keine Karte\n");
+            sys_exit(1);
+        }
+        printf("Firmware gestartet, gewartet %u ms, CSR_INT %#010x, Status %u\n", wi.load_ms, wi.load_int, wi.load_status);
+        if (wi.load_alive)
+            printf("Erste Nachricht: Befehl %#x, Gruppe %#x, Laenge %u, Status %#x%s\n", wi.alive_cmd, wi.alive_group,
+                   wi.alive_len, wi.alive_status,
+                   wi.alive_cmd == 1 && wi.alive_status == 0xCAFE ? "  -> ALIVE, die Firmware laeuft" : "");
+        else
+            printf("Keine Nachricht der Firmware (Einzelheiten: dmesg | grep iwl)\n");
+        sys_exit(r == 0 ? 0 : 1);
+    }
     if (argc > 1 && strcmp(argv[1], "wake") == 0) {
         s64 r = sys_wlan_wake();
         sys_wlan_info(&wi);

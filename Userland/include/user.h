@@ -296,9 +296,12 @@ typedef struct {
     char           state[64];
     unsigned       wake_done, wake_clock, wake_access, wake_us, gp_after, cnvi_id;
     unsigned       wake_ready, hwif_after, prph_load, prph_cpu1;
+    unsigned       load_done, load_alive, load_ms, load_int, load_status;
+    unsigned       alive_len, alive_cmd, alive_group, alive_status;
 } WlanInfo;
 static inline s64 sys_wlan_info(WlanInfo *wi)                 { return syscall3(SYS_WLAN, 0, (u64)wi, 0); }
 static inline s64 sys_wlan_wake(void)                         { return syscall3(SYS_WLAN, 1, 0, 0); }
+static inline s64 sys_wlan_load(void)                         { return syscall3(SYS_WLAN, 2, 0, 0); }
 static inline s64 sys_read(int fd, void *buf, u64 len)        { return syscall3(SYS_READ, fd, (u64)buf, len); }
 static inline s64 sys_close(int fd)                           { return syscall3(SYS_CLOSE, fd, 0, 0); }
 static inline s64 sys_closefrom(int fd)                       { return syscall3(SYS_CLOSEFROM, fd, 0, 0); } /* alle ab fd schliessen */

@@ -15,6 +15,7 @@
 #include "mm/paging.h"
 #include "arch/x86_64/apic.h"
 #include "core/sched.h"
+#include "mm/pmm.h"
 
 #define CSR_HW_IF_CONFIG_REG 0x000
 #define CSR_GP_CNTRL         0x024
@@ -49,6 +50,13 @@ enum { TLV_SEC_RT = 19, TLV_NUM_OF_CPU = 27, TLV_API_CHANGES_SET = 29, TLV_ENABL
 #define SEP_PAGING    0xAAAABBBBu
 
 static WlanInfo         info;
+/* Laufzeit-Abschnitte der Firmware (zeigen in die initrd): 0 LMAC, 1 UMAC, 2 Paging; Daten ohne die Zieladresse */
+#define MAX_SEC 64
+static struct {
+    const uint8_t *data;
+    uint32_t       len;
+} sec[3][MAX_SEC];
+static int nsec[3];
 static volatile uint8_t *regs;
 
 static uint32_t rd(uint32_t off)
@@ -117,6 +125,11 @@ static void parse_fw(void)
             else {
                 *(part == 0 ? &info.fw_lmac : part == 1 ? &info.fw_umac : &info.fw_paging) += 1;
                 info.fw_bytes += l - 4;
+                if (nsec[part] < MAX_SEC) { /* in den Puffer kommen nur die Daten (die Zieladresse kennt die Karte) */
+                    sec[part][nsec[part]].data = v + 4;
+                    sec[part][nsec[part]].len = l - 4;
+                    nsec[part]++;
+                }
             }
         } else if (type == TLV_NUM_OF_CPU && l >= 4) {
             info.fw_cpus = le32(v);
@@ -250,5 +263,178 @@ int iwl_wake_test(void)
 int iwl_info(WlanInfo *out)
 {
     *out = info;
+    return 0;
+}
+
+/* ---------- Stufe 2b: Firmware laden ("wlan load") ----------
+ *
+ * Bei dieser Familie liest die Karte die Firmware selbst per DMA: der Treiber legt jeden Abschnitt in einen eigenen
+ * Puffer, dazu Empfangsringe (freie Puffer, benutzte Puffer, Status) und eine Befehlswarteschlange, und beschreibt das
+ * alles in der "Context Info". Deren Adresse kommt nach CSR_CTXT_INFO_BA; UREG_CPU_INIT_RUN startet die Karte. Die
+ * erste Nachricht der Firmware ist ALIVE: sie landet im ersten Empfangspuffer, und die Firmware zaehlt im Status
+ * (closed_rb_num) mit - das reicht zum Erkennen, ohne Interrupts. Alles im RAM ist 1:1 eingeblendet (physisch = virtuell). */
+
+#define CSR_INT              0x008
+#define CSR_FH_INT_STATUS    0x010
+#define CSR_CTXT_INFO_BA     0x040
+#define PRPH_WADDR           0x444
+#define PRPH_WDAT            0x44C
+#define UREG_CPU_INIT_RUN    0xA05C44
+#define RFH_Q0_FRBDCB_WIDX_TRG 0x1C80 /* Schreibzeiger der freien Empfangspuffer (Queue 0) */
+
+#define RX_RING   64   /* Empfangspuffer zu je 4 KiB */
+#define CMD_RING  32   /* Befehlswarteschlange (TFDs zu 256 Byte) */
+#define TFD_SIZE  256
+
+typedef struct __attribute__((packed)) {
+    uint16_t mac_id, version, size, reserved;
+} CtxtVersion;
+
+typedef struct {
+    CtxtVersion version;
+    uint32_t    control_flags, control_reserved;
+    uint64_t    reserved0;
+    uint64_t    free_rbd_addr, used_rbd_addr, status_wr_ptr; /* Empfang */
+    uint64_t    cmd_queue_addr;                             /* Befehle */
+    uint8_t     cmd_queue_size, cmd_reserved[7];
+    uint32_t    reserved1[4];
+    uint64_t    core_dump_addr;
+    uint32_t    core_dump_size, dump_reserved;
+    uint32_t    reserved2[4];
+    uint64_t    pnvm_addr;
+    uint32_t    pnvm_size, pnvm_reserved;
+    uint32_t    reserved3[16];
+    uint64_t    early_debug_addr;
+    uint32_t    early_debug_size, edbg_reserved;
+    uint32_t    reserved4[16];
+    uint64_t    umac_img[64], lmac_img[64], virtual_img[64];
+    uint32_t    reserved5[16];
+} CtxtInfo;
+_Static_assert(__builtin_offsetof(CtxtInfo, free_rbd_addr) == 24, "Context Info: Empfang");
+_Static_assert(__builtin_offsetof(CtxtInfo, cmd_queue_addr) == 48, "Context Info: Befehle");
+_Static_assert(__builtin_offsetof(CtxtInfo, umac_img) == 272, "Context Info: Abschnitte");
+_Static_assert(sizeof(CtxtInfo) == 1872, "Context Info: Groesse");
+
+#define CTXT_TFD_FORMAT_LONG (1u << 8)
+#define CTXT_RB_CB_SIZE_POS  4
+#define CTXT_RB_SIZE_POS     9
+#define CTXT_RB_SIZE_4K      0x4
+
+static void *dma(uint64_t bytes)
+{
+    uint64_t pages = (bytes + 4095) / 4096, f = pmm_alloc_frames(pages ? pages : 1);
+    if (f)
+        memset((void *)f, 0, pages * 4096);
+    return (void *)f;
+}
+
+static void prph_write(uint32_t addr, uint32_t val)
+{
+    wr(PRPH_WADDR, (addr & 0xFFFFFF) | (3u << 24));
+    wr(PRPH_WDAT, val);
+}
+
+static int ilog2(uint32_t x)
+{
+    int n = 0;
+    while (x > 1) {
+        x >>= 1;
+        n++;
+    }
+    return n;
+}
+
+int iwl_load_fw(void)
+{
+    if (!info.present || !regs)
+        return -1;
+    if (!info.fw_found)
+        return -4;
+    info.load_done = 1;
+    info.load_alive = 0;
+    if (iwl_wake_test() == -2) /* Bereitschaft, Reset, Grundeinstellungen, Takt (Zugriff wird wieder abgegeben) */
+        return -2;
+
+    /* Firmware-Abschnitte, Empfang, Befehle, Context Info */
+    CtxtInfo *ci = dma(sizeof(CtxtInfo));
+    uint64_t *free_rbd = dma(RX_RING * 8);
+    uint32_t *used_rbd = dma(RX_RING * 4);
+    uint16_t *status = dma(64);
+    uint8_t *cmdq = dma(CMD_RING * TFD_SIZE);
+    static uint8_t *rb[RX_RING];
+    if (!ci || !free_rbd || !used_rbd || !status || !cmdq)
+        return -5;
+    for (int i = 0; i < RX_RING; i++) {
+        if (!rb[i] && !(rb[i] = dma(4096)))
+            return -5;
+        free_rbd[i] = (uint64_t)rb[i] | (uint64_t)(i + 1); /* Kennung (vid) 1..64 in den unteren Bits */
+    }
+    uint64_t *img[3] = {ci->lmac_img, ci->umac_img, ci->virtual_img};
+    for (int p = 0; p < 3; p++)
+        for (int i = 0; i < nsec[p]; i++) {
+            uint8_t *b = dma(sec[p][i].len);
+            if (!b)
+                return -5;
+            memcpy(b, sec[p][i].data, sec[p][i].len);
+            img[p][i] = (uint64_t)b;
+        }
+    ci->version.mac_id = (uint16_t)rd(CSR_HW_REV);
+    ci->version.version = 0;
+    ci->version.size = (uint16_t)(sizeof(CtxtInfo) / 4);
+    ci->control_flags = CTXT_TFD_FORMAT_LONG | ((uint32_t)ilog2(RX_RING) << CTXT_RB_CB_SIZE_POS) |
+                        (CTXT_RB_SIZE_4K << CTXT_RB_SIZE_POS);
+    ci->free_rbd_addr = (uint64_t)free_rbd;
+    ci->used_rbd_addr = (uint64_t)used_rbd;
+    ci->status_wr_ptr = (uint64_t)status;
+    ci->cmd_queue_addr = (uint64_t)cmdq;
+    ci->cmd_queue_size = (uint8_t)(ilog2(CMD_RING) - 3);
+
+    /* Adresse uebergeben, freie Puffer melden, starten */
+    wr(CSR_INT, 0xFFFFFFFFu);
+    wr(CSR_FH_INT_STATUS, 0xFFFFFFFFu);
+    wr(CSR_CTXT_INFO_BA, (uint32_t)(uint64_t)ci);
+    wr(CSR_CTXT_INFO_BA + 4, (uint32_t)((uint64_t)ci >> 32));
+    wr(CSR_GP_CNTRL, rd(CSR_GP_CNTRL) | GP_MAC_ACCESS_REQ);
+    int access = WAIT_UNTIL((rd(CSR_GP_CNTRL) & (GP_MAC_CLOCK_READY | GP_GOING_TO_SLEEP)) == GP_MAC_CLOCK_READY, 25);
+    wr(RFH_Q0_FRBDCB_WIDX_TRG, RX_RING & ~7u);
+    prph_write(UREG_CPU_INIT_RUN, 1);
+    wr(CSR_GP_CNTRL, rd(CSR_GP_CNTRL) & ~GP_MAC_ACCESS_REQ);
+    kprintf("iwl: Firmware gestartet (Context Info %#lx, %d+%d+%d Abschnitte, Zugriff %s)\n", (unsigned long)(uint64_t)ci,
+            nsec[0], nsec[1], nsec[2], access ? "ok" : "NICHT bekommen");
+
+    /* auf ALIVE warten: der Status zaehlt die gefuellten Empfangspuffer */
+    uint64_t t0 = time_us();
+    uint32_t last_int = 0;
+    while (time_us() - t0 < 2000000) {
+        uint32_t ci_int = rd(CSR_INT);
+        if (ci_int != last_int) {
+            kprintf("iwl:   nach %u ms: CSR_INT %#x, FH_INT %#x, Status %u\n", (uint32_t)((time_us() - t0) / 1000), ci_int,
+                    rd(CSR_FH_INT_STATUS), *(volatile uint16_t *)status);
+            last_int = ci_int;
+        }
+        if (*(volatile uint16_t *)status) {
+            info.load_alive = 1;
+            break;
+        }
+        thread_sleep_ms(1);
+    }
+    info.load_ms = (uint32_t)((time_us() - t0) / 1000);
+    info.load_int = rd(CSR_INT);
+    info.load_status = *(volatile uint16_t *)status;
+    if (!info.load_alive) {
+        kprintf("iwl: keine Nachricht der Firmware nach %u ms (CSR_INT %#x, GP_CNTRL %#x)\n", info.load_ms, info.load_int,
+                rd(CSR_GP_CNTRL));
+        return -3;
+    }
+    /* erste Nachricht: welcher Puffer (vid), dann Laenge, Befehl, Gruppe; bei ALIVE (1) der Status 0xCAFE */
+    uint32_t vid = *(volatile uint32_t *)used_rbd & 0xFFF;
+    const uint8_t *pkt = vid >= 1 && vid <= RX_RING ? rb[vid - 1] : rb[0];
+    info.alive_len = le32(pkt) & 0x3FFF;
+    info.alive_cmd = pkt[4];
+    info.alive_group = pkt[5];
+    info.alive_status = pkt[8] | pkt[9] << 8;
+    kprintf("iwl: erste Nachricht nach %u ms: Puffer %u, Laenge %u, Befehl %#x, Gruppe %#x, Status %#x%s\n",
+            info.load_ms, vid, info.alive_len, info.alive_cmd, info.alive_group, info.alive_status,
+            info.alive_cmd == 1 && info.alive_status == 0xCAFE ? " - ALIVE, Firmware laeuft" : "");
     return 0;
 }

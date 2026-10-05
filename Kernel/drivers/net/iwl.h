@@ -25,10 +25,14 @@ typedef struct {
     uint32_t gp_after, cnvi_id;               /* GP_CNTRL danach, Kennung des CNVi (Peripherie-Register) */
     uint32_t wake_ready, hwif_after;          /* 1 = NIC_READY blieb stehen, 2 = erst nach PREPARE; HW_IF_CONFIG */
     uint32_t prph_load, prph_cpu1;            /* Peripherie-Register: UREG_UCODE_LOAD_STATUS, SB_CPU_1_STATUS */
+    /* Stufe 2b (SYS_WLAN 2, "wlan load"): Firmware laden, auf die erste Nachricht warten */
+    uint32_t load_done, load_alive, load_ms, load_int, load_status;
+    uint32_t alive_len, alive_cmd, alive_group, alive_status; /* erste Nachricht; ALIVE: Befehl 1, Status 0xCAFE */
 } WlanInfo;
 
 void iwl_probe(void);
 int  iwl_info(WlanInfo *out); /* 0 = gefuellt (auch ohne Karte: dann present = 0) */
+int  iwl_load_fw(void);       /* Stufe 2b; 0 = erste Nachricht da, -3 keine, -4 keine Firmware, -5 kein Speicher */
 int  iwl_wake_test(void);     /* Stufe 2a; 0 = Zugriff bekommen, -1 = keine Karte, -2 kein Takt, -3 kein Zugriff */
 
 #endif
