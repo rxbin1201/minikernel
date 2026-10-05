@@ -29,6 +29,7 @@ typedef struct {
     uint32_t load_done, load_alive, load_ms, load_int, load_status;
     uint32_t reset_before, reset_after;       /* CSR_RESET vor und nach dem Freigeben des inneren Prozessors */
     uint32_t wfpm_before, wfpm_after, int_after; /* WFPM_CTRL_REG vor/nach ENABLE_WFPM, CSR_INT nach den Lesezugriffen */
+    uint32_t st_load, st_umac_pc, st_lmac_pc; /* zuletzt: Ladestatus, Befehlszaehler UMAC/LMAC */
     uint32_t alive_len, alive_cmd, alive_group, alive_status; /* erste Nachricht; ALIVE: Befehl 1, Status 0xCAFE */
 } WlanInfo;
 

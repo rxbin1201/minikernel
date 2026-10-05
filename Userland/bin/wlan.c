@@ -27,7 +27,8 @@ void _start(int argc, char **argv)
                    wi.alive_len, wi.alive_status,
                    wi.alive_cmd == 1 && wi.alive_status == 0xCAFE ? "  -> ALIVE, die Firmware laeuft" : "");
         else
-            printf("Keine Nachricht der Firmware (Einzelheiten: dmesg | grep iwl)\n");
+            printf("Keine Nachricht der Firmware: Ladestatus %#x, Befehlszaehler UMAC %#x, LMAC %#x\n"
+                   "(Verlauf: dmesg | grep iwl)\n", wi.st_load, wi.st_umac_pc, wi.st_lmac_pc);
         sys_exit(r == 0 ? 0 : 1);
     }
     if (argc > 1 && strcmp(argv[1], "wake") == 0) {

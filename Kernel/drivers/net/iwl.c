@@ -382,6 +382,30 @@ static int ilog2(uint32_t x)
     return n;
 }
 
+#define UREG_UMAC_CURRENT_PC  0xA05C18
+#define UREG_LMAC1_CURRENT_PC 0xA05C1C
+#define SB_CPU_2_STATUS       0xA01E34
+#define CSR_UCODE_DRV_GP1     0x054
+
+/* Zustand der Firmware ins Log: Ladestatus, Befehlszaehler beider Prozessoren, Status der CPUs, Uebergabe-Register */
+static void fw_state(uint32_t ms)
+{
+    wr(CSR_GP_CNTRL, rd(CSR_GP_CNTRL) | GP_MAC_ACCESS_REQ);
+    if (!WAIT_UNTIL((rd(CSR_GP_CNTRL) & (GP_MAC_CLOCK_READY | GP_GOING_TO_SLEEP)) == GP_MAC_CLOCK_READY, 25)) {
+        kprintf("iwl:   %u ms: kein Zugriff (GP_CNTRL %#x)\n", ms, rd(CSR_GP_CNTRL));
+        return;
+    }
+    uint32_t load = prph_rd(UREG_UCODE_LOAD_STATUS), upc = prph_rd(UREG_UMAC_CURRENT_PC);
+    uint32_t lpc = prph_rd(UREG_LMAC1_CURRENT_PC), c1 = prph_rd(SB_CPU_1_STATUS), c2 = prph_rd(SB_CPU_2_STATUS);
+    uint32_t wfpm = prph_rd(WFPM_CTRL_REG);
+    wr(CSR_GP_CNTRL, rd(CSR_GP_CNTRL) & ~GP_MAC_ACCESS_REQ);
+    kprintf("iwl:   %u ms: LOAD_STATUS %#x, PC UMAC %#x LMAC %#x, CPU1 %#x CPU2 %#x, WFPM %#x, GP1 %#x, CSR_INT %#x\n", ms,
+            load, upc, lpc, c1, c2, wfpm, rd(CSR_UCODE_DRV_GP1), rd(CSR_INT));
+    info.st_load = load;
+    info.st_umac_pc = upc;
+    info.st_lmac_pc = lpc;
+}
+
 int iwl_load_fw(void)
 {
     if (!info.present || !regs)
@@ -443,10 +467,14 @@ int iwl_load_fw(void)
     kprintf("iwl: Firmware gestartet (Context Info %#lx, %d+%d+%d Abschnitte, Zugriff %s)\n", (unsigned long)(uint64_t)ci,
             nsec[0], nsec[1], nsec[2], access ? "ok" : "NICHT bekommen");
 
-    /* auf ALIVE warten: der Status zaehlt die gefuellten Empfangspuffer */
-    uint64_t t0 = time_us();
+    /* auf ALIVE warten: der Status zaehlt die gefuellten Empfangspuffer. Alle 250 ms ins Log, was die Karte tut */
+    uint64_t t0 = time_us(), next_dump = 0;
     uint32_t last_int = 0;
     while (time_us() - t0 < 2000000) {
+        if (time_us() - t0 >= next_dump) {
+            next_dump += 250000;
+            fw_state((uint32_t)((time_us() - t0) / 1000));
+        }
         uint32_t ci_int = rd(CSR_INT);
         if (ci_int != last_int) {
             kprintf("iwl:   nach %u ms: CSR_INT %#x, FH_INT %#x, Status %u\n", (uint32_t)((time_us() - t0) / 1000), ci_int,
@@ -460,6 +488,7 @@ int iwl_load_fw(void)
         thread_sleep_ms(1);
     }
     info.load_ms = (uint32_t)((time_us() - t0) / 1000);
+    fw_state(info.load_ms);
     info.load_int = rd(CSR_INT);
     info.load_status = *(volatile uint16_t *)status;
     if (!info.load_alive) {
