@@ -522,7 +522,10 @@ static void syscall_do(SyscallFrame *f)
     }
     case SYS_WLAN: {
         WlanInfo wi;
-        if (f->rdi != 0)
+        if (f->rdi == 1) { /* Stufe 2a: aufwecken */
+            int r = iwl_wake_test();
+            ret = r == -1 ? ERR_NOENT : r < 0 ? ERR_IO : 0;
+        } else if (f->rdi != 0)
             ret = ERR_INVAL;
         else if (!process_user_range_ok(process_current(), f->rsi, sizeof(wi), 1))
             ret = ERR_FAULT;

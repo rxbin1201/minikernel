@@ -294,8 +294,10 @@ typedef struct {
     unsigned       fw_cpus, fw_capa, fw_api_flags, fw_scan_channels, fw_major, fw_minor, fw_local;
     char           fw_name[64], fw_human[64];
     char           state[64];
+    unsigned       wake_done, wake_clock, wake_access, wake_us, gp_after, cnvi_id;
 } WlanInfo;
 static inline s64 sys_wlan_info(WlanInfo *wi)                 { return syscall3(SYS_WLAN, 0, (u64)wi, 0); }
+static inline s64 sys_wlan_wake(void)                         { return syscall3(SYS_WLAN, 1, 0, 0); }
 static inline s64 sys_read(int fd, void *buf, u64 len)        { return syscall3(SYS_READ, fd, (u64)buf, len); }
 static inline s64 sys_close(int fd)                           { return syscall3(SYS_CLOSE, fd, 0, 0); }
 static inline s64 sys_closefrom(int fd)                       { return syscall3(SYS_CLOSEFROM, fd, 0, 0); } /* alle ab fd schliessen */

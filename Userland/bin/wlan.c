@@ -1,7 +1,8 @@
 #include "libc.h"
 
 /* wlan [info]   WLAN-Karte (Intel AX200) und Bluetooth: was der Kernel erkannt hat, die zerlegte Firmware aus
- *               /firmware und das Bluetooth-Geraet am USB (8087:0029). Stufe 1 des Treibers: nur erkennen. */
+ *               /firmware und das Bluetooth-Geraet am USB (8087:0029).
+ * wlan wake     Stufe 2a: Karte aufwecken (Takt, Zugriff auf die inneren Register), eine Kennung lesen */
 
 static const char *hw_type(unsigned rev)
 {
@@ -11,9 +12,20 @@ static const char *hw_type(unsigned rev)
 
 void _start(int argc, char **argv)
 {
-    (void)argc;
-    (void)argv;
     WlanInfo wi;
+    if (argc > 1 && strcmp(argv[1], "wake") == 0) {
+        s64 r = sys_wlan_wake();
+        sys_wlan_info(&wi);
+        if (r == ERR_NOENT) {
+            printf("wlan: keine Karte\n");
+            sys_exit(1);
+        }
+        printf("Takt:      %s\n", wi.wake_clock ? "bereit" : "KEINER (nach INIT_DONE)");
+        printf("Zugriff:   %s nach %u us\n", wi.wake_access ? "bekommen" : "NICHT bekommen", wi.wake_us);
+        printf("GP_CNTRL:  %#010x danach\n", wi.gp_after);
+        printf("CNVI-ID:   %#010x\n", wi.cnvi_id);
+        sys_exit(r == 0 ? 0 : 1);
+    }
     if (sys_wlan_info(&wi) != 0) {
         fprintf(2, "wlan: der Kernel kennt kein WLAN (SYS_WLAN fehlt)\n");
         sys_exit(1);

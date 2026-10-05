@@ -19,9 +19,14 @@ typedef struct {
     uint32_t fw_major, fw_minor, fw_local;    /* TLV FW_VERSION */
     char     fw_name[64], fw_human[64];
     char     state[64];
+    /* Stufe 2a (SYS_WLAN 1, "wlan wake"): Takt anfordern, Zugriff auf die inneren Register, eine Kennung lesen */
+    uint32_t wake_done, wake_clock, wake_access; /* versucht, Takt bereit, Zugriff bekommen */
+    uint32_t wake_us;                         /* bis zum Zugriff */
+    uint32_t gp_after, cnvi_id;               /* GP_CNTRL danach, Kennung des CNVi (Peripherie-Register) */
 } WlanInfo;
 
 void iwl_probe(void);
 int  iwl_info(WlanInfo *out); /* 0 = gefuellt (auch ohne Karte: dann present = 0) */
+int  iwl_wake_test(void);     /* Stufe 2a; 0 = Zugriff bekommen, -1 = keine Karte, -2 kein Takt, -3 kein Zugriff */
 
 #endif

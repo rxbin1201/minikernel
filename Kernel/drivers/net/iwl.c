@@ -13,11 +13,20 @@
 #include "lib/kprintf.h"
 #include "lib/string.h"
 #include "mm/paging.h"
+#include "arch/x86_64/apic.h"
 
 #define CSR_HW_IF_CONFIG_REG 0x000
 #define CSR_GP_CNTRL         0x024
 #define CSR_HW_REV           0x028
 #define CSR_HW_RF_ID         0x09C
+#define PRPH_RADDR           0x448 /* Peripherie-Register lesen: Adresse (mit 3 << 24), dann Wert aus PRPH_RDAT */
+#define PRPH_RDAT            0x450
+/* Bits in CSR_GP_CNTRL */
+#define GP_MAC_CLOCK_READY   (1u << 0)
+#define GP_INIT_DONE         (1u << 2)
+#define GP_MAC_ACCESS_REQ    (1u << 3)
+#define GP_GOING_TO_SLEEP    (1u << 4)
+#define CNVI_AUX_MISC_CHIP   0xA200B0
 
 enum { TLV_SEC_RT = 19, TLV_NUM_OF_CPU = 27, TLV_API_CHANGES_SET = 29, TLV_ENABLED_CAPABILITIES = 30,
        TLV_N_SCAN_CHANNELS = 31, TLV_PAGING = 32, TLV_FW_VERSION = 36 };
@@ -30,6 +39,11 @@ static volatile uint8_t *regs;
 static uint32_t rd(uint32_t off)
 {
     return *(volatile uint32_t *)(regs + off);
+}
+
+static void wr(uint32_t off, uint32_t v)
+{
+    *(volatile uint32_t *)(regs + off) = v;
 }
 
 static uint32_t le32(const uint8_t *p)
@@ -151,6 +165,39 @@ void iwl_probe(void)
             (info.hw_rev >> 4) & 0xFFF, (info.hw_rev >> 2) & 3, info.rf_id, info.gp_cntrl, info.hw_if_config);
     if (!info.state[0])
         ksnprintf(info.state, sizeof(info.state), "erkannt (Stufe 1: noch keine Firmware geladen)");
+}
+
+/* Stufe 2a: die Karte meldet "Initialisierung fertig" (INIT_DONE) und bekommt ihren Takt; dann bittet der Treiber um
+ * Zugriff auf die inneren Register (MAC_ACCESS_REQ) und wartet, bis der Takt steht und die Karte nicht gerade
+ * einschlaeft. Mit dem Zugriff liest er ein Peripherie-Register (Kennung des CNVi) und gibt den Zugriff wieder ab.
+ * Es wird nichts geladen und nichts zurueckgesetzt. */
+int iwl_wake_test(void)
+{
+    if (!info.present || !regs)
+        return -1;
+    info.wake_done = 1;
+    info.wake_clock = info.wake_access = 0;
+    info.cnvi_id = 0;
+    uint64_t t0 = time_us();
+    wr(CSR_GP_CNTRL, rd(CSR_GP_CNTRL) | GP_INIT_DONE);
+    info.wake_clock = WAIT_UNTIL(rd(CSR_GP_CNTRL) & GP_MAC_CLOCK_READY, 25);
+    if (!info.wake_clock) {
+        info.gp_after = rd(CSR_GP_CNTRL);
+        kprintf("iwl: kein Takt nach INIT_DONE (GP_CNTRL %#x)\n", info.gp_after);
+        return -2;
+    }
+    wr(CSR_GP_CNTRL, rd(CSR_GP_CNTRL) | GP_MAC_ACCESS_REQ);
+    info.wake_access = WAIT_UNTIL((rd(CSR_GP_CNTRL) & (GP_MAC_CLOCK_READY | GP_GOING_TO_SLEEP)) == GP_MAC_CLOCK_READY, 25);
+    info.wake_us = (uint32_t)(time_us() - t0);
+    info.gp_after = rd(CSR_GP_CNTRL);
+    if (info.wake_access) {
+        wr(PRPH_RADDR, (CNVI_AUX_MISC_CHIP & 0xFFFFF) | (3u << 24));
+        info.cnvi_id = rd(PRPH_RDAT);
+    }
+    wr(CSR_GP_CNTRL, rd(CSR_GP_CNTRL) & ~GP_MAC_ACCESS_REQ);
+    kprintf("iwl: Aufwecken %s nach %u us, GP_CNTRL %#x, CNVI %#x\n", info.wake_access ? "ok" : "OHNE Zugriff",
+            info.wake_us, info.gp_after, info.cnvi_id);
+    return info.wake_access ? 0 : -3;
 }
 
 int iwl_info(WlanInfo *out)
