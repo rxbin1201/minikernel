@@ -49,7 +49,8 @@ typedef struct {
 /* 3D-Auftrag (SYS_GPUCOMP 8, gleiches Layout wie Gpu3dDraw in Userland/include/user.h; float als Bitmuster) */
 typedef struct {
     uint16_t dst, depth, tex, flags; /* Flaechen; flags = IGD_3D_* */
-    uint16_t tex_w, tex_h, pad0, pad1; /* benutzter Teil der Textur (0 = ganze Flaeche) */
+    uint16_t tex_w, tex_h;             /* benutzter Teil der Textur (0 = ganze Flaeche) */
+    uint16_t blend, pad1;              /* IGD_3D_BLEND: Faktor Quelle | Ziel << 8 */
     int32_t  x, y, w, h;               /* Zeichenbereich im Ziel (x Vielfaches von 16) */
     uint32_t clear_color, clear_depth;
     uint32_t m[16], light[3], ambient, diffuse;
@@ -799,6 +800,13 @@ int64_t igd_comp_sys(uint32_t pid, uint64_t op, uint64_t a, uint64_t b)
             return ERR_INVAL;
         if (u.nvert % 3 || u.nvert > IGD_3D_MAX_VERT)
             return ERR_INVAL;
+        if (u.flags & IGD_3D_BLEND) { /* nur Faktoren ohne Konstante und zweite Quelle */
+            for (int i = 0; i < 2; i++) {
+                uint32_t f = (u.blend >> (8 * i)) & 0xFF;
+                if (!((f >= 0x01 && f <= 0x06) || (f >= 0x11 && f <= 0x15)) || (i && f == 0x06))
+                    return ERR_INVAL;
+            }
+        }
         if (u.nvert && !process_user_range_ok(process_current(), u.verts, (uint64_t)u.nvert * 48, 0))
             return ERR_FAULT;
         IgdDraw3d g;
@@ -817,6 +825,7 @@ int64_t igd_comp_sys(uint32_t pid, uint64_t op, uint64_t a, uint64_t b)
         g.flags = u.flags;
         g.clear_color = u.clear_color;
         g.clear_depth = u.clear_depth;
+        g.blend = (u.flags & IGD_3D_BLEND) ? u.blend : 0;
         memcpy(g.m, u.m, sizeof(g.m));
         memcpy(g.l, u.light, sizeof(g.l));
         g.amb = u.ambient;

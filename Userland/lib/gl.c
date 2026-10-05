@@ -24,7 +24,11 @@
  * Innerhalb des Schutzstreifens zerschneidet die GPU selbst (Rasterizer), ihr Clipper bleibt aus.
  *
  * Rueckseiten (glCullFace): die GPU laesst sie im Rasterizer weg (GPU3D_CULL_*), die CPU nach dem Umrechnen. Vorn ist
- * ein Dreieck, das auf dem Bildschirm gegen den Uhrzeigersinn laeuft (glFrontFace(GL_CW) tauscht vorn und hinten). */
+ * ein Dreieck, das auf dem Bildschirm gegen den Uhrzeigersinn laeuft (glFrontFace(GL_CW) tauscht vorn und hinten).
+ *
+ * Mischen (glBlendFunc): Ergebnis = Quelle * Faktor + Ziel * Faktor, die GPU im Blend-State (GPU3D_BLEND mit den
+ * Faktor-Codes der Hardware), die CPU in blend_px. Das Fenster hat keinen Alpha-Kanal: Byte 3 bleibt 255 (der Desktop
+ * liest es als Deckung), GL_DST_ALPHA ist also immer 1 - wie bei einem Bildschirmformat ohne Alpha. */
 
 #define VF    12                /* float je Eckpunkt: x, y, z, u, v, nx, ny, nz, r, g, b, a */
 #define BATCH GPU3D_MAX_VERT
@@ -56,6 +60,8 @@ static struct {
     float  clear_depth;
     int    depth_test, texturing, lighting;
     int    culling, cull_face, front_cw; /* GL_CULL_FACE, GL_BACK/FRONT/FRONT_AND_BACK, glFrontFace(GL_CW) */
+    int    blending, bsrc, bdst;  /* GL_BLEND, Faktoren als GPU3D_BF_* */
+    int    depth_mask;            /* glDepthMask: Tiefe schreiben */
     GLuint bound;
     int    mode;
     float  st[2][STACK][16];
@@ -71,6 +77,8 @@ static struct {
         GLuint tex;
         int    depth;
         int    cull;            /* GPU3D_CULL_* (vorn = auf dem Bildschirm gegen den Uhrzeigersinn) */
+        int    blend;           /* 0 oder Faktor Quelle | Faktor Ziel << 8 (GPU3D_BF_*) */
+        int    zwrite;          /* Tiefe schreiben (mit Tiefentest) */
     } bs;
 } G;
 
@@ -244,6 +252,36 @@ static void sample(const Tex *t, float u, float v, float *c)
         c[i] = (q[0][i] * (1 - ax) + q[1][i] * ax) * (1 - ay) + (q[2][i] * (1 - ax) + q[3][i] * ax) * ay;
 }
 
+static float bfactor(int f, const float *s, const float *d, int c)
+{
+    switch (f) {
+    case GPU3D_BF_ONE: return 1;
+    case GPU3D_BF_SRC_COLOR: return s[c];
+    case GPU3D_BF_SRC_ALPHA: return s[3];
+    case GPU3D_BF_DST_ALPHA: return d[3];
+    case GPU3D_BF_DST_COLOR: return d[c];
+    case GPU3D_BF_SRC_ALPHA_SAT: return c == 3 ? 1 : s[3] < 1 - d[3] ? s[3] : 1 - d[3];
+    case GPU3D_BF_INV_SRC_COLOR: return 1 - s[c];
+    case GPU3D_BF_INV_SRC_ALPHA: return 1 - s[3];
+    case GPU3D_BF_INV_DST_ALPHA: return 1 - d[3];
+    case GPU3D_BF_INV_DST_COLOR: return 1 - d[c];
+    default: return 0;
+    }
+}
+
+/* Quelle s (r, g, b, a, schon 0-1) mit dem Pixel *p mischen; Alpha im Ziel bleibt 255 */
+static void blend_px(u32 *p, const float *s)
+{
+    u32 o = *p;
+    float d[4] = {(float)(o >> 16 & 0xFF) * (1.0f / 255), (float)(o >> 8 & 0xFF) * (1.0f / 255),
+                  (float)(o & 0xFF) * (1.0f / 255), 1};
+    int fs = G.bs.blend & 0xFF, fd = G.bs.blend >> 8;
+    u32 r = 0xFF000000u;
+    for (int c = 0; c < 3; c++)
+        r |= (u32)(sat(s[c] * bfactor(fs, s, d, c) + d[c] * bfactor(fd, s, d, c)) * 255 + 0.5f) << (16 - 8 * c);
+    *p = r;
+}
+
 /* s[k]: x, y, z (Bildschirm), 1/W, dann u, v, r, g, b, a jeweils mal 1/W. Nur die Zeilen y mit y % step == first. */
 static void raster(float s[3][10], const Tex *t, int first, int step)
 {
@@ -276,15 +314,20 @@ static void raster(float s[3][10], const Tex *t, int first, int step)
             if (G.bs.depth) {
                 if (!(z < G.zb[i]))
                     continue;
-                G.zb[i] = z;
+                if (G.bs.zwrite)
+                    G.zb[i] = z;
             }
             float iw = 1.0f / (w0 * s[0][3] + w1 * s[1][3] + w2 * s[2][3]), a[6], c[4];
             for (int k = 0; k < 6; k++)
                 a[k] = (w0 * s[0][4 + k] + w1 * s[1][4 + k] + w2 * s[2][4 + k]) * iw;
             sample(t, a[0], a[1], c);
-            u32 r = (u32)(sat(a[2] * c[0]) * 255 + 0.5f), g = (u32)(sat(a[3] * c[1]) * 255 + 0.5f),
-                b = (u32)(sat(a[4] * c[2]) * 255 + 0.5f), al = (u32)(sat(a[5] * c[3]) * 255 + 0.5f);
-            G.px[i] = al << 24 | r << 16 | g << 8 | b;
+            float f[4] = {sat(a[2] * c[0]), sat(a[3] * c[1]), sat(a[4] * c[2]), sat(a[5] * c[3])};
+            if (G.bs.blend) {
+                blend_px(&G.px[i], f);
+                continue;
+            }
+            G.px[i] = 0xFF000000u | (u32)(f[0] * 255 + 0.5f) << 16 | (u32)(f[1] * 255 + 0.5f) << 8 |
+                      (u32)(f[2] * 255 + 0.5f);
         }
     }
 }
@@ -439,7 +482,10 @@ static void flush(void)
         d.tex = (unsigned short)t->surf;
         d.tex_w = (unsigned short)t->w;
         d.tex_h = (unsigned short)t->h;
-        d.flags = (unsigned short)((G.bs.depth ? GPU3D_DEPTH : 0) | (t->linear ? GPU3D_LINEAR : 0) | G.bs.cull);
+        d.flags = (unsigned short)((G.bs.depth ? GPU3D_DEPTH : 0) | (t->linear ? GPU3D_LINEAR : 0) | G.bs.cull |
+                                   (G.bs.blend ? GPU3D_BLEND : 0) | (G.bs.depth && !G.bs.zwrite ? GPU3D_NO_DEPTH_WRITE : 0) |
+                                   GPU3D_KEEP_ALPHA);
+        d.blend = (unsigned short)G.bs.blend;
         memcpy(d.m, G.bs.m, sizeof(d.m));
         memcpy(d.light, G.bs.l, sizeof(d.light));
         d.ambient = G.bs.amb;
@@ -486,8 +532,12 @@ static void cur_state(void)
         }
         cull = (back ? GPU3D_CULL_BACK : 0) | (front ? GPU3D_CULL_FRONT : 0);
     }
+    int blend = G.blending ? G.bsrc | G.bdst << 8 : 0, zwrite = G.depth_mask;
+    if (blend == (GPU3D_BF_ONE | GPU3D_BF_ZERO << 8))
+        blend = 0; /* Quelle * 1 + Ziel * 0: wie ohne Mischen */
     if (G.bn && (memcmp(m, G.bs.m, sizeof(m)) || memcmp(l, G.bs.l, sizeof(l)) || amb != G.bs.amb ||
-                 dif != G.bs.dif || tid != G.bs.tex || depth != G.bs.depth || cull != G.bs.cull))
+                 dif != G.bs.dif || tid != G.bs.tex || depth != G.bs.depth || cull != G.bs.cull ||
+                 blend != G.bs.blend || zwrite != G.bs.zwrite))
         flush();
     memcpy(G.bs.m, m, sizeof(m));
     memcpy(G.bs.l, l, sizeof(l));
@@ -496,6 +546,8 @@ static void cur_state(void)
     G.bs.tex = tid;
     G.bs.depth = depth;
     G.bs.cull = cull;
+    G.bs.blend = blend;
+    G.bs.zwrite = zwrite;
 }
 
 static void emit(const float *a, const float *b, const float *c)
@@ -616,6 +668,9 @@ int gl_open(int w, int h, const char *title)
         m_ident(top(i));
     G.light[2] = 1;
     G.cull_face = GL_BACK;
+    G.bsrc = GPU3D_BF_ONE;
+    G.bdst = GPU3D_BF_ZERO;
+    G.depth_mask = 1;
     G.amb = 0.25f;
     G.dif = 0.75f;
     G.clear_depth = 1;
@@ -683,8 +738,9 @@ void gl_swap(void)
 
 void glClearColor(GLfloat r, GLfloat g, GLfloat b, GLfloat a)
 {
-    G.clear_color = (u32)(sat(a) * 255 + 0.5f) << 24 | (u32)(sat(r) * 255 + 0.5f) << 16 |
-                    (u32)(sat(g) * 255 + 0.5f) << 8 | (u32)(sat(b) * 255 + 0.5f);
+    (void)a; /* kein Alpha-Kanal im Fenster: bleibt deckend */
+    G.clear_color = 0xFF000000u | (u32)(sat(r) * 255 + 0.5f) << 16 | (u32)(sat(g) * 255 + 0.5f) << 8 |
+                    (u32)(sat(b) * 255 + 0.5f);
 }
 
 void glClearDepth(GLdouble d)
@@ -724,6 +780,8 @@ void glEnable(GLenum cap)
         G.lighting = 1;
     else if (cap == GL_CULL_FACE)
         G.culling = 1;
+    else if (cap == GL_BLEND)
+        G.blending = 1;
 }
 
 void glDisable(GLenum cap)
@@ -736,6 +794,40 @@ void glDisable(GLenum cap)
         G.lighting = 0;
     else if (cap == GL_CULL_FACE)
         G.culling = 0;
+    else if (cap == GL_BLEND)
+        G.blending = 0;
+}
+
+static int blend_code(GLenum f)
+{
+    switch (f) {
+    case GL_ZERO: return GPU3D_BF_ZERO;
+    case GL_ONE: return GPU3D_BF_ONE;
+    case GL_SRC_COLOR: return GPU3D_BF_SRC_COLOR;
+    case GL_ONE_MINUS_SRC_COLOR: return GPU3D_BF_INV_SRC_COLOR;
+    case GL_SRC_ALPHA: return GPU3D_BF_SRC_ALPHA;
+    case GL_ONE_MINUS_SRC_ALPHA: return GPU3D_BF_INV_SRC_ALPHA;
+    case GL_DST_ALPHA: return GPU3D_BF_DST_ALPHA;
+    case GL_ONE_MINUS_DST_ALPHA: return GPU3D_BF_INV_DST_ALPHA;
+    case GL_DST_COLOR: return GPU3D_BF_DST_COLOR;
+    case GL_ONE_MINUS_DST_COLOR: return GPU3D_BF_INV_DST_COLOR;
+    case GL_SRC_ALPHA_SATURATE: return GPU3D_BF_SRC_ALPHA_SAT;
+    default: return 0;
+    }
+}
+
+void glBlendFunc(GLenum sfactor, GLenum dfactor)
+{
+    int s = blend_code(sfactor), d = blend_code(dfactor);
+    if (!s || !d || d == GPU3D_BF_SRC_ALPHA_SAT)
+        return; /* GL_INVALID_ENUM: Zustand bleibt */
+    G.bsrc = s;
+    G.bdst = d;
+}
+
+void glDepthMask(GLboolean flag)
+{
+    G.depth_mask = flag != 0;
 }
 
 void glCullFace(GLenum mode)
@@ -938,6 +1030,11 @@ void glColor3f(GLfloat r, GLfloat g, GLfloat b)
 void glColor3ub(GLubyte r, GLubyte g, GLubyte b)
 {
     glColor4f((float)r / 255, (float)g / 255, (float)b / 255, 1);
+}
+
+void glColor4ub(GLubyte r, GLubyte g, GLubyte b, GLubyte a)
+{
+    glColor4f((float)r / 255, (float)g / 255, (float)b / 255, (float)a / 255);
 }
 
 void glTexCoord2f(GLfloat u, GLfloat v)

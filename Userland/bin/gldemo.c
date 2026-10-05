@@ -6,7 +6,7 @@
  *   gldemo        normal
  *   gldemo -cpu   immer mit der CPU (zum Vergleich)
  * Pfeil hoch/runter oder w/s: Kamera vor und zurueck (auch durch den Wuerfel - zeigt das Abschneiden an der nahen
- * Ebene), c: Rueckseiten weglassen an/aus, Esc oder q: Ende */
+ * Ebene), c: Rueckseiten weglassen an/aus, b: grosser Wuerfel aus Glas (Mischen) an/aus, Esc oder q: Ende */
 
 static u32 texture[64 * 64];
 
@@ -56,7 +56,8 @@ void _start(int argc, char **argv)
     glEnable(GL_TEXTURE_2D);
     glEnable(GL_LIGHTING);
     glEnable(GL_CULL_FACE); /* die Wuerfel sind geschlossen: Rueckseiten sieht man nie */
-    int culling = 1;
+    int culling = 1, glass = 1;
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     float dist = 8;         /* Abstand der Kamera zur Mitte */
     glClearColor(0.08f, 0.10f, 0.16f, 1);
     glMatrixMode(GL_PROJECTION);
@@ -78,6 +79,8 @@ void _start(int argc, char **argv)
                 dist = dist > 0.5f ? dist - 0.25f : dist;
             } else if (e.type == EV_KEY && (e.key == KEY_DOWN || e.key == 's')) {
                 dist = dist < 30 ? dist + 0.25f : dist;
+            } else if (e.type == EV_KEY && e.key == 'b') {
+                glass = !glass;
             } else if (e.type == EV_KEY && e.key == 'c') {
                 culling = !culling;
                 if (culling)
@@ -93,12 +96,14 @@ void _start(int argc, char **argv)
         glLoadIdentity();
         glLightfv(GL_LIGHT0, GL_POSITION, light);
         glTranslatef(0, 0, -dist);
-        glPushMatrix();
-        glRotatef(a, 1, 1, 0);
-        glRotatef(a * 0.7f, 0, 1, 0);
-        glColor3f(1, 1, 1);
-        cube();
-        glPopMatrix();
+        if (!glass) {
+            glPushMatrix();
+            glRotatef(a, 1, 1, 0);
+            glRotatef(a * 0.7f, 0, 1, 0);
+            glColor3f(1, 1, 1);
+            cube();
+            glPopMatrix();
+        }
         for (int i = 0; i < 3; i++) { /* drei kleine Wuerfel kreisen herum */
             glPushMatrix();
             glRotatef(a * 1.3f + (float)i * 120, 0, 1, 0.25f);
@@ -107,6 +112,24 @@ void _start(int argc, char **argv)
             glScalef(0.45f, 0.45f, 0.45f);
             glColor3f(colors[i][0], colors[i][1], colors[i][2]);
             cube();
+            glPopMatrix();
+        }
+        if (glass) { /* durchsichtig: nach allem Deckenden, Tiefe nur pruefen; erst die hinteren, dann die vorderen Seiten */
+            glPushMatrix();
+            glRotatef(a, 1, 1, 0);
+            glRotatef(a * 0.7f, 0, 1, 0);
+            glColor4f(0.7f, 0.9f, 1, 0.4f);
+            glEnable(GL_BLEND);
+            glDepthMask(GL_FALSE);
+            glEnable(GL_CULL_FACE);
+            glCullFace(GL_FRONT);
+            cube();
+            glCullFace(GL_BACK);
+            cube();
+            if (!culling)
+                glDisable(GL_CULL_FACE);
+            glDepthMask(GL_TRUE);
+            glDisable(GL_BLEND);
             glPopMatrix();
         }
         glFinish();
@@ -118,9 +141,9 @@ void _start(int argc, char **argv)
         if (now - sec >= 1000000) {
             char title[96];
             int us = frames ? (int)(draw_us / frames) : 0;
-            snprintf(title, sizeof(title), "GL-Demo - %d Bilder/s (%s, %d,%d ms je Bild%s)",
+            snprintf(title, sizeof(title), "GL-Demo - %d Bilder/s (%s, %d,%d ms je Bild%s%s)",
                      (int)((s64)frames * 1000000 / (now - sec)), gl_gpu() ? "GPU" : "CPU", us / 1000, us % 1000 / 100,
-                     culling ? "" : ", ohne Culling");
+                     culling ? "" : ", ohne Culling", glass ? ", Glas" : "");
             gfx_set_title(title);
             frames = 0;
             draw_us = 0;

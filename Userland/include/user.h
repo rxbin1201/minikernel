@@ -328,10 +328,26 @@ static inline s64 sys_gpucomp(u64 op, u64 a, u64 b)          { return syscall3(S
 #define GPU3D_CLEAR_DEPTH 8
 #define GPU3D_CULL_BACK   16 /* Rueckseiten weglassen (vorn = auf dem Bildschirm gegen den Uhrzeigersinn) */
 #define GPU3D_CULL_FRONT  32 /* Vorderseiten weglassen (beide: alle Dreiecke) */
+#define GPU3D_BLEND       64 /* mischen: Ergebnis = Quelle * Faktor blend & 0xFF + Ziel * Faktor blend >> 8 */
+#define GPU3D_NO_DEPTH_WRITE 128 /* Tiefentest ohne Schreiben (glDepthMask(GL_FALSE)) */
+#define GPU3D_KEEP_ALPHA  256 /* Byte 3 im Ziel nicht schreiben (Fenster ohne Alpha-Kanal, bleibt deckend) */
+/* Faktoren fuer GPU3D_BLEND (Codes der Hardware, BLENDFACTOR_*) */
+#define GPU3D_BF_ONE           0x01
+#define GPU3D_BF_SRC_COLOR     0x02
+#define GPU3D_BF_SRC_ALPHA     0x03
+#define GPU3D_BF_DST_ALPHA     0x04
+#define GPU3D_BF_DST_COLOR     0x05
+#define GPU3D_BF_SRC_ALPHA_SAT 0x06
+#define GPU3D_BF_ZERO          0x11
+#define GPU3D_BF_INV_SRC_COLOR 0x12
+#define GPU3D_BF_INV_SRC_ALPHA 0x13
+#define GPU3D_BF_INV_DST_ALPHA 0x14
+#define GPU3D_BF_INV_DST_COLOR 0x15
 #define GPU3D_MAX_VERT    1365
 typedef struct {
     unsigned short dst, depth, tex, flags;      /* Flaechen (depth 0 = keiner), GPU3D_* */
-    unsigned short tex_w, tex_h, pad0, pad1;    /* benutzter Teil der Textur (0 = ganze Flaeche) */
+    unsigned short tex_w, tex_h;                /* benutzter Teil der Textur (0 = ganze Flaeche) */
+    unsigned short blend, pad1;                 /* GPU3D_BLEND: Faktor Quelle | Faktor Ziel << 8 (GPU3D_BF_*) */
     int            x, y, w, h;                  /* Zeichenbereich im Ziel, x Vielfaches von 16 */
     unsigned       clear_color;                 /* 0xAARRGGBB */
     float          clear_depth;

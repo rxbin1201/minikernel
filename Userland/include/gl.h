@@ -15,9 +15,11 @@
  *   }
  *
  * Dreiecke werden an der nahen und fernen Ebene abgeschnitten (auch mit einer Ecke hinter der Kamera), Rueckseiten
- * auf Wunsch weggelassen (glEnable(GL_CULL_FACE), glCullFace, glFrontFace).
+ * auf Wunsch weggelassen (glEnable(GL_CULL_FACE), glCullFace, glFrontFace). Mischen: glEnable(GL_BLEND),
+ * glBlendFunc (alle Faktoren ausser den konstanten, Funktion immer "addieren"), glDepthMask. Durchsichtiges zeichnet
+ * man wie ueblich nach allem Deckenden, von hinten nach vorn und mit glDepthMask(GL_FALSE).
  *
- * Einschraenkungen: kein Mischen (Alpha), keine Mip-Stufen, ein Licht (GL_LIGHT0, nur Richtung), Texturen RGBA bzw.
+ * Einschraenkungen: das Fenster hat keinen Alpha-Kanal (GL_DST_ALPHA ist immer 1), keine Mip-Stufen, ein Licht (GL_LIGHT0, nur Richtung), Texturen RGBA bzw.
  * BGRA mit 8 Bit je Kanal. */
 
 typedef float          GLfloat;
@@ -48,6 +50,18 @@ typedef void           GLvoid;
 #define GL_CCW                 0x0901
 #define GL_CULL_FACE           0x0B44
 #define GL_LIGHTING            0x0B50
+#define GL_BLEND               0x0BE2
+#define GL_ZERO                0
+#define GL_ONE                 1
+#define GL_SRC_COLOR           0x0300
+#define GL_ONE_MINUS_SRC_COLOR 0x0301
+#define GL_SRC_ALPHA           0x0302
+#define GL_ONE_MINUS_SRC_ALPHA 0x0303
+#define GL_DST_ALPHA           0x0304
+#define GL_ONE_MINUS_DST_ALPHA 0x0305
+#define GL_DST_COLOR           0x0306
+#define GL_ONE_MINUS_DST_COLOR 0x0307
+#define GL_SRC_ALPHA_SATURATE  0x0308
 #define GL_DEPTH_TEST          0x0B71
 #define GL_TEXTURE_2D          0x0DE1
 #define GL_MODELVIEW           0x1700
@@ -81,6 +95,8 @@ void glEnable(GLenum cap);
 void glDisable(GLenum cap);
 void glCullFace(GLenum mode);                  /* GL_BACK (Standard), GL_FRONT, GL_FRONT_AND_BACK */
 void glFrontFace(GLenum mode);                 /* GL_CCW (Standard): gegen den Uhrzeigersinn ist vorn */
+void glBlendFunc(GLenum sfactor, GLenum dfactor); /* Standard GL_ONE, GL_ZERO */
+void glDepthMask(GLboolean flag);              /* GL_FALSE: Tiefentest weiter, aber Tiefe nicht schreiben */
 void glFlush(void);
 void glFinish(void);
 
@@ -105,6 +121,7 @@ void glVertex3fv(const GLfloat *v);
 void glColor3f(GLfloat r, GLfloat g, GLfloat b);
 void glColor4f(GLfloat r, GLfloat g, GLfloat b, GLfloat a);
 void glColor3ub(GLubyte r, GLubyte g, GLubyte b);
+void glColor4ub(GLubyte r, GLubyte g, GLubyte b, GLubyte a);
 void glTexCoord2f(GLfloat u, GLfloat v);
 void glNormal3f(GLfloat x, GLfloat y, GLfloat z);
 void glNormal3fv(const GLfloat *n);

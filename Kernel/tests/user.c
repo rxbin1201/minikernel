@@ -604,9 +604,9 @@ void test_graphics(void)
     check("view: Bild anzeigen und beenden", pid > 0 && process_wait(pid, 0, &code, &faulted, 8000) == 0 && code == 0 && !faulted);
     fs_unlink("/disk/GT.BMP");
 
-    /* gltest: kleines OpenGL mit der CPU - Abschneiden an nah/fern/Schutzstreifen, Rueckseiten weglassen */
+    /* gltest: kleines OpenGL mit der CPU - Abschneiden an nah/fern/Schutzstreifen, Rueckseiten weglassen, Mischen */
     pid = process_spawn("/bin/gltest", "gltest", 0);
-    check("gltest (3D: Abschneiden an der nahen Ebene, Rueckseiten)",
+    check("gltest (3D: Abschneiden an der nahen Ebene, Rueckseiten, Mischen)",
           pid > 0 && process_wait(pid, 0, &code, &faulted, 30000) == 0 && code == 0 && !faulted);
     if (pid > 0 && code != 0)
         kprintf("  gltest: Pruefung %d fehlgeschlagen\n", code);

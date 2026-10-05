@@ -2,7 +2,7 @@
 #include "gl.h"
 
 /* Prueft das kleine OpenGL (gl.c) mit der CPU: Abschneiden an der nahen und fernen Ebene und am Schutzstreifen,
- * Rueckseiten weglassen (glCullFace, glFrontFace). Zeichnet bildschirmfuellend (ausserhalb des Desktops) und liest
+ * Rueckseiten weglassen (glCullFace, glFrontFace), Mischen (glBlendFunc, glDepthMask). Zeichnet bildschirmfuellend (ausserhalb des Desktops) und liest
  * die Pixel zurueck. Exit-Code 0 = alles in Ordnung, sonst die Nummer der ersten fehlgeschlagenen Pruefung. */
 
 static int failed, checks, W, H;
@@ -31,6 +31,17 @@ static int lit(void)
     return n;
 }
 
+/* gleiche Farbe bis auf 2 je Kanal (Rundung) */
+static int near(u32 a, u32 b)
+{
+    for (int c = 0; c < 24; c += 8) {
+        int d = (int)(a >> c & 0xFF) - (int)(b >> c & 0xFF);
+        if (d < -2 || d > 2)
+            return 0;
+    }
+    return 1;
+}
+
 static u32 checksum(void)
 {
     u32 h = 2166136261u;
@@ -42,6 +53,9 @@ static u32 checksum(void)
 /* Bild loeschen, Kamera im Ursprung (Blick nach -z), nahe Ebene 1, ferne 10 */
 static void frame(void)
 {
+    glDisable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ZERO);
+    glDepthMask(GL_TRUE);
     glDisable(GL_CULL_FACE);
     glCullFace(GL_BACK);
     glFrontFace(GL_CCW);
@@ -206,6 +220,62 @@ void _start(void)
     glScalef(3, 3, 3);
     cube();
     check(15, inside && lit() == 0);
+
+    /* 9. Mischen: Rechteck ueber die Mitte auf einem geloeschten Hintergrund. near(): Farbe in der Mitte bis auf 2 */
+    static const float qa[3] = {-1, -1, -3}, qb[3] = {1, -1, -3}, qc[3] = {0, 1, -3};
+    glClearColor(0, 0, 1, 1);
+    frame();
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glColor4f(1, 0, 0, 0.5f);
+    tri(qa, qb, qc);
+    u32 mid = gfx_screen.px[(H / 2) * W + W / 2];
+    check(16, near(mid, 0x800080) && mid >> 24 == 0xFF && px(0, 0) == 0x0000FF); /* halb rot, halb blau, deckend */
+    glClearColor(0, 0, 0, 1);
+    frame();
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE);                    /* addieren: rot + gruen = gelb */
+    glColor3f(1, 0, 0);
+    tri(qa, qb, qc);
+    glColor3f(0, 1, 0);
+    tri(qa, qb, qc);
+    check(17, px(W / 2, H / 2) == 0xFFFF00);
+    glClearColor(0.5f, 0.5f, 0.5f, 1);
+    frame();
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_DST_COLOR, GL_ZERO);             /* multiplizieren */
+    glColor3f(1, 0.5f, 0);
+    tri(qa, qb, qc);
+    check(18, near(px(W / 2, H / 2), 0x804000));
+    frame();
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ZERO);                   /* wie ohne Mischen; Alpha bleibt 255 */
+    glColor4f(0, 1, 0, 0.25f);
+    tri(qa, qb, qc);
+    mid = gfx_screen.px[(H / 2) * W + W / 2];
+    check(19, mid == 0xFF00FF00u);
+    frame();
+    glColor4f(0, 1, 0, 0.25f);                      /* ohne Mischen genauso */
+    tri(qa, qb, qc);
+    mid = gfx_screen.px[(H / 2) * W + W / 2];
+    check(20, mid == 0xFF00FF00u);
+    glBlendFunc(GL_SRC_ALPHA, 0x1234);   /* ungueltig: Zustand bleibt (hier GL_ONE, GL_ZERO) */
+    tri(qa, qb, qc);
+    glClearColor(0, 0, 0, 1);
+
+    /* 10. glDepthMask: ein vorderes Dreieck ohne Tiefe schreiben verdeckt ein spaeter gezeichnetes hinteres nicht */
+    static const float fr[3][3] = {{-1, -1, -2}, {1, -1, -2}, {0, 1, -2}}, bk[3][3] = {{-2, -2, -4}, {2, -2, -4}, {0, 2, -4}};
+    for (int mask = 0; mask < 2; mask++) {
+        frame();
+        glEnable(GL_DEPTH_TEST);
+        glDepthMask(mask ? GL_TRUE : GL_FALSE);
+        glColor3f(1, 0, 0);
+        tri(fr[0], fr[1], fr[2]);
+        glDepthMask(GL_TRUE);
+        glColor3f(0, 1, 0);
+        tri(bk[0], bk[1], bk[2]);
+        check(21 + mask, px(W / 2, H / 2) == (mask ? 0xFF0000u : 0x00FF00u));
+    }
 
     gl_close();
     printf("gltest: %d Pruefungen, %s\n", checks, failed ? "FEHLER" : "alle in Ordnung");

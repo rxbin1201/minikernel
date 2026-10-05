@@ -244,8 +244,13 @@ sys_munmap((void *)d, groesse);
   **Rueckseiten** (`glEnable(GL_CULL_FACE)`, `glCullFace`, `glFrontFace`): die GPU laesst sie im Rasterizer weg
   (`3DSTATE_RASTER`, Flags `GPU3D_CULL_BACK`/`_FRONT`, FrontWinding "CCW" - auf echter Hardware geprueft; vorn ist
   auf dem Bildschirm gegen den Uhrzeigersinn), die CPU nach dem Umrechnen.
-  `gldemo`: Pfeiltasten (oder w/s) fahren die Kamera vor und zurueck, `c` schaltet das Weglassen der Rueckseiten um.
-  Selbsttest `gltest` (15 Pruefungen mit der CPU). Noch nicht: Mischen (Alpha), Mip-Stufen
+  **Mischen** (`glEnable(GL_BLEND)`, `glBlendFunc` mit allen Faktoren ausser den konstanten, `glDepthMask`): die GPU
+  mischt im Blend-State (`BLEND_STATE` und `3DSTATE_PS_BLEND`, Flag `GPU3D_BLEND`, Faktoren als Codes der Hardware
+  in `Gpu3dDraw.blend`), die CPU im Rasterer. Das Fenster hat keinen Alpha-Kanal: Byte 3 bleibt 255
+  (`GPU3D_KEEP_ALPHA`, der Desktop liest es als Deckung), `GL_DST_ALPHA` ist also immer 1.
+  `gldemo`: Pfeiltasten (oder w/s) fahren die Kamera vor und zurueck, `c` schaltet das Weglassen der Rueckseiten um,
+  `b` den grossen Wuerfel aus Glas (erst die hinteren, dann die vorderen Seiten, ohne Tiefe zu schreiben).
+  Selbsttest `gltest` (22 Pruefungen mit der CPU). Noch nicht: Mip-Stufen
 - **Zusammensetzen auf der GPU** (`igd_comp.c`, `SYS_GPUCOMP`; Desktop: `gpu.c`): Bildschirmbild, Hintergrund,
   Fensterbilder und Schatten liegen in geteiltem Speicher, den der Kernel fest in die GGTT einblendet (eigener Bereich,
   Referenz auf das shm-Objekt, solange angemeldet). Je Bild schickt der Desktop alle geaenderten Rechtecke als eine

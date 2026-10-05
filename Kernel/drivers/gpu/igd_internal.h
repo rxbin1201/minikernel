@@ -81,12 +81,15 @@ int igd_front_surface(uint32_t *gtt, uint32_t *pitch, uint32_t *w, uint32_t *h);
 #define IGD_3D_CLEAR_DEPTH 8
 #define IGD_3D_CULL_BACK   16 /* Rueckseiten weglassen (vorn = auf dem Bildschirm gegen den Uhrzeigersinn) */
 #define IGD_3D_CULL_FRONT  32 /* Vorderseiten weglassen (beide: alle Dreiecke) */
+#define IGD_3D_BLEND       64 /* mischen mit den Faktoren in blend (Quelle | Ziel << 8, BLENDFACTOR_*) */
+#define IGD_3D_NO_DEPTH_WRITE 128 /* Tiefentest ohne Schreiben */
+#define IGD_3D_KEEP_ALPHA  256 /* Alpha im Ziel nicht schreiben */
 #define IGD_3D_MAX_VERT    1365 /* passt in 64 KiB (48 Bytes je Eckpunkt), Vielfaches von 3 */
 typedef struct {
     uint32_t        rt_gtt, w, h, pitch, mocs;
     uint32_t        depth_gtt, depth_pitch;
     uint32_t        tex_gtt, tex_w, tex_h, tex_pitch;
-    uint32_t        flags, clear_color, clear_depth;
+    uint32_t        flags, clear_color, clear_depth, blend;
     uint32_t        m[16], l[3], amb, dif;
     uint32_t        nvert;
     const uint32_t *verts;
