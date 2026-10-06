@@ -179,6 +179,10 @@ int keymap_key(uint8_t usage, int shift, int ctrl, int altgr, int caps)
     init_layouts();
     if (usage >= NKEYS)
         return 0;
+    if (usage == 0x29 && ctrl && shift) { /* Strg+Shift+Esc (Desktop: Task-Manager); in der Konsole ein Esc */
+        keyboard_deliver_mods(5, 0x1B);
+        return 1;
+    }
     if (altgr == 2) { /* linke Alt-Taste: zusammen mit Strg (deutsch) wie AltGr, sonst Alt-Kombination */
         if (ctrl && current->ctrl_alt_is_altgr) {
             ctrl = 0;

@@ -23,6 +23,7 @@ struct Thread {
     uint64_t    kstack_top; /* oberes Ende des Kernel-Stacks (0 beim Boot-Thread) */
     AddressSpace *as;       /* eigener Adressraum (User-Prozess) oder NULL = Kernel-Adressraum */
     void       *data;       /* frei nutzbar, z.B. Zeiger auf den Prozess */
+    uint64_t   *tick_sink;  /* zaehlt die Ticks zusaetzlich hier mit (CPU-Zeit des Prozesses), 0 = nirgends */
     ThreadEntry entry;
     void       *arg;
     Thread     *next;       /* Run-Queue, Dead-Liste oder Mutex-Wartekette (immer nur in einer davon) */
@@ -462,7 +463,10 @@ int sched_tick_prepare(void)
 {
     if (!sched_on)
         return 0;
-    cur_thread()->cpu_ticks++; /* der laufende Thread gehoert dieser CPU */
+    Thread *self = cur_thread(); /* der laufende Thread gehoert dieser CPU */
+    self->cpu_ticks++;
+    if (self->tick_sink)
+        __atomic_add_fetch(self->tick_sink, 1, __ATOMIC_RELAXED); /* mehrere Threads eines Prozesses auf mehreren CPUs */
 
     uint64_t now = apic_ticks();
     uint64_t f = spin_lock(&sched_lock);
@@ -527,6 +531,7 @@ void sched_watchdog_start(void)
 /* ---------- Auskunft ---------- */
 
 void        thread_set_data(Thread *t, void *data) { t->data = data; }
+void        thread_set_tick_sink(Thread *t, uint64_t *sink) { t->tick_sink = sink; }
 void        thread_set_as(Thread *t, AddressSpace *as) { t->as = as; }
 void       *thread_data(const Thread *t)        { return t->data; }
 Thread     *thread_current(void)                { return cur_thread(); }

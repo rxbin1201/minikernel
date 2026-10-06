@@ -36,6 +36,8 @@ AddressSpace *as_clone_cow(AddressSpace *src);
 /* Schreibzugriff auf eine PAGE_COW-Seite: eigene Kopie (oder, wenn sonst niemand den Frame hat, einfach wieder
  * beschreibbar). 1 = erledigt, 0 = keine Copy-on-Write-Seite, -1 = kein Speicher. Nur fuer den eigenen Adressraum. */
 int           as_cow_resolve(AddressSpace *as, uint64_t virt);
+/* Eingeblendete User-Seiten: Rueckgabe eigene, *shared (falls nicht 0) geteilte (PAGE_SHARED). Nur lesend, unter BKL */
+uint64_t      as_user_pages(AddressSpace *as, uint64_t *shared);
 int           as_cow_break_all(AddressSpace *as); /* alle PAGE_COW-Seiten aufloesen (vor dem zweiten Thread); 0 / -1 */
 
 int as_map(AddressSpace *as, uint64_t virt, uint64_t phys, uint64_t flags);

@@ -28,6 +28,7 @@ Thread *thread_create_in(const char *name, ThreadEntry entry, void *arg, struct 
 
 void  thread_set_as(Thread *t, struct AddressSpace *as); /* nach exec: neuer Adressraum des laufenden Threads */
 void  thread_set_data(Thread *t, void *data); /* freier Zeiger pro Thread (z.B. Prozess) */
+void  thread_set_tick_sink(Thread *t, uint64_t *sink); /* Timer-Ticks des Threads auch dort zaehlen (CPU-Zeit je Prozess) */
 void *thread_data(const Thread *t);
 
 void thread_yield(void);

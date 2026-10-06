@@ -217,6 +217,17 @@ void ui_app_icon(Surface *s, int icon, int x, int y, int size)
         gfx_disc(s, cx, cy, R * 0.42f, 0x8A8E99, 255);
         break;
     }
+    case ICON_TASKS: { /* Task-Manager: gruene Messkurve auf dunklem Grund */
+        gfx_round_rect_grad(s, x, y, size, size, r, 0x3A3A3C, 0x1C1C1E, 255);
+        for (int i = 1; i < 4; i++)
+            gfx_fill(s, x + size / 8, y + size * i / 4, size * 3 / 4, size / 64 + 1, 0x48484A);
+        static const float pt[][2] = {{0.12f, 0.62f}, {0.30f, 0.62f}, {0.40f, 0.30f}, {0.52f, 0.78f},
+                                      {0.62f, 0.45f}, {0.70f, 0.55f}, {0.88f, 0.55f}};
+        for (int i = 0; i + 1 < 7; i++)
+            gfx_capsule(s, x + S * pt[i][0], y + S * pt[i][1], x + S * pt[i + 1][0], y + S * pt[i + 1][1], S * 0.07f,
+                        0x30D158, 255);
+        break;
+    }
     case ICON_TEXT:
         gfx_round_rect_grad(s, x + size / 8, y, size * 3 / 4, size, size / 12, 0xFFFFFF, 0xF2F2F5, 255);
         gfx_round_frame(s, x + size / 8, y, size * 3 / 4, size, size / 12, 0xC7C7CC, 255);

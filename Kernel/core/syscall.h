@@ -98,6 +98,7 @@
                               * 2 = Firmware laden und starten, 3 = suchen (Sekunden) -> Zahl, 4 = Geraet arg nach arg2,
                               * 5 = verbinden (Adresse), 6 = trennen, 7 = BtConn, 8/9 = Schluessel holen/eintragen,
                               * 10 = naechste Taste der Fernbedienung (AVRCP) */
+#define SYS_SYSINFO       78 /* (SysInfo *) -> 0: Arbeitsspeicher, Grafik, Kernel-Version (Info-Fenster) */
 #define SYS_WLAN          76 /* (op, arg) -> WLAN (iwl.c): 0 = WlanInfo nach arg, 1 = aufwecken (Stufe 2a) */
 #define SYS_CLOSEFROM     75 /* (fd) -> 0: alle Deskriptoren ab fd schliessen (vor exec: nichts erben, was man nicht kennt) */
 #define SYS_MMAP_FILE     74 /* (fd | schreibbar << 32, laenge, offset) -> Adresse: Datei einblenden, Seiten werden erst beim
@@ -165,6 +166,17 @@ typedef struct {
     uint64_t ticks_user, ticks_kernel, ticks_idle;
 } CpuInfo;
 
+#define MINIKERNEL_VERSION "1.0"
+
+/* SYS_SYSINFO (gleiches Layout in Userland/include/user.h); gpu leer: keine bekannte GPU (about sucht dann per PCI) */
+typedef struct {
+    uint64_t mem_total, mem_free; /* Bytes, die der Kernel verwaltet (ohne Bereiche der Firmware) */
+    uint32_t cpus, pad;
+    char     gpu[64];
+    char     version[16];
+    char     build[24];           /* Datum und Uhrzeit, zu der syscall.c uebersetzt wurde */
+} SysInfo;
+
 /* Eintrag fuer SYS_MOUSE (gleiches Layout in Userland/user.h); x, y in Pixeln, buttons: Bit 0 links, 1 rechts, 2 Mitte */
 typedef struct {
     int32_t  x, y;
@@ -208,6 +220,9 @@ typedef struct {
     uint32_t pid, ppid, pgid, state;
     char     name[32];
     uint32_t threads, pad; /* laufende Threads */
+    uint64_t cpu_ticks;    /* Timer-Ticks (je 10 ms) aller Threads seit dem Start */
+    uint64_t mem_bytes;    /* eingeblendete eigene Seiten (ohne geteilten Speicher) */
+    uint64_t shm_bytes;    /* eingeblendeter geteilter Speicher (Fensterflaechen usw.) */
 } ProcInfo;
 
 /* Gesicherte Register beim syscall (Layout muss zu den Pushes in syscall_entry.S passen, niedrigste Adresse zuerst).

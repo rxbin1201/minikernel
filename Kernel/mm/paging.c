@@ -379,6 +379,23 @@ static int for_each_user_pte(AddressSpace *as, int (*fn)(void *ctx, uint64_t va,
     return 0;
 }
 
+static int count_pte(void *ctx, uint64_t va, uint64_t *pte)
+{
+    (void)va;
+    uint64_t *n = ctx;
+    n[(*pte & PAGE_SHARED) ? 1 : 0]++;
+    return 0;
+}
+
+uint64_t as_user_pages(AddressSpace *as, uint64_t *shared)
+{
+    uint64_t n[2] = {0, 0};
+    for_each_user_pte(as, count_pte, n);
+    if (shared)
+        *shared = n[1];
+    return n[0];
+}
+
 static int clone_cow_pte(void *ctx, uint64_t va, uint64_t *pte)
 {
     AddressSpace *dst = ctx;
