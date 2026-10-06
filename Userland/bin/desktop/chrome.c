@@ -79,7 +79,7 @@ static int icon_of_win(const Win *w)
 /* ======================================================================================================================
  * Taskleiste unten: vier freistehende Segmente aus Milchglas
  *   Programme (Strich darunter = laeuft, lang und blau = aktives Fenster; rechts die minimierten Fenster)
- *   Suche, Start, Fenster  |  Uhrzeit und Datum  |  Netzwerk (Kabel), WLAN, Lautstaerke, Systemmenue
+ *   Suche, Start, Fenster  |  Uhrzeit und Datum  |  Netzwerk (Kabel und WLAN), Bluetooth, Lautstaerke, Systemmenue
  * Die Knoepfe oeffnen ihre Menues nach oben.
  * ==================================================================================================================== */
 
@@ -99,7 +99,7 @@ static const struct {
 #define NAPPS    ((int)(sizeof(dock_apps) / sizeof(dock_apps[0])))
 #define MAXSLOTS (NAPPS + MAXW)
 
-enum { B_SEARCH, B_START, B_WINDOWS, B_CLOCK, B_NET, B_WLAN, B_VOL, B_SYS, NBTN };
+enum { B_SEARCH, B_START, B_WINDOWS, B_CLOCK, B_NET, B_BT, B_VOL, B_SYS, NBTN };
 #define HIT_BTN 1000 /* bar_hit: Knoepfe ab hier, darunter die Programm-Slots */
 
 static int win_of_app(const Win *w, int i) /* gehoert das Fenster zu Programm i? */
@@ -244,7 +244,7 @@ static void bar_layout(Bar *b)
     int tw = text_width(font_bold, FS, cfg.seconds ? "00:00:00" : "00:00") + U(4), dw = text_width(font_ui, FS_SMALL, b->date);
     b->sw[1] = SPAD * 2 + 3 * BTN;
     b->sw[2] = (tw > dw ? tw : dw) + D(18) * 2;
-    b->sw[3] = SPAD * 2 + TBTN * (1 + (net_ok != 0) + (wlan_ok != 0) + (vol_level >= 0));
+    b->sw[3] = SPAD * 2 + TBTN * (1 + (net_ok || wlan_ok) + (bt_ok != 0) + (vol_level >= 0));
     /* minimierte Fenster: so viele, wie auf den Bildschirm passen (die anderen im Fenstermenue) */
     int room = W - U(32) - b->sw[1] - b->sw[2] - b->sw[3] - 3 * SGAP - SPAD * 2 - U(9);
     int fit = room / SLOT - NAPPS;
@@ -274,11 +274,11 @@ static void bar_layout(Bar *b)
     b->bw[B_CLOCK] = b->sw[2];
     x = b->sx[3] + SPAD;
     b->bx[B_NET] = x;
-    b->bw[B_NET] = net_ok ? TBTN : 0;
+    b->bw[B_NET] = net_ok || wlan_ok ? TBTN : 0;
     x += b->bw[B_NET];
-    b->bx[B_WLAN] = x;
-    b->bw[B_WLAN] = wlan_ok ? TBTN : 0;
-    x += b->bw[B_WLAN];
+    b->bx[B_BT] = x;
+    b->bw[B_BT] = bt_ok ? TBTN : 0;
+    x += b->bw[B_BT];
     b->bx[B_VOL] = x;
     b->bw[B_VOL] = vol_level >= 0 ? TBTN : 0;
     x += b->bw[B_VOL];
@@ -402,6 +402,35 @@ static void draw_wlan_icon(Surface *s, float cx, float cy, float k)
         gfx_capsule(s, cx - 7 * k, cy - 6 * k, cx + 7 * k, cy + 6 * k, 1.6f * k, C_TEXT, 220);
 }
 
+/* Netzwerk-Knopf: Kabel, wenn es mit Adresse verbunden ist (oder es kein WLAN gibt), sonst WLAN */
+static void draw_netw_icon(Surface *s, float cx, float cy, float k)
+{
+    if (net_state() == 2 || !wlan_ok)
+        draw_net_icon(s, cx, cy, k);
+    else
+        draw_wlan_icon(s, cx, cy, k);
+}
+
+/* Bluetooth-Zeichen (Rune): senkrechter Strich, rechts zwei Spitzen, die Diagonalen kreuzen ihn */
+static void draw_bt_rune(Surface *s, float cx, float cy, float k, u32 c, int a)
+{
+    float w = 1.6f * k, x = cx - 0.5f * k;
+    gfx_capsule(s, x, cy - 7 * k, x, cy + 7 * k, w, c, a);
+    gfx_capsule(s, x, cy - 7 * k, x + 3.6f * k, cy - 3.5f * k, w, c, a);
+    gfx_capsule(s, x + 3.6f * k, cy - 3.5f * k, x - 3.8f * k, cy + 3.7f * k, w, c, a);
+    gfx_capsule(s, x, cy + 7 * k, x + 3.6f * k, cy + 3.5f * k, w, c, a);
+    gfx_capsule(s, x + 3.6f * k, cy + 3.5f * k, x - 3.8f * k, cy - 3.7f * k, w, c, a);
+}
+
+/* in der Taskleiste: verbunden kraeftig, sonst blass; spielt Ton, ein blauer Punkt daneben */
+static void draw_bt_icon(Surface *s, float cx, float cy, float k)
+{
+    int st = btd_icon();
+    draw_bt_rune(s, cx, cy, k, C_TEXT, st >= 2 ? 255 : 110);
+    if (st == 3)
+        gfx_disc(s, cx + 6.5f * k, cy + 5.5f * k, 2.2f * k, C_ACCENT, 255);
+}
+
 /* Lautsprecher: Kasten, Trichter, Schallwellen je nach Lautstaerke; stumm: durchgestrichen */
 static void draw_vol_icon(Surface *s, float cx, float cy, float k)
 {
@@ -427,7 +456,7 @@ static int open_button(void) /* Knopf, dessen Menue offen ist */
     case 2: return B_WINDOWS;
     case 3: return B_NET;
     case 4: return B_SYS;
-    case 6: return B_WLAN;
+    case 7: return B_BT;
     }
     return -1;
 }
@@ -446,8 +475,8 @@ static const char *hover_name(const Bar *b, int h, char *buf, int max)
     case B_SEARCH: return "Suchen";
     case B_START: return "Start";
     case B_WINDOWS: return "Fenster";
-    case B_NET: return "Netzwerk";
-    case B_WLAN: return wlan_hover_name(buf, max);
+    case B_NET: return net_state() == 2 || !wlan_ok ? "Netzwerk" : wlan_hover_name(buf, max);
+    case B_BT: return btd_hover_name(buf, max);
     case B_VOL:
         snprintf(buf, max, vol_level ? "Lautst\xC3\xA4rke %lld %%" : "Stumm", (long long)vol_level);
         return buf;
@@ -517,9 +546,9 @@ void draw_dock(void)
 
     /* Netzwerk, Lautstaerke, System */
     if (b.bw[B_NET])
-        draw_net_icon(s, b.bx[B_NET] + TBTN * 0.5f, cy, k);
-    if (b.bw[B_WLAN])
-        draw_wlan_icon(s, b.bx[B_WLAN] + TBTN * 0.5f, cy, k);
+        draw_netw_icon(s, b.bx[B_NET] + TBTN * 0.5f, cy, k);
+    if (b.bw[B_BT])
+        draw_bt_icon(s, b.bx[B_BT] + TBTN * 0.5f, cy, k);
     if (b.bw[B_VOL])
         draw_vol_icon(s, b.bx[B_VOL] + TBTN * 0.5f, cy, k);
     float sx = b.bx[B_SYS] + TBTN * 0.5f;
@@ -703,7 +732,7 @@ int menubar_hit(int x, int y)
     case B_WINDOWS: return 2;
     case B_NET: return 3;
     case B_SYS: return 4;
-    case B_WLAN: return 6;
+    case B_BT: return 7;
     }
     return 0;
 }
@@ -726,8 +755,10 @@ void open_menu(int m)
     menu_open = m == 5 ? 1 : m;
     start_query[0] = 0;
     menu_hover = -1;
-    if (menu_open == 6)
+    if (menu_open == 3 && wlan_ok)
         wlan_menu_opened();
+    if (menu_open == 7)
+        btd_menu_opened();
     damage_menu();
     damage_menu_button();
 }
@@ -819,7 +850,7 @@ static const MenuItem sys_menu[] = {
 
 static char nm_status[40], nm_model[40], nm_ip[24], nm_gw[20], nm_dns[20], nm_speed[32], nm_rx[40], nm_tx[40];
 static MenuItem net_menu[] = {
-    {"Ethernet", A_INFO, nm_status},   {"Karte", A_INFO, nm_model},      {"IP-Adresse", A_INFO, nm_ip},
+    {"Ethernet", A_HEAD, nm_status},   {"Karte", A_INFO, nm_model},      {"IP-Adresse", A_INFO, nm_ip},
     {"Gateway", A_INFO, nm_gw},        {"DNS-Server", A_INFO, nm_dns},   {"Verbindung", A_INFO, nm_speed},
     {"Empfangen", A_INFO, nm_rx},      {"Gesendet", A_INFO, nm_tx},      {"", A_SEP, 0},
     {"Adresse neu anfragen (DHCP)", A_NET_DHCP, 0},
@@ -877,6 +908,32 @@ static void net_menu_texts(void)
     snprintf(nm_tx, sizeof(nm_tx), "%s  (%s/s)", a, r);
 }
 
+/* Netzwerk-Menue: Ethernet (mit WLAN daneben nur Zustand, Adresse, Verbindung), darunter WLAN; beim Passwort nur WLAN */
+static const MenuItem *net_menu_build(int *n)
+{
+    static MenuItem items[80];
+    if (wlan_ok && wlan_pw_active())
+        return wlan_menu(n);
+    int k = 0;
+    if (net_ok) {
+        net_menu_texts();
+        int all = (int)(sizeof(net_menu) / sizeof(net_menu[0]));
+        for (int i = 0; i < all; i++)
+            if (!wlan_ok || i == 0 || i == 2 || i == 5 || i == all - 1)
+                items[k++] = net_menu[i];
+    }
+    if (wlan_ok) {
+        int wn;
+        const MenuItem *w = wlan_menu(&wn);
+        if (k)
+            items[k++] = (MenuItem){"", A_SEP, 0};
+        for (int i = 0; i < wn && k < (int)(sizeof(items) / sizeof(items[0])); i++)
+            items[k++] = w[i];
+    }
+    *n = k;
+    return items;
+}
+
 static const MenuItem *menu_items(int *n)
 {
     switch (menu_open) {
@@ -887,11 +944,9 @@ static const MenuItem *menu_items(int *n)
         *n = build_windows();
         return win_items;
     case 3:
-        net_menu_texts();
-        *n = (int)(sizeof(net_menu) / sizeof(net_menu[0]));
-        return net_menu;
-    case 6:
-        return wlan_menu(n);
+        return net_menu_build(n);
+    case 7:
+        return btd_menu(n);
     }
     *n = (int)(sizeof(sys_menu) / sizeof(sys_menu[0]));
     return sys_menu;
@@ -906,13 +961,13 @@ static int row_h(const MenuItem *m)
     if (menu_open == 1 || is_winsel(m->action))
         return U(32); /* mit Programmsymbol */
     if (m->action >= A_WLAN_NET)
-        return U(30); /* Netz mit Signal */
+        return U(30); /* Netz mit Signal bzw. Bluetooth-Geraet */
     return U(26);
 }
 
 static int is_item(const MenuItem *m)
 {
-    return m->action != A_SEP && m->action != A_INFO && m->action != A_SEARCH && m->action != A_WLAN_PASS;
+    return m->action != A_SEP && !is_info(m->action) && m->action != A_SEARCH && m->action != A_WLAN_PASS;
 }
 
 static void menu_box(int *x, int *y, int *w, int *h)
@@ -922,7 +977,7 @@ static void menu_box(int *x, int *y, int *w, int *h)
     Bar b;
     bar_layout(&b);
     int btn = open_button();
-    *w = menu_open == 3 || menu_open == 6 ? U(340) : menu_open == 4 ? U(230) : U(290);
+    *w = menu_open == 3 || menu_open == 7 ? U(340) : menu_open == 4 ? U(230) : U(290);
     *h = U(12);
     for (int i = 0; i < n; i++)
         *h += row_h(&m[i]);
@@ -990,9 +1045,9 @@ void draw_menu(void)
             gfx_blend_fill(s, cx, fy + U(7), U(2) > 1 ? U(2) : 2, fh - U(14), C_ACCENT, 255);
             continue;
         }
-        if (m[i].action == A_INFO) { /* Name grau links, Wert rechts */
+        if (is_info(m[i].action)) { /* Name grau links, Wert rechts (bei Abschnittskoepfen fett) */
             text_draw(s, font_ui, FS, x + U(14), ty, m[i].label, 0x8E8E93);
-            Font *vf = (menu_open == 3 || menu_open == 6) && i == 0 ? font_bold : font_ui;
+            Font *vf = m[i].action == A_HEAD ? font_bold : font_ui;
             text_draw(s, vf, FS, x + w - U(14) - text_width(vf, FS, m[i].keys), ty, m[i].keys, C_TEXT);
             continue;
         }
@@ -1004,6 +1059,20 @@ void draw_menu(void)
             int icon = is_winsel(m[i].action) ? icon_of_win(&wins[m[i].action - A_WINSEL]) : m[i].action;
             ui_app_icon(s, icon, x + U(12), iy + (rh - U(22)) / 2, U(22));
             tx = x + U(44);
+        } else if (m[i].action >= A_BT_DEV) { /* Bluetooth-Geraet: Lautsprecher bei Audio, sonst das Zeichen */
+            u32 col = hover ? 0xFFFFFF : C_TEXT;
+            float kk = (float)U(1) * 0.8f;
+            if (btd_dev_audio(m[i].action - A_BT_DEV)) {
+                float sx = x + U(24) - 7 * kk, my = iy + rh * 0.5f;
+                gfx_round_rect(s, (int)sx, (int)(my - 2.5f * kk), (int)(3.5f * kk), (int)(5 * kk), 1, col, 255);
+                for (int q = 0; q <= 4; q++)
+                    gfx_capsule(s, sx + (3 + q) * kk, my - (2.5f + q * 0.9f) * kk, sx + (3 + q) * kk,
+                                my + (2.5f + q * 0.9f) * kk, 1.4f * kk, col, 255);
+                arc(s, sx + 8 * kk, my, 4 * kk, -0.9f, 0.9f, 1.4f * kk, col, 230);
+            } else {
+                draw_bt_rune(s, x + U(24), iy + rh * 0.5f, kk, col, 255);
+            }
+            tx = x + U(42);
         } else if (m[i].action >= A_WLAN_NET) { /* Signalstaerke davor */
             int dbm = wlan_net_signal(m[i].action - A_WLAN_NET);
             int level = dbm >= -55 ? 3 : dbm >= -67 ? 2 : dbm >= -78 ? 1 : 0;

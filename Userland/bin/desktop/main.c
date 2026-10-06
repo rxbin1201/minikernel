@@ -43,6 +43,11 @@ void do_action(int a)
             close_menu();
         return;
     }
+    if (is_bt_action(a)) { /* Bluetooth-Menue: ebenso */
+        if (!btd_action(a))
+            close_menu();
+        return;
+    }
     close_menu();
     if (a >= A_WINSEL && a < A_WINSEL + MAXW) { /* Fenster aus dem Fenstermenue nach vorn */
         if (wins[a - A_WINSEL].used)
@@ -385,7 +390,8 @@ void _start(int argc, char **argv)
     W = gfx_screen.w;
     H = gfx_screen.h;
     now_us = sys_time_us();
-    wlan_init(); /* vor desk_init: der WLAN-Knopf gehoert zur Taskleiste */
+    wlan_init(); /* vor desk_init: Netzwerk- und Bluetooth-Knopf gehoeren zur Taskleiste */
+    btd_init();
     desk_init();
     make_background();
     sys_service_register("desktop"); /* Grafikprogramme aus dem Terminal finden ihn so */
@@ -453,6 +459,7 @@ void _start(int argc, char **argv)
         power_tick();
         net_tick();
         wlan_tick();
+        btd_tick();
         anim_tick();
         draw_all(); /* direkt nach dem Bildwechsel: was sich geaendert hat, steht bis zum naechsten Bild */
         /* Programme, die auf ein Bild warten (gfx_vsync), schon jetzt weiterzeichnen lassen - sonst kaeme ihr naechstes

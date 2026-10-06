@@ -152,14 +152,14 @@ void wlan_tick(void)
     int has_ip = ok && (ni.ip[0] | ni.ip[1] | ni.ip[2] | ni.ip[3]);
     if (s.state != wl_st.state || s.step != wl_st.step || had_ip != has_ip || changed)
         damage_dock();
-    if (menu_open == 6) {
+    if (menu_open == 3) {
         damage_menu();
         changed = 1;
     }
     wl_st = s;
     wl_ni = ni;
     wl_ni_ok = ok;
-    if (changed && menu_open == 6)
+    if (changed && menu_open == 3)
         damage_menu(); /* neue Groesse */
 
     /* einmal beim Start: mit dem gemerkten Netz verbinden */
@@ -213,7 +213,7 @@ void wlan_menu_opened(void)
 
 int wlan_pw_active(void)
 {
-    return menu_open == 6 && wl_pw_mode;
+    return menu_open == 3 && wl_pw_mode;
 }
 
 
@@ -252,7 +252,7 @@ const MenuItem *wlan_menu(int *count)
     int st = wl_st.state;
     snprintf(st_txt, sizeof(st_txt), "%s", st == WLAN_ST_CONNECTED ? "Verbunden" : st == WLAN_ST_CONNECTING ?
              "Verbinde \xE2\x80\xA6" : st == WLAN_ST_FAILED ? "Fehlgeschlagen" : "Getrennt");
-    items[n++] = (MenuItem){"WLAN", A_INFO, st_txt};
+    items[n++] = (MenuItem){"WLAN", A_HEAD, st_txt};
     if (st == WLAN_ST_CONNECTED) {
         items[n++] = (MenuItem){"Netz", A_INFO, wl_st.ssid};
         if (wl_ni_ok && (wl_ni.ip[0] | wl_ni.ip[1] | wl_ni.ip[2] | wl_ni.ip[3]))
@@ -286,7 +286,7 @@ const MenuItem *wlan_menu(int *count)
         items[n++] = (MenuItem){wl_job == 1 ? "Suche l\xC3\xA4uft \xE2\x80\xA6" : "Keine Netze gefunden", A_INFO, ""};
     items[n++] = (MenuItem){"", A_SEP, 0};
     if (st == WLAN_ST_CONNECTED)
-        items[n++] = (MenuItem){"Trennen", A_WLAN_DISC, 0};
+        items[n++] = (MenuItem){"WLAN trennen", A_WLAN_DISC, 0};
     items[n++] = (MenuItem){"Netze suchen", A_WLAN_SCAN, wl_job == 1 ? "l\xC3\xA4uft \xE2\x80\xA6" : 0};
     *count = n;
     return items;
