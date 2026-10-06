@@ -37,6 +37,9 @@ typedef struct {
 /* ---- Dienste des Controllers fuer die Klassentreiber (nur mit gehaltener Controller-Sperre aufrufen; die Probe-
  * ---- Funktionen und die Callbacks laufen bereits darin, Blockgeraete-Zugriffe nehmen sie mit usb_lock/usb_unlock) ---- */
 
+/* Hinweis: usb_control und usb_bulk geben waehrend des Wartens (mit MSI) die Controller-Sperre ab und schlafen - wer
+ * mehrere Transfers als Einheit braucht (z.B. ein SCSI-Befehl), sperrt das selbst. */
+
 /* Control-Transfer auf Endpunkt 0. Liefert die Zahl der uebertragenen Bytes (bei IN) oder negativ (-Completion-Code). */
 int usb_control(UsbDevice *d, uint8_t request_type, uint8_t request, uint16_t value, uint16_t index, void *buf, uint16_t len);
 

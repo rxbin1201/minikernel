@@ -91,6 +91,7 @@ typedef struct {
     void    *cb_buf;
     uint32_t cb_len;
     int      cb_errors;
+    volatile int busy;           /* ein Transfer laeuft (der Wartende hat die Controller-Sperre abgegeben) */
 } Ep;
 
 struct Xhci;
@@ -115,6 +116,7 @@ struct UsbDevice {
     struct UsbDevice *children[16];
     uint8_t  child_tries[16];
     char     path[16];          /* "1" (Root-Port 1), "1.3" (Port 3 des Hubs an Root-Port 1) usw. */
+    uint8_t *ctrl_buf;          /* 4 KiB DMA-Puffer fuer Control-Transfers dieses Geraets (beim ersten angelegt) */
 };
 
 typedef struct Xhci {
@@ -131,12 +133,14 @@ typedef struct Xhci {
     uint8_t  port_tries[256];
     UsbDevice *slot_dev[256];
     UsbDevice *port_dev[256];
-    uint8_t *ctrl_buf;          /* 4 KiB DMA-Puffer fuer Control-Transfers */
     Mutex    lock;
     uint64_t last_scan_ms;
     PciDevice pci;
     int      msi;               /* 2 = MSI-X, 1 = MSI, 0 = nur Polling */
     volatile uint64_t irqs;     /* empfangene Interrupts (Diagnose) */
+    /* Transfers, die schlafend auf ihr Ende warten (mit MSI): je einer ein Event; der Interrupt weckt alle */
+    Event        wev[8];
+    volatile int wused[8];
 } Xhci;
 
 static Xhci       *controllers[MAX_XHCI];
@@ -300,7 +304,51 @@ static int xhci_cmd(Xhci *x, uint32_t d0, uint32_t d1, uint32_t d2, uint32_t d3)
     return x->cmd_cc == CC_SUCCESS ? 0 : -x->cmd_cc;
 }
 
-/* ---------- Transfers ---------- */
+/* ---------- Transfers ----------
+ * Warten auf das Ende: mit MSI schlaeft der Aufrufer und gibt dabei die Sperre des Controllers (und den BKL) ab - so
+ * kommen Maus, Tastatur, Bluetooth und andere Geraete waehrenddessen dran; der Interrupt weckt ihn. Ohne MSI (frueh
+ * beim Start, Controller ohne MSI) wird wie frueher aktiv gewartet. Weil die Sperre zwischendurch frei ist: ein
+ * Endpunkt hat immer nur einen Transfer (busy), und jedes Geraet hat seinen eigenen Control-Puffer. */
+
+static void ep_claim(Xhci *x, Ep *e)
+{
+    while (e->busy) { /* ein anderer Thread wartet gerade auf einen Transfer dieses Endpunkts */
+        mutex_unlock(&x->lock);
+        thread_sleep_ms(1);
+        mutex_lock(&x->lock);
+    }
+    e->busy = 1;
+}
+
+/* mit x->lock: bis e->done (oder das Geraet weg ist); 0 oder -1 bei Zeitablauf */
+static int xfer_wait(Xhci *x, UsbDevice *d, Ep *e, uint32_t timeout_ms)
+{
+    int slot = -1;
+    if (x->msi)
+        for (int k = 0; k < 8 && slot < 0; k++)
+            if (!x->wused[k]) {
+                x->wused[k] = 1;
+                slot = k;
+            }
+    if (slot < 0)
+        return WAIT_UNTIL((process_events(x), e->done || !d->alive), timeout_ms) ? 0 : -1;
+    uint64_t t0 = time_ms();
+    int r = 0;
+    for (;;) {
+        process_events(x);
+        if (e->done || !d->alive)
+            break;
+        if (time_ms() - t0 > timeout_ms) {
+            r = -1;
+            break;
+        }
+        mutex_unlock(&x->lock);
+        event_wait(&x->wev[slot], 10); /* der Interrupt weckt; spaetestens nach 10 ms selbst nachsehen */
+        mutex_lock(&x->lock);
+    }
+    x->wused[slot] = 0;
+    return r;
+}
 
 int usb_alive(const UsbDevice *d) { return d->alive; }
 void usb_poll(UsbDevice *d)       { process_events(d->x); }
@@ -327,6 +375,8 @@ static void report_slow(const UsbDevice *d, const char *what, int ep, uint32_t l
 
 static int usb_control_timed(UsbDevice *d, uint8_t request_type, uint8_t request, uint16_t value, uint16_t index,
                              void *buf, uint16_t len);
+static int control_locked(Xhci *x, UsbDevice *d, Ep *e, uint8_t request_type, uint8_t request, uint16_t value,
+                          uint16_t index, void *buf, uint16_t len);
 
 int usb_control(UsbDevice *d, uint8_t request_type, uint8_t request, uint16_t value, uint16_t index, void *buf, uint16_t len)
 {
@@ -345,10 +395,21 @@ static int usb_control_timed(UsbDevice *d, uint8_t request_type, uint8_t request
         return -2;
     if (len > 4096)
         return -4;
+    if (!d->ctrl_buf && !(d->ctrl_buf = blk_dma_alloc(4096)))
+        return -4;
+    ep_claim(x, e);
+    int r = control_locked(x, d, e, request_type, request, value, index, buf, len);
+    e->busy = 0;
+    return r;
+}
 
+static int control_locked(Xhci *x, UsbDevice *d, Ep *e, uint8_t request_type, uint8_t request, uint16_t value,
+                          uint16_t index, void *buf, uint16_t len)
+{
+    uint8_t *cb = d->ctrl_buf;
     int in = (request_type & 0x80) != 0;
     if (!in && len)
-        memcpy(x->ctrl_buf, buf, len);
+        memcpy(cb, buf, len);
     e->done = 0;
 
     uint32_t setup0 = request_type | ((uint32_t)request << 8) | ((uint32_t)value << 16);
@@ -356,25 +417,26 @@ static int usb_control_timed(UsbDevice *d, uint8_t request_type, uint8_t request
     uint32_t trt = len ? (in ? 3 : 2) : 0;
     ring_push(&e->ring, setup0, setup1, 8, (TRB_SETUP << 10) | (1u << 6) | (trt << 16)); /* IDT: die 8 Bytes stehen im TRB */
     if (len)
-        ring_push(&e->ring, lo((uint64_t)x->ctrl_buf), hi((uint64_t)x->ctrl_buf), len, (TRB_DATA << 10) | ((uint32_t)in << 16));
+        ring_push(&e->ring, lo((uint64_t)cb), hi((uint64_t)cb), len, (TRB_DATA << 10) | ((uint32_t)in << 16));
     int status_in = !(len && in); /* Status-Phase in Gegenrichtung der Daten; ohne Daten: IN */
     ring_push(&e->ring, 0, 0, 0, (TRB_STATUS << 10) | ((uint32_t)status_in << 16) | (1u << 5)); /* IOC */
     doorbell(x, d->slot, 1);
 
-    if (!WAIT_UNTIL((process_events(x), e->done || !d->alive), 3000))
+    if (xfer_wait(x, d, e, 3000) != 0)
         return -1;
     if (!d->alive)
         return -2;
     if (e->cc != CC_SUCCESS && e->cc != CC_SHORT_PACKET)
         return -e->cc;
     if (in && len) {
-        memcpy(buf, x->ctrl_buf, len);
+        memcpy(buf, cb, len);
         return (int)len - (int)e->residual;
     }
     return len;
 }
 
 static int usb_bulk_timed(UsbDevice *d, uint8_t endpoint_address, void *buf, uint32_t len, uint32_t timeout_ms);
+static int bulk_locked(Xhci *x, UsbDevice *d, Ep *e, int dci, void *buf, uint32_t len, uint32_t timeout_ms);
 
 int usb_bulk(UsbDevice *d, uint8_t endpoint_address, void *buf, uint32_t len, uint32_t timeout_ms)
 {
@@ -393,7 +455,14 @@ static int usb_bulk_timed(UsbDevice *d, uint8_t endpoint_address, void *buf, uin
         return -2;
     if (!e->active)
         return -3;
+    ep_claim(x, e);
+    int r = bulk_locked(x, d, e, dci, buf, len, timeout_ms);
+    e->busy = 0;
+    return r;
+}
 
+static int bulk_locked(Xhci *x, UsbDevice *d, Ep *e, int dci, void *buf, uint32_t len, uint32_t timeout_ms)
+{
     e->done = 0;
     uint64_t addr = (uint64_t)buf;
     uint32_t remaining = len;
@@ -405,16 +474,16 @@ static int usb_bulk_timed(UsbDevice *d, uint8_t endpoint_address, void *buf, uin
         uint32_t packets_left = e->mps ? (remaining + e->mps - 1) / e->mps : 0;
         if (packets_left > 31)
             packets_left = 31;
-        /* Chain, am Ende IOC. Interrupter Target: das Ende kommt in den Ereignisring von Interrupter 1, der keine
-         * Interrupts ausloest (hier wird ohnehin darauf gewartet; Massenspeicher macht tausende Transfers, die sonst
-         * jedes Mal den USB-Thread umsonst wecken wuerden) */
-        ring_push(&e->ring, lo(addr), hi(addr), chunk | (packets_left << 17) | ((uint32_t)(x->nrings - 1) << 22),
+        /* Chain, am Ende IOC. Interrupter Target: mit MSI Interrupter 0 (sein Interrupt weckt den schlafenden
+         * Aufrufer), sonst der ohne Interrupts (es wird aktiv gewartet, der USB-Thread soll nicht umsonst aufwachen) */
+        uint32_t target = x->msi ? 0 : (uint32_t)(x->nrings - 1);
+        ring_push(&e->ring, lo(addr), hi(addr), chunk | (packets_left << 17) | (target << 22),
                   (TRB_NORMAL << 10) | (remaining ? (1u << 4) : (1u << 5)));
         addr += chunk;
     } while (remaining);
     doorbell(x, d->slot, dci);
 
-    if (!WAIT_UNTIL((process_events(x), e->done || !d->alive), timeout_ms))
+    if (xfer_wait(x, d, e, timeout_ms) != 0)
         return -1;
     if (!d->alive)
         return -2;
@@ -1021,8 +1090,7 @@ static int init_controller(Xhci *x, const PciDevice *pci)
 
     /* Speicher: Geraete-Kontext-Array, Scratchpad-Puffer, Kommando- und Ereignisring */
     x->dcbaa = blk_dma_alloc(4096);
-    x->ctrl_buf = blk_dma_alloc(4096);
-    if (!x->dcbaa || !x->ctrl_buf || ring_init(&x->cmd) != 0)
+    if (!x->dcbaa || ring_init(&x->cmd) != 0)
         return -1;
     x->nrings = ((hcs1 >> 8) & 0x7FF) >= 2 ? 2 : 1; /* MaxIntrs */
     uint64_t *erst = blk_dma_alloc(4096);          /* je Interrupter ein Segment-Tabelleneintrag (16 Byte) */
@@ -1094,6 +1162,9 @@ static void xhci_irq(InterruptFrame *f)
         x->irqs++;
         wr32(x->op, OP_USBSTS, STS_EINT);          /* write 1 to clear */
         wr32(x->rt, RT_IMAN, IMAN_IE | IMAN_IP);   /* IP quittieren, IE bleibt an */
+        for (int k = 0; k < 8; k++)                 /* schlafende Transfers: nachsehen lassen */
+            if (x->wused[k])
+                event_signal(&x->wev[k]);
     }
     event_signal(&usb_ev);
 }

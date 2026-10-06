@@ -19,6 +19,8 @@ typedef struct {
     uint8_t   *csw;
     uint8_t   *data;
     uint64_t   sectors;
+    Mutex      op;       /* ein SCSI-Befehl (CBW, Daten, CSW) nach dem anderen: usb_bulk gibt beim Warten die
+                          * Controller-Sperre ab, ein zweiter Befehl darf sich nicht dazwischendraengen */
 } Msc;
 
 static int msc_count;
@@ -108,6 +110,7 @@ static int rw(BlkDev *bd, uint64_t lba, uint32_t count, void *buf, int write)
     uint8_t *p = buf;
     int result = 0;
 
+    mutex_lock(&m->op);
     usb_lock(m->d);
     while (count && result == 0) {
         uint32_t n = count > DATA_SECTORS ? DATA_SECTORS : count;
@@ -127,6 +130,7 @@ static int rw(BlkDev *bd, uint64_t lba, uint32_t count, void *buf, int write)
         count -= n;
     }
     usb_unlock(m->d);
+    mutex_unlock(&m->op);
     return result;
 }
 
@@ -139,9 +143,11 @@ static int msc_flush(BlkDev *bd)
     if (!usb_alive(m->d))
         return -1;
     uint8_t cb[10] = {0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0}; /* SYNCHRONIZE CACHE(10) */
+    mutex_lock(&m->op);
     usb_lock(m->d);
     int r = bot(m, cb, 10, 0, 0);
     usb_unlock(m->d);
+    mutex_unlock(&m->op);
     return r == 0 ? 0 : -1;
 }
 

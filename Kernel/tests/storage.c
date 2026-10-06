@@ -6,8 +6,28 @@
 #include "mm/pmm.h"
 #include "fs/fs.h"
 #include "drivers/usb/usb.h"
+#include "core/sched.h"
+#include "arch/x86_64/apic.h"
 #include "drivers/rtc.h"
 #include "tests/selftest.h"
+
+/* Zwei Threads lesen gleichzeitig vom USB-Massenspeicher (usb_bulk gibt beim Warten die Controller-Sperre ab) */
+typedef struct {
+    BlkDev        *dev;
+    uint8_t       *buf;
+    uint64_t       lba;
+    volatile int   done, ok;
+} ParRead;
+
+static void par_reader(void *arg)
+{
+    ParRead *p = arg;
+    int ok = 1;
+    for (int k = 0; ok && k < 16; k++)
+        ok = blk_read(p->dev, p->lba + (uint64_t)k * 8, 8, p->buf + (uint64_t)k * 4096) == 0;
+    p->ok = ok;
+    p->done = 1;
+}
 
 void test_usb(void)
 {
@@ -24,7 +44,7 @@ void test_usb(void)
         kprintf("  (%lu xHCI-Interrupts per MSI-X/MSI)\n", (unsigned long)usb_irq_count());
         check("xHCI meldet Ereignisse per Interrupt (MSI-X/MSI)", usb_irq_count() > 0);
     }
-    /* Massenspeicher: das Ende der Transfers landet beim Interrupter ohne Interrupts (der Aufrufer wartet selbst) */
+    /* Massenspeicher: der Aufrufer schlaeft, bis der Interrupt das Ende meldet (gibt dabei Controller-Sperre und BKL ab) */
     for (int i = 0; i < blk_count(); i++) {
         BlkDev *d = blk_get(i);
         if (!d || memcmp(d->name, "usb", 3) != 0)
@@ -37,7 +57,30 @@ void test_usb(void)
         uint64_t irqs = usb_irq_count() - irq0;
         kprintf("  (%s: 25 x 8 Sektoren gelesen, %lu Interrupts dabei)\n", d->name, (unsigned long)irqs);
         check("USB-Massenspeicher: Lesen klappt", ok);
-        check("USB-Massenspeicher: Transfers loesen keine Interrupts aus", irqs <= 2);
+        if (usb_irq_count() > 0) /* nur mit MSI wird schlafend gewartet */
+            check("USB-Massenspeicher: das Ende der Transfers weckt per Interrupt (schlafend warten)", irqs > 0);
+        /* zwei Threads gleichzeitig: dieselben Daten wie nacheinander gelesen */
+        uint8_t *ref = blk_dma_alloc(16 * 4096), *b1 = blk_dma_alloc(16 * 4096), *b2 = blk_dma_alloc(16 * 4096);
+        if (ref && b1 && b2) {
+            int seq = 1;
+            for (int k = 0; seq && k < 16; k++)
+                seq = blk_read(d, (uint64_t)k * 8, 8, ref + (uint64_t)k * 4096) == 0;
+            static ParRead p1, p2;
+            p1 = (ParRead){d, b1, 0, 0, 0};
+            p2 = (ParRead){d, b2, 0, 0, 0};
+            thread_create("usbtest1", par_reader, &p1);
+            thread_create("usbtest2", par_reader, &p2);
+            uint64_t t0 = time_ms();
+            while ((!p1.done || !p2.done) && time_ms() - t0 < 20000)
+                thread_sleep_ms(5);
+            check("USB-Massenspeicher: zwei Threads lesen gleichzeitig dieselben Daten",
+                  seq && p1.done && p2.done && p1.ok && p2.ok && memcmp(ref, b1, 16 * 4096) == 0 &&
+                      memcmp(ref, b2, 16 * 4096) == 0);
+        }
+        uint8_t *bufs[3] = {ref, b1, b2};
+        for (int k = 0; k < 3; k++)
+            if (bufs[k])
+                pmm_free_frames((uint64_t)bufs[k], 16);
         if (buf)
             pmm_free_frame((uint64_t)buf); /* blk_dma_alloc: 4 KiB = ein Frame */
         break;
