@@ -23,4 +23,19 @@ int     hda_volume(int percent);                                    /* Gesamtlau
 int     hda_voice_volume(uint32_t pid, int percent);                /* Lautstaerke der eigenen Stimme */
 uint64_t hda_played(uint32_t pid);                                  /* seit hda_open gemischte Bytes (48 kHz Stereo) */
 
+/* Ausgabe waehlen (Ton-Menue im Desktop): Ausgaenge der Soundkarte (Lautsprecher, Kopfhoerer, Line-Out) und - wenn
+ * eine Soundbar/Kopfhoerer per Bluetooth bereit ist - Bluetooth. Gleiches Layout wie AudioOutput in user.h. */
+#define HDA_OUT_BT 100
+typedef struct {
+    char    name[24];
+    uint8_t kind;    /* 0 Soundkarte, 1 Bluetooth */
+    uint8_t plugged; /* an der Buchse steckt etwas (Bluetooth: verbunden) */
+    uint8_t on;      /* der Ton kommt hier heraus (bzw. kaeme, wenn gerade nichts spielt) */
+    uint8_t pad;
+    int32_t id;      /* fuer hda_output_select */
+} HdaOutput;
+int hda_output_info(unsigned i, HdaOutput *o); /* 0 oder -1 am Ende */
+int hda_output_select(int sel);                /* -1 automatisch, id eines Ausgangs */
+int hda_output_get(void);
+
 #endif

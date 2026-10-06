@@ -10,6 +10,7 @@
  * Grundlage: Intel "High Definition Audio Specification" Rev. 1.0a und der Linux-Treiber (snd-hda-intel). */
 
 #include "drivers/sound/hda.h"
+#include "drivers/bt/bt.h"
 #include "drivers/pci.h"
 #include "arch/x86_64/apic.h"
 #include "core/sched.h"
@@ -101,7 +102,8 @@ typedef struct {
     uint8_t dev;             /* Art des Pins: 0 Line-Out, 1 Lautsprecher, 2 Kopfhoerer */
     uint8_t jack;            /* Buchse nach aussen, die meldet, ob etwas eingesteckt ist */
     uint8_t pinctl;          /* Pin-Steuerung, wenn der Ausgang an ist */
-    uint8_t muted;           /* Lautsprecher abgeschaltet, weil an einer Buchse etwas steckt */
+    uint8_t muted;           /* Pin abgeschaltet (Auto-Mute oder anderer Ausgang gewaehlt) */
+    uint8_t plugged;         /* an dieser Buchse steckt etwas (zuletzt abgefragt) */
 } Path;
 
 static volatile uint8_t *regs;
@@ -450,32 +452,86 @@ static void stream_start(void)
  * Lautsprecher aus; sonst an. Abgefragt beim Oeffnen und waehrend der Wiedergabe alle 300 ms. */
 static uint64_t automute_us;
 
+/* Gewaehlte Ausgabe (Einstellung im Desktop): -1 automatisch (Bluetooth, wenn verbunden; sonst die Soundkarte mit
+ * Auto-Mute), 0..npaths-1 nur dieser Ausgang der Soundkarte (auch bei verbundenem Bluetooth), HDA_OUT_BT Bluetooth */
+static int out_sel = -1;
+static Event mix_event; /* weckt den Mischer (Definition weiter unten) */
+
 static void automute(int verbose)
 {
     automute_us = time_us();
     int plugged = 0;
-    for (int i = 0; i < npaths; i++)
+    for (int i = 0; i < npaths; i++) {
+        paths[i].plugged = 0;
         if (paths[i].jack) {
             int64_t sense = cmd(paths[i].cad, paths[i].node[0], V_GET_PIN_SENSE << 8);
             if (sense > 0 && (sense & 0x80000000))
-                plugged = 1;
+                plugged = paths[i].plugged = 1;
         }
+    }
     for (int i = 0; i < npaths; i++) {
         Path *p = &paths[i];
-        if (p->dev != 1 || p->muted == plugged)
+        /* fester Ausgang: nur der; automatisch: alles an, nur Lautsprecher aus, wenn an einer Buchse etwas steckt */
+        int off = out_sel >= 0 && out_sel < npaths ? i != out_sel : p->dev == 1 && plugged;
+        if (p->muted == off)
             continue;
-        p->muted = (uint8_t)plugged;
-        cmd(p->cad, p->node[0], V_SET_PIN_CTL << 8 | (plugged ? 0 : p->pinctl));
+        p->muted = (uint8_t)off;
+        cmd(p->cad, p->node[0], V_SET_PIN_CTL << 8 | (off ? 0 : p->pinctl));
         if (verbose)
-            kprintf("hda: %s, Lautsprecher (Pin %#x) %s\n", plugged ? "Stecker in der Buchse" : "Buchse frei", p->node[0],
-                    plugged ? "aus" : "an");
+            kprintf("hda: %s (Pin %#x) %s%s\n", dev_name(p->dev), p->node[0], off ? "aus" : "an",
+                    out_sel >= 0 && out_sel < npaths ? " (gewaehlt)" : plugged ? " (Stecker in einer Buchse)" : "");
     }
+}
+
+/* Ton ueber Bluetooth? (automatisch oder ausdruecklich gewaehlt, und die Soundbar ist bereit) */
+static int bt_route(void)
+{
+    return (out_sel < 0 || out_sel == HDA_OUT_BT) && bt_a2dp_active();
 }
 
 static void automute_tick(void)
 {
     if (time_us() - automute_us > 300000)
         automute(1);
+}
+
+int hda_output_info(unsigned i, HdaOutput *o)
+{
+    memset(o, 0, sizeof(*o));
+    if (present && i < (unsigned)npaths) {
+        const Path *p = &paths[i];
+        ksnprintf(o->name, sizeof(o->name), "%s", p->dev == 0 ? "Line-Out" : p->dev == 1 ? "Lautsprecher" : "Kopfh\xC3\xB6rer");
+        o->kind = 0;
+        o->plugged = p->plugged;
+        o->on = !p->muted && !bt_route(); /* hier kaeme der Ton heraus (auch wenn gerade nichts spielt) */
+        o->id = (int)i;
+        return 0;
+    }
+    if (i == (unsigned)(present ? npaths : 0) && bt_a2dp_active()) {
+        ksnprintf(o->name, sizeof(o->name), "Bluetooth");
+        o->kind = 1;
+        o->plugged = 1;
+        o->on = bt_route();
+        o->id = HDA_OUT_BT;
+        return 0;
+    }
+    return -1;
+}
+
+int hda_output_select(int sel)
+{
+    if (sel != -1 && sel != HDA_OUT_BT && (sel < 0 || sel >= npaths))
+        return HDA_ERR_FORMAT;
+    out_sel = sel;
+    if (present)
+        automute(1); /* Pins gleich umschalten */
+    event_signal(&mix_event); /* der Mischer prueft die Richtung (Bluetooth/Soundkarte) */
+    return 0;
+}
+
+int hda_output_get(void)
+{
+    return out_sel;
 }
 
 int hda_present(void)
@@ -490,7 +546,7 @@ int hda_present(void)
  * und alles ausgespielt, geht der Stream aus und der Thread schlaeft, bis wieder Daten kommen. */
 
 #define MAX_VOICES   8
-#define VOICE_FRAMES 16384 /* je Stimme 0,34 s bei 48 kHz */
+#define VOICE_FRAMES 65536 /* je Stimme 1,37 s bei 48 kHz: Programme koennen genug vorlegen, um kurz zu stocken */
 #define LEAD_MS      60
 
 typedef struct {
@@ -551,6 +607,31 @@ static void hw_stop(void)
     dacs_release();
 }
 
+/* Ein Frame: Summe aller Stimmen (begrenzt); done_pos = Position, ab der ein leer gewordener Stimme alles gemischt hat.
+ * Ergebnis: Zahl der Stimmen mit Daten; -1 = keine Stimme offen */
+static int mix_frame(int16_t *lr, uint64_t done_pos)
+{
+    int32_t l = 0, r = 0;
+    int n = 0, open = 0;
+    for (int i = 0; i < MAX_VOICES; i++) {
+        Voice *v = &voices[i];
+        open |= v->used;
+        if (!v->used || v->rd == v->wr)
+            continue;
+        n++;
+        const int16_t *smp = v->buf + (v->rd % VOICE_FRAMES) * 2;
+        l += (smp[0] * v->vol) >> 8;
+        r += (smp[1] * v->vol) >> 8;
+        v->rd++;
+        v->mixed += 4;
+        if (v->rd == v->wr)
+            v->done_at = done_pos;
+    }
+    lr[0] = (int16_t)(l > 32767 ? 32767 : l < -32768 ? -32768 : l); /* begrenzen statt ueberlaufen */
+    lr[1] = (int16_t)(r > 32767 ? 32767 : r < -32768 ? -32768 : r);
+    return open ? n : -1;
+}
+
 /* Ring bis LEAD_MS vor die Leseposition mit der Summe aller Stimmen fuellen */
 static void mix_some(void)
 {
@@ -565,26 +646,8 @@ static void mix_some(void)
         if (!frames)
             break;
         uint64_t f0 = written / 4;
-        for (uint64_t f = 0; f < frames; f++) {
-            int32_t l = 0, r = 0;
-            for (int i = 0; i < MAX_VOICES; i++) {
-                Voice *v = &voices[i];
-                if (!v->used || v->rd == v->wr)
-                    continue;
-                const int16_t *smp = v->buf + (v->rd % VOICE_FRAMES) * 2;
-                l += (smp[0] * v->vol) >> 8;
-                r += (smp[1] * v->vol) >> 8;
-                v->rd++;
-                v->mixed += 4;
-                if (v->rd == v->wr)
-                    v->done_at = (f0 + f + 1) * 4;
-            }
-            l = l > 32767 ? 32767 : l < -32768 ? -32768 : l; /* begrenzen statt ueberlaufen */
-            r = r > 32767 ? 32767 : r < -32768 ? -32768 : r;
-            uint32_t idx = (uint32_t)((f0 + f) % ring_frames) * 2;
-            out[idx] = (int16_t)l;
-            out[idx + 1] = (int16_t)r;
-        }
+        for (uint64_t f = 0; f < frames; f++)
+            mix_frame(out + (uint32_t)((f0 + f) % ring_frames) * 2, (f0 + f + 1) * 4);
         written += frames * 4;
     }
     /* dahinter etwas Stille: bleibt der Mischer einmal haengen, spielt der Controller nichts Altes */
@@ -598,6 +661,57 @@ static void mix_some(void)
     __asm__ __volatile__("sfence" : : : "memory");
 }
 
+/* Bluetooth (A2DP): statt auf die Soundkarte in den Strom fuer die Soundbar mischen - im Takt der Uhr, BT_LEAD_MS
+ * voraus. Der Vorlauf fuellt beim Start den Puffer der Soundbar: Funkaussetzer (WLAN und Bluetooth teilen sich die
+ * Antenne) bis zu dieser Laenge hoert man dann nicht. Ohne Daten wird nichts geschickt (der Strom pausiert dann); die
+ * Uhr beginnt mit dem naechsten Ton neu. Die Gesamtlautstaerke wirkt hier digital (quadratisch, wie ein
+ * Lautstaerkeregler empfunden wird). */
+#define BT_LEAD_MS 250
+static uint64_t bt_t0_us, bt_frames;
+static int      bt_gap; /* gerade in einer Luecke (Stimme offen, aber leer) */
+
+static void bt_mix(int data)
+{
+    if (!data) {
+        bt_t0_us = 0;
+        return;
+    }
+    uint64_t now = time_us();
+    if (!bt_t0_us) {
+        bt_t0_us = now;
+        bt_frames = 0;
+    }
+    uint64_t lead = (uint64_t)mix_rate * BT_LEAD_MS / 1000;
+    uint64_t target = (now - bt_t0_us) * mix_rate / 1000000 + lead;
+    if (target > bt_frames + lead + mix_rate * 3 / 10) { /* stand der Mischer (System stockte): nicht nachholen - das
+                                                           * saugte nur den Vorrat der Programme leer -, Uhr neu stellen */
+        kprintf("hda: Bluetooth-Mischer %u ms im Rueckstand - Uhr neu gestellt\n",
+                (uint32_t)((target - bt_frames - lead) * 1000 / mix_rate));
+        bt_frames = target - lead;
+    }
+    int32_t gain = volume * volume; /* 0..10000 */
+    static int16_t tmp[512 * 2];
+    while (bt_frames < target) {
+        uint32_t n = (uint32_t)(target - bt_frames), room = bt_a2dp_room();
+        if (n > 512)
+            n = 512;
+        if (n > room)
+            n = room;
+        if (!n)
+            break;
+        for (uint32_t f = 0; f < n; f++) {
+            int voiced = mix_frame(tmp + f * 2, 0);
+            if (voiced == 0 && !bt_gap) /* das Programm liefert zu langsam: zaehlen (einmal je Luecke) */
+                bt_a2dp_underrun();
+            bt_gap = voiced == 0;
+            tmp[f * 2] = (int16_t)(tmp[f * 2] * gain / 10000);
+            tmp[f * 2 + 1] = (int16_t)(tmp[f * 2 + 1] * gain / 10000);
+        }
+        bt_a2dp_write(tmp, n);
+        bt_frames += n;
+    }
+}
+
 static void mixer_thread(void *arg)
 {
     (void)arg;
@@ -607,6 +721,14 @@ static void mixer_thread(void *arg)
             used |= voices[i].used;
             data |= voices[i].used && voices[i].rd != voices[i].wr;
         }
+        if (bt_route()) { /* Soundbar verbunden: Ton ueber Bluetooth */
+            if (running)
+                hw_stop();
+            bt_mix(data);
+            event_wait(&mix_event, data ? 5 : 100);
+            continue;
+        }
+        bt_t0_us = 0;
         if (!running && data) {
             hw_start();
             mix_some();

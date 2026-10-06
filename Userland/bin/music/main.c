@@ -270,7 +270,7 @@ static void scan_track(int i)
  * Wiedergabe
  * ------------------------------------------------------------------------------------------------------------------- */
 
-#define HIST   32768 /* zuletzt geschickte Frames (Stereo): fuer eine Pause ohne Luecke */
+#define HIST   131072 /* zuletzt geschickte Frames (Stereo): fuer eine Pause ohne Luecke (mehr als der Vorrat) */
 #define CHUNK  2048
 
 static int    cur = -1, playing, shuffle, repeat;
@@ -476,12 +476,13 @@ static int next_frame(mp3dec_t *d, u64 *pos, short *out_pcm, mp3dec_frame_info_t
     return 0;
 }
 
-/* Ein Stueck des Kopf-Durchlaufs (hoechstens 128 KiB je Aufruf, damit die Oberflaeche nicht wartet) */
+/* Ein Stueck des Kopf-Durchlaufs (hoechstens 64 KiB je Aufruf, damit Oberflaeche und Ton nicht warten) */
+static int buffered_enough(void);
 static void scan_step(void)
 {
-    if (!scanning)
+    if (!scanning || !buffered_enough())
         return;
-    u64 stop = spos + 2 * WINDOW;
+    u64 stop = spos + WINDOW;
     while (spos < stop) {
         mp3dec_frame_info_t info;
         int smp = next_frame(&sdec, &spos, 0, &info);
@@ -774,12 +775,21 @@ static int produce(void)
     }
 }
 
-/* Vorrat in der Stimme auf etwa 0,25 s halten (blockiert nie lange) */
+/* Vorrat in der Stimme auf etwa 1 s halten (blockiert nie lange): so viel darf das Programm stocken - etwa wenn eine
+ * Datei zum ersten Mal von einem langsamen Datentraeger gelesen wird -, ohne dass eine Luecke im Ton entsteht */
+#define FEED_AHEAD(r) ((u64)(r))      /* 1 s */
+#define SCAN_ABOVE(r) ((u64)(r) / 2)  /* Nebenarbeit (Kopf-Durchlauf, Tags) nur mit mindestens 0,5 s Vorrat */
+
+static int buffered_enough(void)
+{
+    return !playing || in_written - played_in() >= SCAN_ABOVE(rate);
+}
+
 static void feed(void)
 {
     if (!playing)
         return;
-    for (int guard = 0; guard < 32 && in_written - played_in() < (u64)rate / 4; guard++) {
+    for (int guard = 0; guard < 64 && in_written - played_in() < FEED_AHEAD(rate); guard++) {
         if (!produce()) {
             /* Titel zu Ende: erst ausspielen lassen, dann weiter */
             if (in_written - played_in() > (u64)rate / 50)
@@ -1185,6 +1195,8 @@ static void key(int k)
 void _start(int argc, char **argv)
 {
     char want_file[256] = "";
+    while (sys_bt_media_key() > 0) /* Tasten der Fernbedienung von vor dem Start nicht nachholen */
+        ;
     if (argc > 1) {
         Stat st;
         if (sys_stat(argv[1], &st) == 0 && st.is_dir) {
@@ -1288,9 +1300,23 @@ void _start(int argc, char **argv)
                 }
             } while (++nev < 64 && gfx_poll(&e));
         }
+        for (s64 mk; (mk = sys_bt_media_key()) > 0; changed = 1) { /* Tasten der Bluetooth-Fernbedienung (AVRCP) */
+            if (mk == BT_KEY_PLAY)
+                resume_play();
+            else if (mk == BT_KEY_PAUSE || mk == BT_KEY_STOP)
+                pause_play();
+            else if (mk == BT_KEY_NEXT)
+                next_track(1, 0);
+            else if (mk == BT_KEY_PREV) {
+                if (pfd >= 0 && rate && position() > (u64)rate * 3)
+                    seek_to(0); /* erst an den Anfang, wie die Taste im Fenster */
+                else
+                    next_track(-1, 0);
+            }
+        }
         feed();
         scan_step();
-        if (!got && scan_next < ntracks) { /* im Leerlauf: Tags und Laengen nachlesen */
+        if (!got && scan_next < ntracks && buffered_enough()) { /* im Leerlauf: Tags und Laengen nachlesen */
             while (scan_next < ntracks && tracks[scan_next].scanned)
                 scan_next++;
             if (scan_next < ntracks) {

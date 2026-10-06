@@ -72,13 +72,33 @@ void spin_deadlock(Spinlock *l)
 static volatile int bkl_lock;
 static volatile int bkl_owner = -1; /* Index der CPU, die ihn haelt */
 
+/* Fehlersuche: wartet eine CPU ueber 20 ms auf den BKL, steht im Log, welcher Thread ihn so lange hielt (das ganze
+ * System stockt dann: Kernel-Code laeuft nur unter dem BKL) */
+static uint32_t bkl_reports;
+
 void bkl_acquire(void)
 {
     Cpu *c = this_cpu();
-    while (__atomic_exchange_n(&bkl_lock, 1, __ATOMIC_ACQUIRE))
-        while (bkl_lock)
+    uint64_t t0 = 0;
+    const char *holder = 0;
+    while (__atomic_exchange_n(&bkl_lock, 1, __ATOMIC_ACQUIRE)) {
+        if (!t0)
+            t0 = time_us();
+        for (uint32_t spins = 0; bkl_lock; spins++) {
             __asm__ __volatile__("pause");
+            if (!holder && (spins & 0xFFF) == 0 && time_us() - t0 > 20000) {
+                int o = bkl_owner;
+                Cpu *oc = o >= 0 ? smp_cpu((unsigned)o) : 0;
+                holder = oc && oc->current ? thread_name(oc->current) : "?";
+            }
+        }
+    }
     bkl_owner = (int)c->index;
+    if (t0 && holder && bkl_reports < 40) {
+        bkl_reports++;
+        kprintf("smp: CPU %u wartete %u ms auf den BKL - gehalten von Thread '%s'\n", c->index,
+                (uint32_t)((time_us() - t0) / 1000), holder);
+    }
 
     /* Hat eine andere CPU inzwischen Kernel-Seiten ausgeblendet oder umgestellt, koennte der TLB dieser CPU noch
      * alte Eintraege haben. Kernel-Code laeuft nur unter dem BKL: hier nachzuholen genuegt (statt TLB-Shootdown). */

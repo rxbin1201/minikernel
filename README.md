@@ -93,8 +93,45 @@ fester Rate (nach der Signalstaerke, hoechstens 54 Mbit/s) und fragt den Empfang
 unterstuetzt: WEP, WPA1/TKIP, WPA3-only (SAE), Enterprise (802.1X), Pflicht-MFP (802.11w). Selbsttest `crypto`
 (17 Pruefungen: Testvektoren aus den RFCs und 802.11, dazu ein kompletter Handshake gegen einen simulierten AP, auch
 mit falschem Passwort). Getestet werden kann das Verbinden nur auf echter Hardware - QEMU hat keine AX200.
-Naechste Stufen: Ratenanpassung durch die Firmware (TLC) und HT, Interrupts statt Abfragen, automatisch verbinden
-beim Start, WLAN im Desktop, dann Bluetooth.
+Naechste Stufen: Ratenanpassung durch die Firmware (TLC) und HT, Interrupts statt Abfragen.
+
+Bluetooth, Stufe 1 (`Kernel/drivers/bt/btusb.c`): der Bluetooth-Teil der AX200 haengt am USB (8087:0029, Klasse
+E0/01/01). Der Treiber richtet Interrupt-IN (HCI-Ereignisse, in Stuecken empfangen und zusammengesetzt) und
+Bulk-IN/-OUT (Daten, spaeter) ein; HCI-Befehle gehen als Class-Request ueber Endpunkt 0. `bt` fragt die Intel-Version
+(`0xFC05`): Firmware-Variante 0x06 = Bootloader (nach dem Einschalten), 0x23 = Betriebs-Firmware (schon geladen, z.B.
+nach einem Neustart aus Windows). Im Bootloader dazu die Boot-Parameter (`0xFC0D`: Secure Boot, Mindest-Build,
+BD-Adresse aus dem OTP), im Betrieb `HCI_Read_BD_ADDR` und die Version. Der Name der Firmware ergibt sich aus Variante,
+Revision und Firmware-Revision (`ibt-20-1-3.sfi` bei der AX200); `bt` prueft, ob sie in `/firmware` liegt. `lsusb`
+zeigt den Treiber.
+
+Stufe 2 (`bt load`): Firmware per Secure Send (`0xFC09` ueber Bulk-OUT; Antworten kommen im Bootloader auch ueber
+Bulk-IN) - CSS-Kopf, Schluessel, Signatur, dann die Befehle der Datei in 4-Byte-ausgerichteten Stuecken; Ergebnis
+als Intel-Ereignis 0x06, Start per Intel Reset (`0xFC01`) mit der Boot-Adresse aus dem Befehl `0xFC0E` der Datei,
+die Firmware meldet sich mit Ereignis 0x02. Stufe 3 (`bt scan [s]`): `HCI_Reset`, DDC-Einstellungen
+(`ibt-20-1-3.ddc`, falls vorhanden), Ereignismaske; Suche klassisch (Inquiry mit RSSI/EIR) und LE (aktiver Scan)
+gleichzeitig, mit Namen, Geraeteklasse bzw. Erscheinungsbild.
+
+Stufe 4 (`bt connect ADRESSE|NAME`, `Kernel/drivers/bt/btconn.c`): ACL-Verbindung (mit Flusskontrolle ueber
+Number Of Completed Packets), Koppeln per Secure Simple Pairing ("Just Works") bzw. PIN 0000, Verschluesselung,
+L2CAP-Kanal zu AVDTP (PSM 0x19) und die Audio-Endpunkte der Gegenstelle mit ihren Codecs. Anfragen der Gegenstelle
+beantwortet der Thread `bt`. Schluessel speichert `bt` in `bt_keys.cfg` neben `settings.cfg`. `bt status`,
+`bt disconnect`.
+
+Stufe 5 (A2DP, `a2dp.c`, `sbc.c`): steht die Verbindung, richtet der Thread `a2dp` den Strom ein - SBC 48 kHz Stereo,
+16 Bloecke, 8 Baender, Loudness, Bitpool bis 53 (Pflicht fuer jede Senke), AVDTP Set Configuration und Open, zweiter
+L2CAP-Kanal fuer die Audiodaten. Ab dann mischt der Ton-Mischer (`hda.c`) alle Stimmen im Takt der Uhr (100 ms voraus)
+in diesen Strom statt auf die Soundkarte - `play`, `music` und die Spiele klingen also aus der Soundbar. Kommt Ton,
+folgt AVDTP Start; der Thread kodiert je 128 Samples zu einem SBC-Frame und schickt 5 Frames je RTP-Paket (bei
+MTU 672); nach 2 s Stille AVDTP Suspend. Die Gesamtlautstaerke wirkt dabei digital. Der SBC-Encoder rechnet nur mit
+Ganzzahlen (Analysefilter mit dem Prototyp der Spezifikation in Q31, Bitzuteilung wie der Decoder sie nachrechnet);
+geprueft auf dem Host gegen den Decoder von BlueZ (libsbc): alle Frames angenommen, Verstaerkung 1,000, Sinus mit
+68 dB Abstand, gleichauf mit dem Encoder von libsbc. Selbsttest `sbc` (bitgenau gegen den Host).
+
+Stufe 6 (AVRCP, Fernbedienung): oeffnet die Soundbar den AVRCP-Kanal (PSM 0x17), nimmt der Kernel ihn an und ist
+"Target": Unit/Subunit Info als Panel, Tasten (Pass Through) werden angenommen und ausgefuehrt - lauter, leiser,
+stumm direkt an der Gesamtlautstaerke, Play/Pause/Stop/vor/zurueck ueber eine Warteschlange (`SYS_BT 10`), die
+`music` liest (wirkt also auch, wenn ein anderes Fenster vorne ist; "zurueck" springt wie im Fenster erst an den
+Anfang des Titels). Herstellerbefehle (Titel-Infos, absolute Lautstaerke) beantwortet er mit "nicht implementiert".
 
 ## Mehrere CPUs (SMP)
 
@@ -364,14 +401,27 @@ Milchglas ueber einem berechneten Farbverlauf:
   startet, Pfeile waehlen); die Lupe oeffnet dasselbe. Das Fenstermenue listet alle Fenster und die Befehle fuer das
   aktive (minimieren, zoomen, anordnen, schliessen)
 - **Uhrzeit und Datum:** ein Klick oeffnet die Uhr
-- **System:** Netzwerk (Kabel), WLAN, Lautstaerke (Klick: stumm/zurueck, Mausrad: lauter/leiser) und ^ (Ueber
-  MiniKernel, Neu starten, Ausschalten, Zur Konsole)
+- **System:** Netzwerk (Kabel und WLAN), Bluetooth, Ton und ^ (Ueber MiniKernel, Neu starten, Ausschalten, Zur Konsole)
+- **Ton:** das Mausrad ueber dem Symbol regelt die Lautstaerke; ein Klick oeffnet das Ton-Menue mit Regler (klicken
+  oder ziehen), "Stumm schalten" und der Ausgabe: "Automatisch" (Bluetooth, wenn eine Soundbar bereit ist, sonst die
+  Soundkarte, Lautsprecher aus, wenn an einer Buchse etwas steckt) oder fest ein Ausgang der Soundkarte
+  (Lautsprecher, Kopfhoerer, Line-Out) bzw. Bluetooth (`SYS_AUDIO` 7-9, `hda_output_select`). "aktiv" zeigt, wo der
+  Ton herauskommt, "eingesteckt", an welcher Buchse etwas steckt.
+- **Netzwerk:** ein Knopf fuer Kabel und WLAN. Das Symbol zeigt das Kabel, wenn es mit Adresse verbunden ist (oder es
+  kein WLAN gibt), sonst den WLAN-Faecher. Das Menue hat zwei Abschnitte: Ethernet (mit WLAN daneben nur Zustand,
+  Adresse, Verbindung und "Adresse neu anfragen") und WLAN.
 - **WLAN** (nur mit AX200 und Firmware; `desktop/wlan.c`): das Symbol zeigt die Signalstaerke (blass: verbindet bzw.
-  noch ohne Adresse, durchgestrichen: getrennt). Das Menue nennt Zustand, Netz, IP-Adresse und Signal, darunter die
-  gefundenen Netze (je Name der staerkste AP, mit Signal und Verschluesselung), "Trennen" und "Netze suchen". Ein Klick
+  noch ohne Adresse, durchgestrichen: getrennt). Der Abschnitt nennt Zustand, Netz, IP-Adresse und Signal, darunter die
+  gefundenen Netze (je Name der staerkste AP, mit Signal und Verschluesselung), "WLAN trennen" und "Netze suchen". Ein Klick
   auf ein offenes Netz verbindet, bei WPA2 fragt das Menue nach dem Passwort (Enter verbindet). Suchen und Verbinden
   laufen in einem eigenen Thread, die Oberflaeche wartet nie. Das zuletzt verbundene Netz steht in `wlan.cfg` neben
   `settings.cfg` (Passwort im Klartext, wie bei wpa_supplicant); damit verbindet sich der Desktop beim Start
+- **Bluetooth** (nur mit Bluetooth am USB; `desktop/bluetooth.c`): das Zeichen ist kraeftig, wenn ein Geraet verbunden
+  ist, ein blauer Punkt daneben heisst "spielt Ton". Das Menue nennt Zustand, Geraet und Audio, darunter die
+  klassischen Geraete der letzten Suche (Audio-Geraete zuerst, mit Lautsprecher-Symbol), "Trennen" und "Geraete
+  suchen" (beim ersten Oeffnen sucht es von selbst; dabei wird auch die Firmware geladen). Ein Klick verbindet - danach
+  geht aller Ton an das Geraet (A2DP). Schluessel und das zuletzt verbundene Geraet stehen in `bt_keys.cfg` (auch von
+  `bt connect` geschrieben); damit verbindet sich der Desktop beim Start.
 
 Menues oeffnen sich nach oben ueber ihrem Knopf, Esc schliesst sie. Fenster haben runde Ecken, weiche Schatten und
 eine helle Titelleiste mit dem Titel links und rechts Minimieren, Maximieren/Wiederherstellen, Schliessen (wie bei
@@ -520,6 +570,12 @@ gleichzeitig (mehr Programme als CPUs) und muessen dasselbe Ergebnis erhalten wi
   sich, laedt die Symbole aus `Build/kernel.debug.elf` und setzt einen Breakpoint auf `kmain` (`tools/gdbinit`).
   Braucht `sudo apt install gdb`.
 - **Adressen von Hand:** `addr2line -f -e Build/kernel.debug.elf 0x10427d`
+- **Haenger finden:** stockt das System (Mauszeiger, Ton), stehen die Gruende im Log -
+  `dmesg | grep -e wartete -e stockte -e dauerte -e Rueckstand`:
+  `smp: CPU n wartete X ms auf den BKL - gehalten von Thread '...'` (wer den Kernel so lange belegte),
+  `usb: vvvv:pppp Bulk/Control ... dauerte X ms`, `sched: System stockte etwa X ms` (Thread "wachhund"),
+  `hda: Bluetooth-Mischer ... im Rueckstand`. USB-Transfers warten mit MSI schlafend (Controller-Sperre und BKL
+  frei), damit z.B. ein lesender USB-Stick Maus, Tastatur und Bluetooth nicht anhaelt.
 - **Kernel-Log auf echter Hardware:** `dmesg` zeigt alle Kernel-Meldungen seit dem Start (letzte 256 KiB);
   `dmesg > /disk/log.txt` speichert sie. `/disk` ist das FAT32-Volume mit dem Label `MINIKERNEL` (nur dieses
   beschreibt der Kernel), z.B. ein USB-Stick, der unter Windows so benannt wurde.

@@ -83,6 +83,7 @@ typedef unsigned int       u32;
 #define SYS_MMAP_FILE     74
 #define SYS_CLOSEFROM     75
 #define SYS_WLAN          76
+#define SYS_BT            77
 #define ERR_NOENT     (-2)
 #define ERR_IO        (-5)
 #define ERR_EXIST     (-17)
@@ -351,6 +352,98 @@ typedef struct {
 static inline s64 sys_wlan_connect(const WlanConnect *c)      { return syscall3(SYS_WLAN, 5, (u64)c, 0); }
 static inline s64 sys_wlan_disconnect(void)                   { return syscall3(SYS_WLAN, 6, 0, 0); }
 static inline s64 sys_wlan_status(WlanStatus *s)              { return syscall3(SYS_WLAN, 7, (u64)s, 0); }
+/* Bluetooth (Kernel/drivers/bt): Geraet am USB, Intel-Version, Boot-Parameter, Firmware-Datei */
+enum { BT_MODE_UNKNOWN, BT_MODE_BOOTLOADER, BT_MODE_OPERATIONAL };
+typedef struct {
+    unsigned       present;
+    unsigned short vid, pid;
+    char           path[16];
+    unsigned char  ep_intr, ep_bulk_in, ep_bulk_out, pad0;
+    unsigned short mps_intr, mps_bulk;
+    unsigned       events, cmds, vendor_events;
+    unsigned       ver_ok, mode;
+    unsigned char  hw_platform, hw_variant, hw_revision, fw_variant;
+    unsigned char  fw_revision, fw_build_num, fw_build_ww, fw_build_yy;
+    unsigned char  fw_patch_num, pad1[3];
+    unsigned       boot_ok;
+    unsigned char  otp_format, otp_content, otp_patch, secure_boot;
+    unsigned short dev_revid;
+    unsigned char  key_from_hdr, key_type, otp_lock, api_lock, debug_lock, limited_cce;
+    unsigned char  min_fw_build_nn, min_fw_build_cw, min_fw_build_yy, unlocked_state;
+    unsigned char  otp_bdaddr[6];
+    unsigned char  bdaddr[6];
+    unsigned       local_ok;
+    unsigned char  hci_version, lmp_version;
+    unsigned short hci_revision, manufacturer, lmp_subversion;
+    char           fw_name[40];
+    unsigned       fw_found, fw_size;
+    int            last_error;
+    unsigned short last_opcode, pad2;
+    char           state[64];
+    unsigned       dl_done, dl_ok, dl_ms, dl_frags, dl_result; /* Stufe 2: Firmware laden */
+    unsigned       boot_addr, booted, boot_ms;
+    unsigned char  file_build_num, file_build_ww, file_build_yy, pad3;
+    char           dl_msg[64];
+    unsigned       hci_ready, ddc_records;                /* Stufe 3: HCI eingerichtet */
+    unsigned char  features[8];
+    unsigned short acl_mtu, acl_pkts, le_mtu, le_pkts;
+    unsigned       scan_ms, scan_devs;
+} BtInfo;
+/* Gefundenes Geraet (SYS_BT 4) */
+enum { BT_KIND_BREDR, BT_KIND_LE_PUBLIC, BT_KIND_LE_RANDOM };
+typedef struct {
+    unsigned char  addr[6];
+    unsigned char  kind;
+    signed char    rssi;      /* dBm, -127 = unbekannt */
+    unsigned       cod;       /* Class of Device (klassisch) */
+    unsigned short seen, appearance;
+    unsigned char  le_flags, le_connectable, name_len, pad;
+    char           name[48];
+} BtDev;
+static inline s64 sys_bt_info(BtInfo *bi)                     { return syscall3(SYS_BT, 0, (u64)bi, 0); }
+static inline s64 sys_bt_query(void)                          { return syscall3(SYS_BT, 1, 0, 0); }
+static inline s64 sys_bt_load(void)                           { return syscall3(SYS_BT, 2, 0, 0); } /* Firmware laden */
+static inline s64 sys_bt_scan(u64 seconds)                    { return syscall3(SYS_BT, 3, seconds, 0); } /* -> Zahl */
+static inline s64 sys_bt_dev(u64 i, BtDev *d)                 { return syscall3(SYS_BT, 4, i, (u64)d); }
+/* Verbindung (Stufe 4) */
+enum { BT_CONN_IDLE, BT_CONN_CONNECTING, BT_CONN_READY, BT_CONN_FAILED };
+enum { BT_CSTEP_NONE, BT_CSTEP_HCI, BT_CSTEP_PAGE, BT_CSTEP_AUTH, BT_CSTEP_ENCRYPT, BT_CSTEP_L2CAP, BT_CSTEP_DISCOVER,
+       BT_CSTEP_CAPS, BT_CSTEP_DONE };
+typedef struct {
+    unsigned char seid, in_use, media, tsep;
+    unsigned char codec, caps_len, pad[2];
+    unsigned char caps[8];
+} BtSep;
+typedef struct {
+    unsigned       state, step;
+    int            error;
+    unsigned char  addr[6];
+    unsigned short handle;
+    unsigned char  conn_status, auth_status, enc_status, disc_reason;
+    unsigned char  encrypted, paired_new, key_type, n_seps;
+    unsigned short l2_local_cid, l2_remote_cid, l2_remote_mtu, pad;
+    unsigned       acl_rx, acl_tx, l2_rx;
+    BtSep          seps[8];
+    char           msg[96];
+    unsigned short media_remote_cid, media_mtu;      /* Stufe 5: A2DP */
+    unsigned char  a2dp_seid, a2dp_bitpool, a2dp_state, pad3;
+    unsigned       a2dp_packets, a2dp_dropped, a2dp_errors;
+    unsigned       a2dp_underruns;           /* Luecken im Ton (Programm lieferte zu langsam) */
+    unsigned       a2dp_stalls, a2dp_max_wait_ms; /* Senden dauerte ueber 30 ms; laengste Wartezeit */
+} BtConn;
+typedef struct {
+    unsigned char addr[6];
+    unsigned char type, pad;
+    unsigned char key[16];
+} BtKey;
+static inline s64 sys_bt_connect(const unsigned char addr[6]) { return syscall3(SYS_BT, 5, (u64)addr, 0); }
+static inline s64 sys_bt_disconnect(void)                     { return syscall3(SYS_BT, 6, 0, 0); }
+static inline s64 sys_bt_conn(BtConn *c)                      { return syscall3(SYS_BT, 7, (u64)c, 0); }
+static inline s64 sys_bt_key_get(u64 i, BtKey *k)             { return syscall3(SYS_BT, 8, i, (u64)k); }
+static inline s64 sys_bt_key_add(const BtKey *k)              { return syscall3(SYS_BT, 9, (u64)k, 0); }
+/* Tasten der Bluetooth-Fernbedienung (AVRCP, z.B. an der Soundbar): naechste oder BT_KEY_NONE */
+enum { BT_KEY_NONE, BT_KEY_PLAY, BT_KEY_PAUSE, BT_KEY_STOP, BT_KEY_NEXT, BT_KEY_PREV };
+static inline s64 sys_bt_media_key(void)                      { return syscall3(SYS_BT, 10, 0, 0); }
 static inline s64 sys_read(int fd, void *buf, u64 len)        { return syscall3(SYS_READ, fd, (u64)buf, len); }
 static inline s64 sys_close(int fd)                           { return syscall3(SYS_CLOSE, fd, 0, 0); }
 static inline s64 sys_closefrom(int fd)                       { return syscall3(SYS_CLOSEFROM, fd, 0, 0); } /* alle ab fd schliessen */
@@ -360,6 +453,20 @@ static inline s64 sys_wait(int pid, int *code)                { return syscall3(
 static inline s64 sys_wait_nohang(int pid, int *code)         { return syscall3(SYS_WAIT, pid, (u64)code, 1); } /* ERR_AGAIN: laeuft noch */
 static inline s64 sys_videoinfo(u64 index, VideoInfo *vi)  { return syscall3(SYS_VIDEOINFO, index, (u64)vi, 0); }
 static inline s64 sys_audio(u64 op, u64 a, u64 b)          { return syscall3(SYS_AUDIO, op, a, b); } /* siehe play.c */
+/* Ausgabe waehlen (SYS_AUDIO 7/8/9): Ausgaenge der Soundkarte und ggf. Bluetooth */
+#define AUDIO_OUT_AUTO (-1)
+#define AUDIO_OUT_BT   100
+typedef struct {
+    char          name[24];
+    unsigned char kind;    /* 0 Soundkarte, 1 Bluetooth */
+    unsigned char plugged; /* an der Buchse steckt etwas */
+    unsigned char on;      /* der Ton kommt hier heraus (bzw. kaeme) */
+    unsigned char pad;
+    int           id;      /* fuer sys_audio_select */
+} AudioOutput;
+static inline s64 sys_audio_output(u64 i, AudioOutput *o)     { return syscall3(SYS_AUDIO, 7, i, (u64)o); }
+static inline s64 sys_audio_select(int id)                    { return syscall3(SYS_AUDIO, 8, (u64)(s64)id, 0); }
+static inline s64 sys_audio_selected(void)                    { return syscall3(SYS_AUDIO, 9, 0, 0); }
 static inline s64 sys_setmode(u64 w, u64 h, u64 hz100)     { return syscall3(SYS_SETMODE, w, h, hz100); } /* sofort umschalten (Intel-Treiber) */
 /* Geteilter Speicher: anlegen -> Adresse (und Nummer), einblenden per Nummer, ausblenden, Groesse */
 static inline s64 sys_shm_create(u64 bytes, unsigned *id)  { return syscall3(SYS_SHM, 0, bytes, (u64)id); }

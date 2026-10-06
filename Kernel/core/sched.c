@@ -502,6 +502,28 @@ void sched_tick(void)
         schedule();
 }
 
+/* ---------- Wachhund (Fehlersuche): bemerkt, wenn das System stockt (wacht alle 100 ms auf, meldet ab 150 ms Verspaetung) ---------- */
+
+static void watchdog(void *arg)
+{
+    (void)arg;
+    uint32_t reports = 0;
+    for (;;) {
+        uint64_t t = time_us();
+        thread_sleep_ms(100); /* selten: Kernel-Threads sollen im Leerlauf nicht staendig aufwachen */
+        uint64_t late = (time_us() - t) / 1000;
+        if (late > 250 && reports < 40) {
+            reports++;
+            kprintf("sched: System stockte etwa %u ms (Wachhund zu spaet geweckt)\n", (uint32_t)late);
+        }
+    }
+}
+
+void sched_watchdog_start(void)
+{
+    thread_create("wachhund", watchdog, 0);
+}
+
 /* ---------- Auskunft ---------- */
 
 void        thread_set_data(Thread *t, void *data) { t->data = data; }

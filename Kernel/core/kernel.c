@@ -170,6 +170,7 @@ void kmain(BootInfo *info)
     console_splash_progress(75);
     hda_init();     /* Ton: Intel High Definition Audio */
     net_init(); /* Netzwerkkarten; DHCP laeuft im Hintergrund */
+    sched_watchdog_start();
     syscall_init();
     console_splash_progress(90);
 

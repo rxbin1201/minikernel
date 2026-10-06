@@ -78,5 +78,6 @@ Thread  *sched_ap_idle(void);
 uint64_t sched_thread_stack(const Thread *t);
 void     sched_ap_run(void) __attribute__((noreturn));
 void     sched_dump(void); /* Threadliste mit Zustand und CPU-Ticks auf die Konsole */
+void     sched_watchdog_start(void); /* Thread "wachhund": meldet im Log, wenn das System ueber 150 ms stockt (Takt 100 ms) */
 
 #endif

@@ -94,6 +94,10 @@
 #define SYS_FUTEX_WAIT    72 /* (u32 *adr, wert, timeout_ms; 0 = ohne Grenze) -> 0 geweckt, ERR_AGAIN *adr != wert,
                               * ERR_TIMEDOUT; nur Threads desselben Prozesses */
 #define SYS_FUTEX_WAKE    73 /* (u32 *adr, anzahl) -> geweckte Threads */
+#define SYS_BT            77 /* (op, arg) -> Bluetooth (drivers/bt): 0 = BtInfo nach arg, 1 = Version usw. vom Geraet holen,
+                              * 2 = Firmware laden und starten, 3 = suchen (Sekunden) -> Zahl, 4 = Geraet arg nach arg2,
+                              * 5 = verbinden (Adresse), 6 = trennen, 7 = BtConn, 8/9 = Schluessel holen/eintragen,
+                              * 10 = naechste Taste der Fernbedienung (AVRCP) */
 #define SYS_WLAN          76 /* (op, arg) -> WLAN (iwl.c): 0 = WlanInfo nach arg, 1 = aufwecken (Stufe 2a) */
 #define SYS_CLOSEFROM     75 /* (fd) -> 0: alle Deskriptoren ab fd schliessen (vor exec: nichts erben, was man nicht kennt) */
 #define SYS_MMAP_FILE     74 /* (fd | schreibbar << 32, laenge, offset) -> Adresse: Datei einblenden, Seiten werden erst beim

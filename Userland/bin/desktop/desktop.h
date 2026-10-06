@@ -74,13 +74,24 @@ enum { A_NONE, A_TERM, A_FILES, A_CALC, A_CLOCK, A_ABOUT, A_PAINT, A_SNAKE, A_TE
        A_WIN_NEW, A_WIN_MIN, A_WIN_ZOOM, A_WIN_CLOSE, A_APP_QUIT, A_SNAP_LEFT, A_SNAP_RIGHT, A_NEXT_WIN,
        A_RESTART, A_POWEROFF, A_INFO, A_NET_DHCP, A_SEARCH,
        A_WLAN_SCAN, A_WLAN_DISC, A_WLAN_GO, A_WLAN_BACK, A_WLAN_PASS,
+       A_HEAD,                 /* wie A_INFO, Wert fett: Kopf eines Abschnitts (Ethernet, WLAN, Bluetooth) */
+       A_BT_SCAN, A_BT_DISC,
+       A_VOL_SLIDER,           /* Lautstaerkeregler im Ton-Menue (keine Aktion: Klicken/Ziehen setzt die Lautstaerke) */
+       A_VOL_MUTE, A_OUT_AUTO,
        A_WINSEL = 512, /* bis A_WINSEL + MAXW: hinter allen Aktionen und Programmsymbolen (ICON_IMAGE = 101) */
-       A_WLAN_NET = 1024 /* bis A_WLAN_NET + WL_MAX: Netz aus der Liste im WLAN-Menue */ };
+       A_WLAN_NET = 1024, /* bis A_WLAN_NET + WL_MAX: Netz aus der Liste im WLAN-Menue */
+       A_BT_DEV = 1100, /* bis A_BT_DEV + BT_MENU_MAX: Geraet aus der Liste im Bluetooth-Menue */
+       A_OUT = 1200 /* bis A_OUT + OUT_MAX: Ausgang im Ton-Menue */ };
+#define OUT_MAX 8
+static inline int is_sound_action(int a) { return a == A_VOL_MUTE || a == A_OUT_AUTO || (a >= A_OUT && a < A_OUT + OUT_MAX); }
 /* A_INFO: Zeile nur zum Lesen (Name links, Wert rechts); A_SEARCH: Suchfeld im Startmenue; A_WINSEL + i: Fenster wins[i];
  * A_WLAN_PASS: Passwortfeld im WLAN-Menue */
 #define WL_MAX 12 /* so viele Netze zeigt das WLAN-Menue */
 static inline int is_winsel(int a) { return a >= A_WINSEL && a < A_WINSEL + MAXW; }
 static inline int is_wlan_action(int a) { return (a >= A_WLAN_SCAN && a <= A_WLAN_PASS) || (a >= A_WLAN_NET && a < A_WLAN_NET + WL_MAX); }
+#define BT_MENU_MAX 16 /* so viele Geraete zeigt das Bluetooth-Menue */
+static inline int is_bt_action(int a) { return a == A_BT_SCAN || a == A_BT_DISC || (a >= A_BT_DEV && a < A_BT_DEV + BT_MENU_MAX); }
+static inline int is_info(int a) { return a == A_INFO || a == A_HEAD; }
 
 typedef struct {
     const char *label;
@@ -108,7 +119,7 @@ void window_cmd(Win *w, int cmd); /* WP_WINCMD eines rahmenlosen Fensters */
 
 /* ---------- chrome.c: Masse, Hintergrund, Taskleiste, Menues ---------- */
 
-extern int menu_open;  /* 0 = zu, 1 = Start, 2 = Fenster, 3 = Netzwerk, 4 = System, 6 = WLAN */
+extern int menu_open;  /* 0 = zu, 1 = Start, 2 = Fenster, 3 = Netzwerk (Kabel und WLAN), 4 = System, 7 = Bluetooth, 8 = Ton */
 extern int menu_hover; /* Eintrag unter der Maus, -1 = keiner */
 extern int dock_hover; /* Symbol unter der Maus, -1 = keins */
 
@@ -124,7 +135,10 @@ void damage_dock_seg(int i);     /* nur ein Segment der Taskleiste neu (0 Progra
 void damage_menu_button(void);   /* Hervorhebung des Menue-Knopfs und Name unter der Maus */          /* x, y, w, h: Streifen unten mit Taskleiste und den Namen darueber */
 int  menu_zone(int *r);          /* offenes Menue samt Schatten; 0 = keins */
 void damage_menu(void);
-int  menubar_hit(int x, int y);  /* Knopf mit Menue: 1 Start, 2 Fenster, 3 Netzwerk, 4 System, 5 Suche, 6 WLAN; 0 = keiner */
+int  menubar_hit(int x, int y);  /* Knopf mit Menue: 1 Start, 2 Fenster, 3 Netzwerk, 4 System, 5 Suche, 7 Bluetooth, 8 Ton; 0 = keiner */
+int  sound_action(int a);        /* Aktion im Ton-Menue; 1 = Menue bleibt offen */
+int  vol_slider_at(int x, int y);/* liegt der Punkt auf dem Lautstaerkeregler (Ton-Menue offen)? */
+void vol_slider_drag(int x);     /* Lautstaerke nach der Mausposition setzen */
 int  menu_current(void);         /* offenes Menue wie menubar_hit (5 = Start ueber die Suche) */
 void open_menu(int m);
 int  menu_key(int k);            /* Taste fuer das offene Menue (Pfeile, Enter, Suche); 1 = verbraucht */
@@ -154,6 +168,19 @@ const MenuItem *wlan_menu(int *n);
 int  wlan_action(int a);     /* 1 = Menue bleibt offen */
 int  wlan_pw_active(void);   /* Passwortfeld offen: Tasten gehen dorthin */
 int  wlan_menu_key(int k);   /* 1 = verbraucht */
+
+/* ---------- bluetooth.c: Bluetooth-Knopf und -Menue ---------- */
+
+extern int bt_ok;            /* Bluetooth am USB: Knopf in der Taskleiste */
+void btd_init(void);
+void btd_tick(void);         /* jedes Bild: Hintergrundarbeit abholen, Zustand holen, beim Start verbinden */
+int  btd_icon(void);         /* 0 getrennt, 1 verbinde, 2 verbunden, 3 spielt */
+const char *btd_hover_name(char *buf, int max);
+void btd_menu_opened(void);
+const MenuItem *btd_menu(int *n);
+int  btd_action(int a);      /* 1 = Menue bleibt offen */
+int  btd_dev_audio(int i);   /* i-tes Geraet im Menue ist ein Audio-Geraet */
+const char *btd_device_name(void); /* Name des verbundenen Geraets oder 0 */
 
 /* ---------- wm.c: geaenderte Bereiche, Fenster, Zusammensetzen ---------- */
 
