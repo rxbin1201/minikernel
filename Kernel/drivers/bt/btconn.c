@@ -101,6 +101,9 @@ static struct {
 } avw;
 static uint8_t av_label;
 
+static void abs_reset(void);
+static volatile uint64_t avrcp_cfg_ms;
+
 static uint16_t le16(const uint8_t *p)
 {
     return (uint16_t)(p[0] | p[1] << 8);
@@ -415,6 +418,7 @@ static void sig_rx(const uint8_t *d, uint32_t len)
                 const char *what = "abgelehnt";
                 if (psm == PSM_AVRCP && handle != NO_HANDLE && !avrcp_remote) { /* Fernbedienung der Soundbar */
                     local = AVRCP_CID;
+                    abs_reset();
                     avrcp_remote = scid;
                     what = "angenommen als AVRCP (Fernbedienung)";
                 } else if (psm == PSM_AVDTP && handle != NO_HANDLE) {
@@ -466,6 +470,8 @@ static void sig_rx(const uint8_t *d, uint32_t len)
                 put16(rsp + 2, 0);
                 put16(rsp + 4, 0);
                 sig_send(0x05, id, rsp, 6);
+                if (!avrcp_cfg_ms)
+                    avrcp_cfg_ms = time_ms(); /* eingerichtet: gleich die Lautstaerke anmelden (abs_tick) */
             } else if (cl >= 4 && (le16(v) == LOCAL_CID || le16(v) == MEDIA_CID)) {
                 int media = le16(v) == MEDIA_CID;
                 uint16_t mtu = 672; /* ohne Angabe gilt der Standard */
@@ -498,6 +504,7 @@ static void sig_rx(const uint8_t *d, uint32_t len)
                     kprintf("bt: L2CAP: Gegenstelle schliesst den AVDTP-Kanal\n");
                 } else if (le16(v) == AVRCP_CID) {
                     avrcp_remote = 0;
+                    abs_reset(); /* Lautstaerke wieder digital */
                 }
             }
             break;
@@ -648,10 +655,130 @@ static void pass_through(uint8_t op)
     kprintf("bt: AVRCP: Taste %s (%#x)\n", name, op);
 }
 
+/* ---------- AVRCP 1.4: absolute Lautstaerke (hier sind wir "Controller", die Soundbar "Target") ----------
+ * Herstellerabhaengige Befehle (AV/C Opcode 0x00, Firma 0x001958 = Bluetooth SIG): RegisterNotification (PDU 0x31)
+ * fuer EVENT_VOLUME_CHANGED (0x0D) - die Soundbar antwortet sofort mit INTERIM und ihrer Lautstaerke (0-127) und
+ * spaeter mit CHANGED, wenn sie sich aendert (dann neu anmelden). SetAbsoluteVolume (PDU 0x50) stellt sie ein.
+ * Angemeldet wird kurz nachdem die Soundbar den AVRCP-Kanal geoeffnet und eingerichtet hat. */
+#define AVC_CONTROL  0x00
+#define AVC_NOTIFY   0x03
+#define AVC_REJECTED 0x0A
+#define AVC_CHANGED  0x0D
+#define AVC_INTERIM  0x0F
+#define PDU_REGISTER_NOTIFICATION 0x31
+#define PDU_SET_ABSOLUTE_VOLUME   0x50
+#define EVENT_VOLUME_CHANGED      0x0D
+
+static volatile int abs_state;        /* 0 noch nicht, 1 angemeldet (wartet), 2 laeuft, -1 kann die Soundbar nicht */
+static volatile int abs_pending = -1; /* an die Soundbar zu schicken (0-127), -1 = nichts */
+static uint64_t     abs_sent_ms; /* avrcp_cfg_ms (oben): Zeitpunkt, zu dem die Soundbar den Kanal eingerichtet hat */
+static uint8_t      avrcp_label;
+
+static void abs_reset(void)
+{
+    abs_state = 0;
+    abs_pending = -1;
+    avrcp_cfg_ms = 0;
+}
+
+int bt_abs_volume_active(void) { return abs_state == 2 && avrcp_remote; }
+
+void bt_abs_volume_set(int percent)
+{
+    if (!bt_abs_volume_active())
+        return;
+    abs_pending = (percent * 127 + 50) / 100;
+    event_signal(&worker_ev);
+}
+
+static int avrcp_vendor(uint8_t ctype, uint8_t pdu, const uint8_t *param, uint16_t plen)
+{
+    uint8_t b[32];
+    if (!avrcp_remote || plen > sizeof(b) - 13)
+        return -1;
+    avrcp_label = (uint8_t)((avrcp_label + 1) & 0x0F);
+    b[0] = (uint8_t)(avrcp_label << 4); /* einzelnes Paket, Befehl */
+    b[1] = 0x11;
+    b[2] = 0x0E;
+    b[3] = ctype;
+    b[4] = 0x48; /* Panel */
+    b[5] = 0x00; /* herstellerabhaengig */
+    b[6] = 0x00;
+    b[7] = 0x19;
+    b[8] = 0x58;
+    b[9] = pdu;
+    b[10] = 0x00;
+    b[11] = (uint8_t)(plen >> 8);
+    b[12] = (uint8_t)plen;
+    memcpy(b + 13, param, plen);
+    return l2_send(avrcp_remote, b, 13u + plen);
+}
+
+static void abs_register(void)
+{
+    static const uint8_t p[5] = {EVENT_VOLUME_CHANGED, 0, 0, 0, 0};
+    if (avrcp_vendor(AVC_NOTIFY, PDU_REGISTER_NOTIFICATION, p, sizeof(p)) == 0) {
+        if (abs_state != 2)
+            abs_state = 1;
+        abs_sent_ms = time_ms();
+    }
+}
+
+/* im Thread "bt", nach jedem Aufwachen */
+static void abs_tick(void)
+{
+    if (!avrcp_remote)
+        return;
+    uint64_t now = time_ms();
+    if (abs_state == 0 && avrcp_cfg_ms && now - avrcp_cfg_ms >= 500) {
+        abs_register();
+    } else if (abs_state == 1 && now - abs_sent_ms > 3000) {
+        kprintf("bt: AVRCP: Soundbar antwortet nicht auf die Anmeldung der Lautstaerke\n");
+        abs_state = -1;
+    } else if (abs_state == 2 && abs_pending >= 0) {
+        uint8_t v = (uint8_t)abs_pending;
+        abs_pending = -1;
+        avrcp_vendor(AVC_CONTROL, PDU_SET_ABSOLUTE_VOLUME, &v, 1);
+    }
+}
+
+/* Antwort der Soundbar auf unsere Befehle */
+static void avrcp_response(const uint8_t *d, uint32_t len)
+{
+    if (len < 13 || d[5] != 0x00 || d[6] != 0x00 || d[7] != 0x19 || d[8] != 0x58)
+        return;
+    uint8_t rc = d[3], pdu = d[9];
+    const uint8_t *p = d + 13;
+    uint32_t plen = (uint32_t)(d[11] << 8 | d[12]);
+    if (13 + plen > len)
+        plen = len - 13;
+    if (pdu == PDU_REGISTER_NOTIFICATION) {
+        if ((rc == AVC_INTERIM || rc == AVC_CHANGED) && plen >= 2 && p[0] == EVENT_VOLUME_CHANGED) {
+            int abs = p[1] & 0x7F, pct = (abs * 100 + 63) / 127;
+            if (abs_state != 2)
+                kprintf("bt: AVRCP: absolute Lautstaerke aktiv, Soundbar steht auf %d/127 (%d %%)\n", abs, pct);
+            abs_state = 2;
+            hda_volume_remote(pct);
+            if (rc == AVC_CHANGED)
+                abs_register(); /* jede Meldung gilt nur einmal: wieder anmelden */
+        } else if (rc == AVC_NOT_IMPLEMENTED || rc == AVC_REJECTED) {
+            kprintf("bt: AVRCP: Soundbar meldet ihre Lautstaerke nicht (Antwort %#x)\n", rc);
+            abs_state = -1;
+        }
+    } else if (pdu == PDU_SET_ABSOLUTE_VOLUME && rc != AVC_ACCEPTED) {
+        kprintf("bt: AVRCP: Soundbar lehnt die Lautstaerke ab (Antwort %#x)\n", rc);
+    }
+}
+
 static void avrcp_rx(const uint8_t *d, uint32_t len)
 {
-    if (len < 3 || !avrcp_remote || (d[0] & 0x02)) /* nur Befehle */
+    if (len < 3 || !avrcp_remote)
         return;
+    if (d[0] & 0x02) { /* Antwort auf einen unserer Befehle */
+        if (d[1] == 0x11 && d[2] == 0x0E && !(d[0] & 0x01))
+            avrcp_response(d, len);
+        return;
+    }
     uint8_t r[64];
     uint32_t n = len < sizeof(r) ? len : sizeof(r);
     memcpy(r, d, n);
@@ -779,6 +906,7 @@ static void worker(void *arg)
                 kprintf("bt: L2CAP-PDU fuer unbekannten Kanal %#x\n", cid);
             rxq_tail = (rxq_tail + 1) % RXQ;
         }
+        abs_tick(); /* absolute Lautstaerke anmelden bzw. an die Soundbar schicken */
     }
 }
 
@@ -866,6 +994,7 @@ static int connect_locked(const uint8_t addr[6])
     sig_connecting = media_connecting = sig_our_cfg = media_our_cfg = 0;
     sig_cfg_id = media_cfg_id = 0;
     avrcp_remote = 0;
+    abs_reset();
     mkey_tail = mkey_head;
     acl_as_len = l2_need = 0;
     rxq_tail = rxq_head;

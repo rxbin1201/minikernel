@@ -20,6 +20,7 @@ int64_t hda_write(uint32_t pid, const void *buf, uint64_t len);     /* blockiert
 int     hda_drain(uint32_t pid);                                    /* wartet, bis alles gespielt ist */
 void    hda_close(uint32_t pid);                                    /* Stimme frei (auch bei Prozessende) */
 int     hda_volume(int percent);                                    /* Gesamtlautstaerke 0-100, < 0 = nur abfragen */
+void    hda_volume_remote(int percent); /* Lautstaerke, die die Soundbar meldet (AVRCP): setzen ohne Rueckmeldung */
 int     hda_voice_volume(uint32_t pid, int percent);                /* Lautstaerke der eigenen Stimme */
 uint64_t hda_played(uint32_t pid);                                  /* seit hda_open gemischte Bytes (48 kHz Stereo) */
 
