@@ -7,7 +7,7 @@ void _start(int argc, char **argv)
     (void)argc;
     (void)argv;
     static const char *speeds[] = {"?", "Full (12 Mbit/s)", "Low (1,5 Mbit/s)", "High (480 Mbit/s)", "Super (5 Gbit/s)", "Super+ (10 Gbit/s)"};
-    static const char *drivers[] = {"kein Treiber", "Tastatur", "Massenspeicher", "Hub", "Maus"};
+    static const char *drivers[] = {"kein Treiber", "Tastatur", "Massenspeicher", "Hub", "Maus", "Bluetooth"};
 
     int tty = sys_isatty(1) != 0;
     UsbInfo info;
@@ -18,7 +18,7 @@ void _start(int argc, char **argv)
             depth += *c == '.';
         printf("Port %-7s %04x:%04x  %-18s  Klasse %02x  %s%s%s\n", info.path, info.vid, info.pid,
                info.speed < 6 ? speeds[info.speed] : "?", info.cls, tty && info.driver == 3 ? C_CYAN : "",
-               info.driver < 5 ? drivers[info.driver] : "?", tty && info.driver == 3 ? C_RESET : "");
+               info.driver < 6 ? drivers[info.driver] : "?", tty && info.driver == 3 ? C_RESET : "");
         (void)depth;
     }
     if (!n)

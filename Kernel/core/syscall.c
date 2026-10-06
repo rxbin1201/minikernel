@@ -1,5 +1,6 @@
 #include "core/syscall.h"
 #include "drivers/net/iwl.h"
+#include "drivers/bt/bt.h"
 #include "arch/x86_64/apic.h"
 #include "console/console.h"
 #include "arch/x86_64/cpu.h"
@@ -516,6 +517,71 @@ static void syscall_do(SyscallFrame *f)
             ret = ERR_NOENT;
         else {
             memcpy((void *)f->rsi, &pi, sizeof(pi));
+            ret = 0;
+        }
+        break;
+    }
+    case SYS_BT: {
+        if (f->rdi == 1 || f->rdi == 2) {
+            int r = f->rdi == 1 ? bt_query() : bt_load_fw();
+            ret = r == -1 ? ERR_NOENT : r < 0 ? ERR_IO : 0;
+        } else if (f->rdi == 3) { /* suchen (rsi Sekunden) -> Zahl der Geraete */
+            int r = bt_scan((uint32_t)f->rsi);
+            ret = r == -1 ? ERR_NOENT : r < 0 ? ERR_IO : r;
+        } else if (f->rdi == 5) { /* verbinden mit der Adresse in rsi (6 Byte, hoechstes zuerst) */
+            uint8_t a[6];
+            if (!process_user_range_ok(process_current(), f->rsi, 6, 0)) {
+                ret = ERR_FAULT;
+            } else {
+                memcpy(a, (const void *)f->rsi, 6);
+                int r = bt_connect(a);
+                ret = r == 0 ? 0 : r == -1 ? ERR_NOENT : r == -12 ? ERR_AGAIN : ERR_IO;
+            }
+        } else if (f->rdi == 6) {
+            ret = bt_disconnect() == 0 ? 0 : ERR_NOENT;
+        } else if (f->rdi == 7) { /* Zustand der Verbindung nach rsi */
+            BtConn bc;
+            if (!process_user_range_ok(process_current(), f->rsi, sizeof(bc), 1)) {
+                ret = ERR_FAULT;
+            } else {
+                bt_conn_info(&bc);
+                memcpy((void *)f->rsi, &bc, sizeof(bc));
+                ret = 0;
+            }
+        } else if (f->rdi == 8 || f->rdi == 9) { /* Schluessel rsi nach rdx holen bzw. aus rsi eintragen */
+            BtKey k;
+            uint64_t ptr = f->rdi == 8 ? f->rdx : f->rsi;
+            if (!process_user_range_ok(process_current(), ptr, sizeof(k), f->rdi == 8)) {
+                ret = ERR_FAULT;
+            } else if (f->rdi == 8) {
+                if (bt_key_get((unsigned)f->rsi, &k) != 0) {
+                    ret = ERR_NOENT;
+                } else {
+                    memcpy((void *)ptr, &k, sizeof(k));
+                    ret = 0;
+                }
+            } else {
+                memcpy(&k, (const void *)ptr, sizeof(k));
+                ret = bt_key_add(&k);
+            }
+        } else if (f->rdi == 4) { /* gefundenes Geraet rsi nach rdx */
+            BtDev bd;
+            if (!process_user_range_ok(process_current(), f->rdx, sizeof(bd), 1))
+                ret = ERR_FAULT;
+            else if (bt_device((unsigned)f->rsi, &bd) != 0)
+                ret = ERR_NOENT;
+            else {
+                memcpy((void *)f->rdx, &bd, sizeof(bd));
+                ret = 0;
+            }
+        } else if (f->rdi != 0) {
+            ret = ERR_INVAL;
+        } else if (!process_user_range_ok(process_current(), f->rsi, sizeof(BtInfo), 1)) {
+            ret = ERR_FAULT;
+        } else {
+            BtInfo bi;
+            bt_info(&bi);
+            memcpy((void *)f->rsi, &bi, sizeof(bi));
             ret = 0;
         }
         break;

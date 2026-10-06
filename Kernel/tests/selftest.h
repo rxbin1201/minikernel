@@ -59,6 +59,7 @@ void test_script(void);
 void test_tools(void);
 void test_graphics(void);
 void test_crypto(void);
+void test_sbc(void);
 void test_net(void);
 void test_netpeer(void);
 

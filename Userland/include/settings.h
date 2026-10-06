@@ -25,4 +25,12 @@ const char *settings_file(void);              /* Pfad der Datei, "" = kein Ort z
 int wlan_cfg_load(char ssid[33], char pass[65]); /* 0 = gelesen */
 int wlan_cfg_save(const char *ssid, const char *pass);
 
+/* Bluetooth (bt_keys.cfg neben settings.cfg): Verbindungsschluessel ("aa:bb:cc:dd:ee:ff art schluessel-hex") und das
+ * zuletzt verbundene Geraet ("last aa:bb:cc:dd:ee:ff Name"). bt_cfg_load gibt die Schluessel an den Kernel und liefert
+ * das letzte Geraet (0 = bekannt); bt_cfg_save schreibt die Schluessel des Kernels und das Geraet (last = 0: das alte
+ * bleibt). */
+int bt_parse_addr(const char *s, unsigned char a[6]);
+int bt_cfg_load(unsigned char last[6], char last_name[48]);
+int bt_cfg_save(const unsigned char *last, const char *last_name);
+
 #endif

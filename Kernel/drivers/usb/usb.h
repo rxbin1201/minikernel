@@ -54,6 +54,9 @@ int usb_endpoint_recover(UsbDevice *d, uint8_t endpoint_address);
 typedef void (*UsbInterruptCallback)(UsbDevice *d, const uint8_t *buf, uint32_t len);
 int usb_interrupt_start(UsbDevice *d, uint8_t endpoint_address, void *buf, uint32_t len, UsbInterruptCallback callback);
 
+/* Ereignisse des Controllers jetzt auswerten (Transfers, Interrupt-Callbacks) - fuer Treiber, die auf ein Ereignis warten */
+void usb_poll(UsbDevice *d);
+void usb_describe(const UsbDevice *d, uint16_t *vid, uint16_t *pid, char path[16]); /* Kennung und Port ("1.3") */
 void usb_lock(UsbDevice *d);
 void usb_unlock(UsbDevice *d);
 int  usb_alive(const UsbDevice *d);
@@ -65,6 +68,7 @@ int64_t usb_hid_next_repeat_ms(void); /* ms bis zur naechsten faelligen Wiederho
 uint64_t usb_irq_count(void);         /* empfangene xHCI-Interrupts (MSI-X/MSI) */
 int usb_mouse_probe(UsbDevice *d, const UsbIface *iface);
 int usb_msc_probe(UsbDevice *d, const UsbIface *iface, const char *name_hint);
+int bt_usb_probe(UsbDevice *d, const UsbIface *iface); /* drivers/bt/btusb.c */
 
 /* ---- Oeffentlich ---- */
 
@@ -76,7 +80,7 @@ int usb_init(void);
 typedef struct {
     uint32_t vid, pid;
     uint32_t cls, speed, port, slot;
-    uint32_t driver; /* 0 keiner, 1 HID-Tastatur, 2 Massenspeicher, 3 Hub, 4 Maus */
+    uint32_t driver; /* 0 keiner, 1 HID-Tastatur, 2 Massenspeicher, 3 Hub, 4 Maus, 5 Bluetooth */
     char     name[32];
     char     path[16];  /* "1" = Root-Port 1, "1.3" = Port 3 des Hubs an Root-Port 1 */
 } UsbInfo;

@@ -303,10 +303,41 @@ static int xhci_cmd(Xhci *x, uint32_t d0, uint32_t d1, uint32_t d2, uint32_t d3)
 /* ---------- Transfers ---------- */
 
 int usb_alive(const UsbDevice *d) { return d->alive; }
+void usb_poll(UsbDevice *d)       { process_events(d->x); }
+void usb_describe(const UsbDevice *d, uint16_t *vid, uint16_t *pid, char path[16])
+{
+    *vid = d->vid;
+    *pid = d->pid;
+    memcpy(path, d->path, 16);
+}
 void usb_lock(UsbDevice *d)       { mutex_lock(&d->x->lock); }
 void usb_unlock(UsbDevice *d)     { mutex_unlock(&d->x->lock); }
 
+/* Fehlersuche: Transfers ueber 50 ms ins Log - solange haelt der Aufrufer die Sperre des Controllers */
+static uint32_t slow_reports;
+
+static void report_slow(const UsbDevice *d, const char *what, int ep, uint32_t len, uint64_t t0)
+{
+    uint64_t ms = (time_us() - t0) / 1000;
+    if (ms >= 50 && slow_reports < 40) {
+        slow_reports++;
+        kprintf("usb: %04x:%04x %s Endpunkt %#x, %u Byte dauerte %u ms\n", d->vid, d->pid, what, ep, len, (uint32_t)ms);
+    }
+}
+
+static int usb_control_timed(UsbDevice *d, uint8_t request_type, uint8_t request, uint16_t value, uint16_t index,
+                             void *buf, uint16_t len);
+
 int usb_control(UsbDevice *d, uint8_t request_type, uint8_t request, uint16_t value, uint16_t index, void *buf, uint16_t len)
+{
+    uint64_t t0 = time_us();
+    int r = usb_control_timed(d, request_type, request, value, index, buf, len);
+    report_slow(d, "Control", 0, len, t0);
+    return r;
+}
+
+static int usb_control_timed(UsbDevice *d, uint8_t request_type, uint8_t request, uint16_t value, uint16_t index,
+                             void *buf, uint16_t len)
 {
     Xhci *x = d->x;
     Ep *e = &d->ep[1];
@@ -343,7 +374,17 @@ int usb_control(UsbDevice *d, uint8_t request_type, uint8_t request, uint16_t va
     return len;
 }
 
+static int usb_bulk_timed(UsbDevice *d, uint8_t endpoint_address, void *buf, uint32_t len, uint32_t timeout_ms);
+
 int usb_bulk(UsbDevice *d, uint8_t endpoint_address, void *buf, uint32_t len, uint32_t timeout_ms)
+{
+    uint64_t t0 = time_us();
+    int r = usb_bulk_timed(d, endpoint_address, buf, len, timeout_ms);
+    report_slow(d, "Bulk", endpoint_address, len, t0);
+    return r;
+}
+
+static int usb_bulk_timed(UsbDevice *d, uint8_t endpoint_address, void *buf, uint32_t len, uint32_t timeout_ms)
 {
     Xhci *x = d->x;
     int dci = ((endpoint_address & 0x0F) << 1) | (endpoint_address >> 7);
@@ -707,10 +748,14 @@ static UsbDevice *enumerate_dev(Xhci *x, UsbDevice *parent, int hub_port, int ro
         } else if (ifaces[i].cls == 9) {
             if (!d->driver && hub_init(x, d) == 0)
                 d->driver = 3;
+        } else if (ifaces[i].cls == 0xE0 && ifaces[i].sub == 1 && ifaces[i].proto == 1) { /* Bluetooth (HCI) */
+            if (!d->driver && bt_usb_probe(d, &ifaces[i]) == 0)
+                d->driver = 5;
         }
     }
     if (!d->driver)
-        kprintf("usb: %s: keine passende Klasse (Tastatur/Maus/Massenspeicher/Hub), Geraet bleibt ungenutzt\n", d->name);
+        kprintf("usb: %s: keine passende Klasse (Tastatur/Maus/Massenspeicher/Hub/Bluetooth), Geraet bleibt ungenutzt\n",
+                d->name);
     return d;
 
 fail:
