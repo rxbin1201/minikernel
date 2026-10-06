@@ -23,6 +23,7 @@ void settings_default(Settings *s)
     memset(s, 0, sizeof(*s));
     s->dock = 100;
     s->date = 1;
+    s->audio_out = -1;
 }
 
 static const struct {
@@ -35,6 +36,7 @@ static const struct {
     {"seconds", (int)__builtin_offsetof(Settings, seconds), 0, 1},
     {"date", (int)__builtin_offsetof(Settings, date), 0, 1},
     {"wallpaper", (int)__builtin_offsetof(Settings, wallpaper), 0, 15},
+    {"audio_out", (int)__builtin_offsetof(Settings, audio_out), -1, 100},
 };
 #define NKEYS ((int)(sizeof(keys) / sizeof(keys[0])))
 

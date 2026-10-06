@@ -127,6 +127,12 @@ Ganzzahlen (Analysefilter mit dem Prototyp der Spezifikation in Q31, Bitzuteilun
 geprueft auf dem Host gegen den Decoder von BlueZ (libsbc): alle Frames angenommen, Verstaerkung 1,000, Sinus mit
 68 dB Abstand, gleichauf mit dem Encoder von libsbc. Selbsttest `sbc` (bitgenau gegen den Host).
 
+Stufe 6 (AVRCP, Fernbedienung): oeffnet die Soundbar den AVRCP-Kanal (PSM 0x17), nimmt der Kernel ihn an und ist
+"Target": Unit/Subunit Info als Panel, Tasten (Pass Through) werden angenommen und ausgefuehrt - lauter, leiser,
+stumm direkt an der Gesamtlautstaerke, Play/Pause/Stop/vor/zurueck ueber eine Warteschlange (`SYS_BT 10`), die
+`music` liest (wirkt also auch, wenn ein anderes Fenster vorne ist; "zurueck" springt wie im Fenster erst an den
+Anfang des Titels). Herstellerbefehle (Titel-Infos, absolute Lautstaerke) beantwortet er mit "nicht implementiert".
+
 ## Mehrere CPUs (SMP)
 
 Der Kernel startet alle CPUs aus der ACPI-MADT (QEMU: `make run SMP=N`, Standard 4). Threads und Prozesse kommen aus
@@ -395,8 +401,12 @@ Milchglas ueber einem berechneten Farbverlauf:
   startet, Pfeile waehlen); die Lupe oeffnet dasselbe. Das Fenstermenue listet alle Fenster und die Befehle fuer das
   aktive (minimieren, zoomen, anordnen, schliessen)
 - **Uhrzeit und Datum:** ein Klick oeffnet die Uhr
-- **System:** Netzwerk (Kabel und WLAN), Bluetooth, Lautstaerke (Klick: stumm/zurueck, Mausrad: lauter/leiser) und ^
-  (Ueber MiniKernel, Neu starten, Ausschalten, Zur Konsole)
+- **System:** Netzwerk (Kabel und WLAN), Bluetooth, Ton und ^ (Ueber MiniKernel, Neu starten, Ausschalten, Zur Konsole)
+- **Ton:** das Mausrad ueber dem Symbol regelt die Lautstaerke; ein Klick oeffnet das Ton-Menue mit Regler (klicken
+  oder ziehen), "Stumm schalten" und der Ausgabe: "Automatisch" (Bluetooth, wenn eine Soundbar bereit ist, sonst die
+  Soundkarte, Lautsprecher aus, wenn an einer Buchse etwas steckt) oder fest ein Ausgang der Soundkarte
+  (Lautsprecher, Kopfhoerer, Line-Out) bzw. Bluetooth (`SYS_AUDIO` 7-9, `hda_output_select`). "aktiv" zeigt, wo der
+  Ton herauskommt, "eingesteckt", an welcher Buchse etwas steckt.
 - **Netzwerk:** ein Knopf fuer Kabel und WLAN. Das Symbol zeigt das Kabel, wenn es mit Adresse verbunden ist (oder es
   kein WLAN gibt), sonst den WLAN-Faecher. Das Menue hat zwei Abschnitte: Ethernet (mit WLAN daneben nur Zustand,
   Adresse, Verbindung und "Adresse neu anfragen") und WLAN.
@@ -560,6 +570,12 @@ gleichzeitig (mehr Programme als CPUs) und muessen dasselbe Ergebnis erhalten wi
   sich, laedt die Symbole aus `Build/kernel.debug.elf` und setzt einen Breakpoint auf `kmain` (`tools/gdbinit`).
   Braucht `sudo apt install gdb`.
 - **Adressen von Hand:** `addr2line -f -e Build/kernel.debug.elf 0x10427d`
+- **Haenger finden:** stockt das System (Mauszeiger, Ton), stehen die Gruende im Log -
+  `dmesg | grep -e wartete -e stockte -e dauerte -e Rueckstand`:
+  `smp: CPU n wartete X ms auf den BKL - gehalten von Thread '...'` (wer den Kernel so lange belegte),
+  `usb: vvvv:pppp Bulk/Control ... dauerte X ms`, `sched: System stockte etwa X ms` (Thread "wachhund"),
+  `hda: Bluetooth-Mischer ... im Rueckstand`. USB-Transfers warten mit MSI schlafend (Controller-Sperre und BKL
+  frei), damit z.B. ein lesender USB-Stick Maus, Tastatur und Bluetooth nicht anhaelt.
 - **Kernel-Log auf echter Hardware:** `dmesg` zeigt alle Kernel-Meldungen seit dem Start (letzte 256 KiB);
   `dmesg > /disk/log.txt` speichert sie. `/disk` ist das FAT32-Volume mit dem Label `MINIKERNEL` (nur dieses
   beschreibt der Kernel), z.B. ein USB-Stick, der unter Windows so benannt wurde.

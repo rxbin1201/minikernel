@@ -13,6 +13,7 @@ typedef struct {
     int seconds;   /* Uhr in der Taskleiste mit Sekunden */
     int date;      /* Datum unter der Uhrzeit */
     int wallpaper; /* Farbthema des Hintergrunds (ui_wallpaper, 0 = Abendrot) */
+    int audio_out; /* Ausgabe im Ton-Menue: -1 automatisch, sonst die Nummer eines Ausgangs (100 = Bluetooth) */
 } Settings;
 
 void        settings_default(Settings *s);

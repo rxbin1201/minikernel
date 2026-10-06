@@ -167,7 +167,7 @@ void net_tick(void)
         vol_level = -1;
     if (net_state() != old || vol_level != old_vol)
         damage_dock();
-    if (menu_open == 3)
+    if (menu_open == 3 || menu_open == 8) /* Netzwerk-Raten bzw. aktiver Ausgang */
         damage_menu();
 }
 
@@ -457,6 +457,7 @@ static int open_button(void) /* Knopf, dessen Menue offen ist */
     case 3: return B_NET;
     case 4: return B_SYS;
     case 7: return B_BT;
+    case 8: return B_VOL;
     }
     return -1;
 }
@@ -733,6 +734,7 @@ int menubar_hit(int x, int y)
     case B_NET: return 3;
     case B_SYS: return 4;
     case B_BT: return 7;
+    case B_VOL: return 8;
     }
     return 0;
 }
@@ -934,6 +936,89 @@ static const MenuItem *net_menu_build(int *n)
     return items;
 }
 
+/* ---------- Ton-Menue: Lautstaerkeregler und Ausgabe ---------- */
+
+static AudioOutput outs[OUT_MAX];
+static int         nouts, out_selected = AUDIO_OUT_AUTO;
+static char        snd_status[64], snd_pct[16], out_names[OUT_MAX][48], out_keys[OUT_MAX][24];
+static MenuItem    snd_items[OUT_MAX + 8];
+
+static void load_outputs(void)
+{
+    nouts = 0;
+    AudioOutput o;
+    for (u64 i = 0; nouts < OUT_MAX && sys_audio_output(i, &o) == 0; i++)
+        outs[nouts++] = o;
+    s64 sel = sys_audio_selected();
+    out_selected = sel >= 0 || sel == AUDIO_OUT_AUTO ? (int)sel : AUDIO_OUT_AUTO;
+}
+
+static const char *out_name(int i, char *buf, int max)
+{
+    const char *bt = outs[i].kind == 1 ? btd_device_name() : 0;
+    if (outs[i].kind == 1)
+        snprintf(buf, max, bt ? "Bluetooth: %s" : "Bluetooth", bt);
+    else
+        snprintf(buf, max, "%s", outs[i].name);
+    return buf;
+}
+
+static const MenuItem *sound_menu(int *n)
+{
+    load_outputs();
+    int k = 0;
+    const char *where = "keine Ausgabe";
+    char tmp[48];
+    for (int i = 0; i < nouts; i++)
+        if (outs[i].on)
+            where = out_name(i, tmp, sizeof(tmp));
+    snprintf(snd_status, sizeof(snd_status), "%s", vol_level == 0 ? "Stumm" : where);
+    snd_items[k++] = (MenuItem){"Ton", A_HEAD, snd_status};
+    snprintf(snd_pct, sizeof(snd_pct), "%lld %%", (long long)(vol_level > 0 ? vol_level : 0));
+    snd_items[k++] = (MenuItem){"", A_VOL_SLIDER, snd_pct};
+    snd_items[k++] = (MenuItem){vol_level > 0 ? "Stumm schalten" : "Ton wieder an", A_VOL_MUTE, 0};
+    snd_items[k++] = (MenuItem){"", A_SEP, 0};
+    snd_items[k++] = (MenuItem){"Ausgabe", A_INFO, ""};
+    snd_items[k++] = (MenuItem){"Automatisch", A_OUT_AUTO, "Bluetooth, sonst Soundkarte"};
+    for (int i = 0; i < nouts; i++) {
+        out_name(i, out_names[i], sizeof(out_names[i]));
+        snprintf(out_keys[i], sizeof(out_keys[i]), "%s", outs[i].on ? "aktiv" : outs[i].kind == 0 && outs[i].plugged ?
+                 "eingesteckt" : "");
+        snd_items[k++] = (MenuItem){out_names[i], A_OUT + i, out_keys[i]};
+    }
+    *n = k;
+    return snd_items;
+}
+
+static int sound_selected(int a) /* Auswahlkreis gefuellt? */
+{
+    if (a == A_OUT_AUTO)
+        return out_selected == AUDIO_OUT_AUTO;
+    int i = a - A_OUT;
+    return i >= 0 && i < nouts && outs[i].id == out_selected;
+}
+
+int sound_action(int a)
+{
+    damage_menu();
+    if (a == A_VOL_MUTE) {
+        if (vol_level > 0) {
+            vol_saved = vol_level;
+            set_volume(0);
+        } else {
+            set_volume(vol_saved > 0 ? vol_saved : 50);
+        }
+    } else if (a == A_OUT_AUTO || (a >= A_OUT && a - A_OUT < nouts)) { /* waehlen und merken (settings.cfg) */
+        int id = a == A_OUT_AUTO ? AUDIO_OUT_AUTO : outs[a - A_OUT].id;
+        sys_audio_select(id);
+        cfg.audio_out = id;
+        settings_save(&cfg);
+    }
+    damage_menu();
+    damage_dock_seg(3);
+    return 1;
+}
+
 static const MenuItem *menu_items(int *n)
 {
     switch (menu_open) {
@@ -947,6 +1032,8 @@ static const MenuItem *menu_items(int *n)
         return net_menu_build(n);
     case 7:
         return btd_menu(n);
+    case 8:
+        return sound_menu(n);
     }
     *n = (int)(sizeof(sys_menu) / sizeof(sys_menu[0]));
     return sys_menu;
@@ -958,6 +1045,8 @@ static int row_h(const MenuItem *m)
         return U(11);
     if (m->action == A_SEARCH || m->action == A_WLAN_PASS)
         return U(40);
+    if (m->action == A_VOL_SLIDER)
+        return U(44);
     if (menu_open == 1 || is_winsel(m->action))
         return U(32); /* mit Programmsymbol */
     if (m->action >= A_WLAN_NET)
@@ -967,7 +1056,8 @@ static int row_h(const MenuItem *m)
 
 static int is_item(const MenuItem *m)
 {
-    return m->action != A_SEP && !is_info(m->action) && m->action != A_SEARCH && m->action != A_WLAN_PASS;
+    return m->action != A_SEP && !is_info(m->action) && m->action != A_SEARCH && m->action != A_WLAN_PASS &&
+           m->action != A_VOL_SLIDER;
 }
 
 static void menu_box(int *x, int *y, int *w, int *h)
@@ -977,7 +1067,7 @@ static void menu_box(int *x, int *y, int *w, int *h)
     Bar b;
     bar_layout(&b);
     int btn = open_button();
-    *w = menu_open == 3 || menu_open == 7 ? U(340) : menu_open == 4 ? U(230) : U(290);
+    *w = menu_open == 3 || menu_open == 7 ? U(340) : menu_open == 8 ? U(330) : menu_open == 4 ? U(230) : U(290);
     *h = U(12);
     for (int i = 0; i < n; i++)
         *h += row_h(&m[i]);
@@ -987,6 +1077,50 @@ static void menu_box(int *x, int *y, int *w, int *h)
         *x = W - U(6) - *w;
     if (*x < U(6))
         *x = U(6);
+}
+
+/* Lautstaerkeregler: Bahn von *x0 bis *x1, senkrechte Mitte *cy (0 = kein Regler im offenen Menue) */
+static int slider_geom(int *x0, int *x1, int *cy, int *top, int *bot)
+{
+    if (menu_open != 8)
+        return 0;
+    int n, x, y, w, h;
+    const MenuItem *m = menu_items(&n);
+    menu_box(&x, &y, &w, &h);
+    for (int i = 0; i < n; i++)
+        if (m[i].action == A_VOL_SLIDER) {
+            int iy = y + U(6);
+            for (int k = 0; k < i; k++)
+                iy += row_h(&m[k]);
+            *x0 = x + U(18);
+            *x1 = x + w - U(70);
+            *cy = iy + row_h(&m[i]) / 2;
+            *top = iy;
+            *bot = iy + row_h(&m[i]);
+            return 1;
+        }
+    return 0;
+}
+
+int vol_slider_at(int px, int py)
+{
+    int x0, x1, cy, top, bot;
+    return vol_level >= 0 && slider_geom(&x0, &x1, &cy, &top, &bot) && px >= x0 - U(10) && px <= x1 + U(10) &&
+           py >= top && py < bot;
+}
+
+void vol_slider_drag(int px)
+{
+    int x0, x1, cy, top, bot;
+    if (!slider_geom(&x0, &x1, &cy, &top, &bot) || x1 <= x0)
+        return;
+    int v = (px - x0) * 100 / (x1 - x0);
+    v = v < 0 ? 0 : v > 100 ? 100 : v;
+    if (v == vol_level)
+        return;
+    damage_menu();
+    set_volume(v);
+    damage_menu();
 }
 
 static int menu_item_y(int i)
@@ -1033,6 +1167,19 @@ void draw_menu(void)
             gfx_blend_fill(s, cx, fy + U(7), U(2) > 1 ? U(2) : 2, fh - U(14), C_ACCENT, 255);
             continue;
         }
+        if (m[i].action == A_VOL_SLIDER) { /* Bahn, gefuellter Teil, runder Griff, Prozent rechts */
+            int x0, x1, cyy, top, bot;
+            slider_geom(&x0, &x1, &cyy, &top, &bot);
+            int v = vol_level > 0 ? (int)vol_level : 0, vx = x0 + (x1 - x0) * v / 100, th = U(6);
+            gfx_round_rect(s, x0, cyy - th / 2, x1 - x0, th, th / 2, 0x000000, 28);
+            if (vx > x0)
+                gfx_round_rect(s, x0, cyy - th / 2, vx - x0, th, th / 2, C_ACCENT, 255);
+            gfx_disc(s, (float)vx, (float)cyy + U(1) * 0.5f, (float)U(10), 0x000000, 40); /* Schatten */
+            gfx_disc(s, (float)vx, (float)cyy, (float)U(9), 0xFFFFFF, 255);
+            ring(s, (float)vx, (float)cyy, (float)U(9), 1.0f, 0x000000, 40);
+            text_draw(s, font_bold, FS, x + w - U(14) - text_width(font_bold, FS, m[i].keys), ty, m[i].keys, C_TEXT);
+            continue;
+        }
         if (m[i].action == A_WLAN_PASS) { /* Passwortfeld: ein Punkt je Zeichen, Schreibmarke */
             int fx = x + U(8), fy = iy + U(4), fw = w - U(16), fh = rh - U(8), tx = fx + U(12);
             gfx_round_rect(s, fx, fy, fw, fh, U(8), 0x000000, 14);
@@ -1059,7 +1206,14 @@ void draw_menu(void)
             int icon = is_winsel(m[i].action) ? icon_of_win(&wins[m[i].action - A_WINSEL]) : m[i].action;
             ui_app_icon(s, icon, x + U(12), iy + (rh - U(22)) / 2, U(22));
             tx = x + U(44);
-        } else if (m[i].action >= A_BT_DEV) { /* Bluetooth-Geraet: Lautsprecher bei Audio, sonst das Zeichen */
+        } else if (menu_open == 8 && (m[i].action == A_OUT_AUTO || m[i].action >= A_OUT)) { /* Auswahlkreis */
+            float rcx = x + U(24), rcy = iy + rh * 0.5f;
+            u32 col = hover ? 0xFFFFFF : C_ACCENT;
+            ring(s, rcx, rcy, (float)U(7), 1.5f * (float)U(1), hover ? 0xFFFFFF : 0x8E8E93, 255);
+            if (sound_selected(m[i].action))
+                gfx_disc(s, rcx, rcy, (float)U(4), col, 255);
+            tx = x + U(42);
+        } else if (m[i].action >= A_BT_DEV && m[i].action < A_OUT) { /* Bluetooth-Geraet: Lautsprecher bei Audio, sonst das Zeichen */
             u32 col = hover ? 0xFFFFFF : C_TEXT;
             float kk = (float)U(1) * 0.8f;
             if (btd_dev_audio(m[i].action - A_BT_DEV)) {

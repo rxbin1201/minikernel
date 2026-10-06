@@ -453,6 +453,20 @@ static inline s64 sys_wait(int pid, int *code)                { return syscall3(
 static inline s64 sys_wait_nohang(int pid, int *code)         { return syscall3(SYS_WAIT, pid, (u64)code, 1); } /* ERR_AGAIN: laeuft noch */
 static inline s64 sys_videoinfo(u64 index, VideoInfo *vi)  { return syscall3(SYS_VIDEOINFO, index, (u64)vi, 0); }
 static inline s64 sys_audio(u64 op, u64 a, u64 b)          { return syscall3(SYS_AUDIO, op, a, b); } /* siehe play.c */
+/* Ausgabe waehlen (SYS_AUDIO 7/8/9): Ausgaenge der Soundkarte und ggf. Bluetooth */
+#define AUDIO_OUT_AUTO (-1)
+#define AUDIO_OUT_BT   100
+typedef struct {
+    char          name[24];
+    unsigned char kind;    /* 0 Soundkarte, 1 Bluetooth */
+    unsigned char plugged; /* an der Buchse steckt etwas */
+    unsigned char on;      /* der Ton kommt hier heraus (bzw. kaeme) */
+    unsigned char pad;
+    int           id;      /* fuer sys_audio_select */
+} AudioOutput;
+static inline s64 sys_audio_output(u64 i, AudioOutput *o)     { return syscall3(SYS_AUDIO, 7, i, (u64)o); }
+static inline s64 sys_audio_select(int id)                    { return syscall3(SYS_AUDIO, 8, (u64)(s64)id, 0); }
+static inline s64 sys_audio_selected(void)                    { return syscall3(SYS_AUDIO, 9, 0, 0); }
 static inline s64 sys_setmode(u64 w, u64 h, u64 hz100)     { return syscall3(SYS_SETMODE, w, h, hz100); } /* sofort umschalten (Intel-Treiber) */
 /* Geteilter Speicher: anlegen -> Adresse (und Nummer), einblenden per Nummer, ausblenden, Groesse */
 static inline s64 sys_shm_create(u64 bytes, unsigned *id)  { return syscall3(SYS_SHM, 0, bytes, (u64)id); }

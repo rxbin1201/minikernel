@@ -48,6 +48,11 @@ void do_action(int a)
             close_menu();
         return;
     }
+    if (is_sound_action(a)) { /* Ton-Menue: bleibt offen (Ausgabe sehen, weiter regeln) */
+        if (!sound_action(a))
+            close_menu();
+        return;
+    }
     close_menu();
     if (a >= A_WINSEL && a < A_WINSEL + MAXW) { /* Fenster aus dem Fenstermenue nach vorn */
         if (wins[a - A_WINSEL].used)
@@ -155,6 +160,11 @@ static void mouse_down(Event *e)
         dialog_mouse(e->x, e->y, e->button == 1);
         return;
     }
+    if (menu_open && e->button == 1 && vol_slider_at(e->x, e->y)) { /* Lautstaerkeregler: setzen und ziehen */
+        drag_mode = 3;
+        vol_slider_drag(e->x);
+        return;
+    }
     if (menu_open) {
         int i = menu_hit(e->x, e->y);
         if (i >= 0) {
@@ -244,6 +254,10 @@ static void mouse_move(Event *e)
             damage_menu();
         }
     }
+    if (drag_mode == 3) { /* Lautstaerkeregler ziehen */
+        vol_slider_drag(e->x);
+        return;
+    }
     if (!drag_mode) {
         dock_hover_at(e->x, e->y);
         update_button_hover(e->x, e->y);
@@ -329,6 +343,8 @@ void settings_changed(void)
     settings_load(&cfg);
     if (cfg.cursor != old.cursor)
         gfx_set_cursor_size(cfg.cursor);
+    if (cfg.audio_out != old.audio_out)
+        sys_audio_select(cfg.audio_out);
     if (cfg.wallpaper != old.wallpaper) {
         gpu_wait(); /* die GPU liest vielleicht noch aus dem alten Bild */
         make_background();
@@ -382,6 +398,7 @@ void _start(int argc, char **argv)
     (void)argc;
     (void)argv;
     settings_load(&cfg);
+    sys_audio_select(cfg.audio_out); /* gemerkte Ausgabe (Ton-Menue); gibt es den Ausgang nicht mehr: automatisch */
     if (gfx_open() != 0)
         sys_exit(1);
     gfx_set_cursor_size(cfg.cursor);

@@ -183,6 +183,11 @@ static const char *conn_name(void)
     return "Ger\xC3\xA4t";
 }
 
+const char *btd_device_name(void)
+{
+    return bc.state == BT_CONN_READY ? conn_name() : 0;
+}
+
 const char *btd_hover_name(char *buf, int max)
 {
     if (bc.state == BT_CONN_READY)

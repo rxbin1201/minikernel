@@ -102,7 +102,8 @@ typedef struct {
     uint8_t dev;             /* Art des Pins: 0 Line-Out, 1 Lautsprecher, 2 Kopfhoerer */
     uint8_t jack;            /* Buchse nach aussen, die meldet, ob etwas eingesteckt ist */
     uint8_t pinctl;          /* Pin-Steuerung, wenn der Ausgang an ist */
-    uint8_t muted;           /* Lautsprecher abgeschaltet, weil an einer Buchse etwas steckt */
+    uint8_t muted;           /* Pin abgeschaltet (Auto-Mute oder anderer Ausgang gewaehlt) */
+    uint8_t plugged;         /* an dieser Buchse steckt etwas (zuletzt abgefragt) */
 } Path;
 
 static volatile uint8_t *regs;
@@ -451,32 +452,86 @@ static void stream_start(void)
  * Lautsprecher aus; sonst an. Abgefragt beim Oeffnen und waehrend der Wiedergabe alle 300 ms. */
 static uint64_t automute_us;
 
+/* Gewaehlte Ausgabe (Einstellung im Desktop): -1 automatisch (Bluetooth, wenn verbunden; sonst die Soundkarte mit
+ * Auto-Mute), 0..npaths-1 nur dieser Ausgang der Soundkarte (auch bei verbundenem Bluetooth), HDA_OUT_BT Bluetooth */
+static int out_sel = -1;
+static Event mix_event; /* weckt den Mischer (Definition weiter unten) */
+
 static void automute(int verbose)
 {
     automute_us = time_us();
     int plugged = 0;
-    for (int i = 0; i < npaths; i++)
+    for (int i = 0; i < npaths; i++) {
+        paths[i].plugged = 0;
         if (paths[i].jack) {
             int64_t sense = cmd(paths[i].cad, paths[i].node[0], V_GET_PIN_SENSE << 8);
             if (sense > 0 && (sense & 0x80000000))
-                plugged = 1;
+                plugged = paths[i].plugged = 1;
         }
+    }
     for (int i = 0; i < npaths; i++) {
         Path *p = &paths[i];
-        if (p->dev != 1 || p->muted == plugged)
+        /* fester Ausgang: nur der; automatisch: alles an, nur Lautsprecher aus, wenn an einer Buchse etwas steckt */
+        int off = out_sel >= 0 && out_sel < npaths ? i != out_sel : p->dev == 1 && plugged;
+        if (p->muted == off)
             continue;
-        p->muted = (uint8_t)plugged;
-        cmd(p->cad, p->node[0], V_SET_PIN_CTL << 8 | (plugged ? 0 : p->pinctl));
+        p->muted = (uint8_t)off;
+        cmd(p->cad, p->node[0], V_SET_PIN_CTL << 8 | (off ? 0 : p->pinctl));
         if (verbose)
-            kprintf("hda: %s, Lautsprecher (Pin %#x) %s\n", plugged ? "Stecker in der Buchse" : "Buchse frei", p->node[0],
-                    plugged ? "aus" : "an");
+            kprintf("hda: %s (Pin %#x) %s%s\n", dev_name(p->dev), p->node[0], off ? "aus" : "an",
+                    out_sel >= 0 && out_sel < npaths ? " (gewaehlt)" : plugged ? " (Stecker in einer Buchse)" : "");
     }
+}
+
+/* Ton ueber Bluetooth? (automatisch oder ausdruecklich gewaehlt, und die Soundbar ist bereit) */
+static int bt_route(void)
+{
+    return (out_sel < 0 || out_sel == HDA_OUT_BT) && bt_a2dp_active();
 }
 
 static void automute_tick(void)
 {
     if (time_us() - automute_us > 300000)
         automute(1);
+}
+
+int hda_output_info(unsigned i, HdaOutput *o)
+{
+    memset(o, 0, sizeof(*o));
+    if (present && i < (unsigned)npaths) {
+        const Path *p = &paths[i];
+        ksnprintf(o->name, sizeof(o->name), "%s", p->dev == 0 ? "Line-Out" : p->dev == 1 ? "Lautsprecher" : "Kopfh\xC3\xB6rer");
+        o->kind = 0;
+        o->plugged = p->plugged;
+        o->on = !p->muted && !bt_route(); /* hier kaeme der Ton heraus (auch wenn gerade nichts spielt) */
+        o->id = (int)i;
+        return 0;
+    }
+    if (i == (unsigned)(present ? npaths : 0) && bt_a2dp_active()) {
+        ksnprintf(o->name, sizeof(o->name), "Bluetooth");
+        o->kind = 1;
+        o->plugged = 1;
+        o->on = bt_route();
+        o->id = HDA_OUT_BT;
+        return 0;
+    }
+    return -1;
+}
+
+int hda_output_select(int sel)
+{
+    if (sel != -1 && sel != HDA_OUT_BT && (sel < 0 || sel >= npaths))
+        return HDA_ERR_FORMAT;
+    out_sel = sel;
+    if (present)
+        automute(1); /* Pins gleich umschalten */
+    event_signal(&mix_event); /* der Mischer prueft die Richtung (Bluetooth/Soundkarte) */
+    return 0;
+}
+
+int hda_output_get(void)
+{
+    return out_sel;
 }
 
 int hda_present(void)
@@ -666,7 +721,7 @@ static void mixer_thread(void *arg)
             used |= voices[i].used;
             data |= voices[i].used && voices[i].rd != voices[i].wr;
         }
-        if (bt_a2dp_active()) { /* Soundbar verbunden: Ton ueber Bluetooth */
+        if (bt_route()) { /* Soundbar verbunden: Ton ueber Bluetooth */
             if (running)
                 hw_stop();
             bt_mix(data);

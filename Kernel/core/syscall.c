@@ -478,6 +478,20 @@ static void syscall_do(SyscallFrame *f)
         case 4: r = hda_volume((int)(int64_t)f->rsi); break;
         case 5: r = (int64_t)hda_played(pid); break;
         case 6: r = hda_voice_volume(pid, (int)(int64_t)f->rsi); break;
+        case 7: { /* Ausgang rsi beschreiben (nach rdx) */
+            HdaOutput o;
+            if (!process_user_range_ok(p, f->rdx, sizeof(o), 1))
+                r = ERR_FAULT;
+            else if (hda_output_info((unsigned)f->rsi, &o) != 0)
+                r = ERR_NOENT;
+            else {
+                memcpy((void *)f->rdx, &o, sizeof(o));
+                r = 0;
+            }
+            break;
+        }
+        case 8: r = hda_output_select((int)(int64_t)f->rsi); break;
+        case 9: r = hda_output_get(); break;
         default: r = ERR_INVAL; break;
         }
         ret = r == HDA_ERR_NODEV ? ERR_NOSYS : r == HDA_ERR_BUSY ? ERR_AGAIN : r == HDA_ERR_FORMAT ? ERR_INVAL
