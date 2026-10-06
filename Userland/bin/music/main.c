@@ -1195,6 +1195,8 @@ static void key(int k)
 void _start(int argc, char **argv)
 {
     char want_file[256] = "";
+    while (sys_bt_media_key() > 0) /* Tasten der Fernbedienung von vor dem Start nicht nachholen */
+        ;
     if (argc > 1) {
         Stat st;
         if (sys_stat(argv[1], &st) == 0 && st.is_dir) {
@@ -1297,6 +1299,20 @@ void _start(int argc, char **argv)
                     keep_visible();
                 }
             } while (++nev < 64 && gfx_poll(&e));
+        }
+        for (s64 mk; (mk = sys_bt_media_key()) > 0; changed = 1) { /* Tasten der Bluetooth-Fernbedienung (AVRCP) */
+            if (mk == BT_KEY_PLAY)
+                resume_play();
+            else if (mk == BT_KEY_PAUSE || mk == BT_KEY_STOP)
+                pause_play();
+            else if (mk == BT_KEY_NEXT)
+                next_track(1, 0);
+            else if (mk == BT_KEY_PREV) {
+                if (pfd >= 0 && rate && position() > (u64)rate * 3)
+                    seek_to(0); /* erst an den Anfang, wie die Taste im Fenster */
+                else
+                    next_track(-1, 0);
+            }
         }
         feed();
         scan_step();

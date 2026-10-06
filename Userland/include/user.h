@@ -441,6 +441,9 @@ static inline s64 sys_bt_disconnect(void)                     { return syscall3(
 static inline s64 sys_bt_conn(BtConn *c)                      { return syscall3(SYS_BT, 7, (u64)c, 0); }
 static inline s64 sys_bt_key_get(u64 i, BtKey *k)             { return syscall3(SYS_BT, 8, i, (u64)k); }
 static inline s64 sys_bt_key_add(const BtKey *k)              { return syscall3(SYS_BT, 9, (u64)k, 0); }
+/* Tasten der Bluetooth-Fernbedienung (AVRCP, z.B. an der Soundbar): naechste oder BT_KEY_NONE */
+enum { BT_KEY_NONE, BT_KEY_PLAY, BT_KEY_PAUSE, BT_KEY_STOP, BT_KEY_NEXT, BT_KEY_PREV };
+static inline s64 sys_bt_media_key(void)                      { return syscall3(SYS_BT, 10, 0, 0); }
 static inline s64 sys_read(int fd, void *buf, u64 len)        { return syscall3(SYS_READ, fd, (u64)buf, len); }
 static inline s64 sys_close(int fd)                           { return syscall3(SYS_CLOSE, fd, 0, 0); }
 static inline s64 sys_closefrom(int fd)                       { return syscall3(SYS_CLOSEFROM, fd, 0, 0); } /* alle ab fd schliessen */

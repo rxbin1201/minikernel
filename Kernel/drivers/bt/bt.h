@@ -106,6 +106,10 @@ void bt_conn_info(BtConn *out);
 int bt_key_get(unsigned i, BtKey *out); /* 0 oder -1 */
 int bt_key_add(const BtKey *k);
 
+/* AVRCP: Tasten der Fernbedienung fuer Programme (SYS_BT 10); Lautstaerke wirkt direkt am Mischer */
+enum { BT_KEY_NONE, BT_KEY_PLAY, BT_KEY_PAUSE, BT_KEY_STOP, BT_KEY_NEXT, BT_KEY_PREV };
+int bt_media_key(void); /* naechste Taste oder BT_KEY_NONE */
+
 /* A2DP (a2dp.c): ist die Soundbar bereit, mischt hda.c in diesen Strom statt auf die Soundkarte */
 int      bt_a2dp_active(void);                               /* 1 = Ton geht ueber Bluetooth */
 uint32_t bt_a2dp_write(const int16_t *stereo, uint32_t frames); /* 48 kHz Stereo; Zahl angenommener Frames */

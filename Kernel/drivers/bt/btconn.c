@@ -20,6 +20,7 @@
 
 #include "drivers/bt/bt_internal.h"
 #include "drivers/usb/usb.h"
+#include "drivers/sound/hda.h"
 #include "arch/x86_64/apic.h"
 #include "lib/kprintf.h"
 #include "lib/string.h"
@@ -30,6 +31,8 @@
 #define PSM_AVDTP   0x0019
 #define LOCAL_CID   0x0040 /* unser Ende des AVDTP-Signalkanals */
 #define MEDIA_CID   0x0041 /* unser Ende des AVDTP-Medienkanals (Audiodaten) */
+#define AVRCP_CID   0x0042 /* unser Ende des AVRCP-Kanals (Fernbedienung, AVCTP) */
+#define PSM_AVRCP   0x0017
 #define L2_MTU      1024
 #define NO_HANDLE   0xFFFF
 
@@ -43,6 +46,10 @@ static volatile int      conn_done, auth_done, enc_done, disc_done, remote_cfg_d
  * (Kennung, Ergebnis: 0 offen, 1 angenommen, -1 abgelehnt); *_connecting: eigene Anfrage laeuft gerade */
 static volatile int      sig_connecting, media_connecting, sig_our_cfg, media_our_cfg;
 static uint8_t           sig_cfg_id, media_cfg_id;
+static uint16_t          avrcp_remote;   /* Kanal der Gegenstelle fuer AVRCP, 0 = keiner */
+/* Tasten der Fernbedienung fuer Programme (music): Play, Pause, Stop, vor, zurueck */
+static uint8_t           mkeys[16];
+static volatile uint32_t mkey_head, mkey_tail;
 static volatile int      credits;             /* ACL-Pakete, die der Controller noch annimmt */
 static uint8_t          *acl_dma;
 static Mutex             acl_lock = MUTEX_INIT;
@@ -406,7 +413,11 @@ static void sig_rx(const uint8_t *d, uint32_t len)
             if (cl >= 4) {
                 uint16_t psm = le16(v), scid = le16(v + 2), local = 0, result = 0x0002; /* PSM nicht unterstuetzt */
                 const char *what = "abgelehnt";
-                if (psm == PSM_AVDTP && handle != NO_HANDLE) {
+                if (psm == PSM_AVRCP && handle != NO_HANDLE && !avrcp_remote) { /* Fernbedienung der Soundbar */
+                    local = AVRCP_CID;
+                    avrcp_remote = scid;
+                    what = "angenommen als AVRCP (Fernbedienung)";
+                } else if (psm == PSM_AVDTP && handle != NO_HANDLE) {
                     if (!st.l2_remote_cid && !sig_connecting) {
                         local = LOCAL_CID;
                         st.l2_remote_cid = scid;
@@ -436,10 +447,10 @@ static void sig_rx(const uint8_t *d, uint32_t len)
                     if (local == LOCAL_CID) {
                         sig_our_cfg = 0;
                         sig_cfg_id = cid;
-                    } else {
+                    } else if (local == MEDIA_CID) {
                         media_our_cfg = 0;
                         media_cfg_id = cid;
-                    }
+                    } /* AVRCP: die Antwort auf unsere Konfiguration wird nicht gebraucht */
                     put16(cfg, scid);
                     put16(cfg + 2, 0);
                     cfg[4] = 0x01;
@@ -450,7 +461,12 @@ static void sig_rx(const uint8_t *d, uint32_t len)
             }
             break;
         case 0x04: /* Configuration Request: Kanal, Flags, Optionen (MTU) */
-            if (cl >= 4 && (le16(v) == LOCAL_CID || le16(v) == MEDIA_CID)) {
+            if (cl >= 4 && le16(v) == AVRCP_CID && avrcp_remote) {
+                put16(rsp, avrcp_remote);
+                put16(rsp + 2, 0);
+                put16(rsp + 4, 0);
+                sig_send(0x05, id, rsp, 6);
+            } else if (cl >= 4 && (le16(v) == LOCAL_CID || le16(v) == MEDIA_CID)) {
                 int media = le16(v) == MEDIA_CID;
                 uint16_t mtu = 672; /* ohne Angabe gilt der Standard */
                 for (uint32_t k = 4; k + 2 <= cl; k += 2u + v[k + 1])
@@ -480,6 +496,8 @@ static void sig_rx(const uint8_t *d, uint32_t len)
                 if (le16(v) == LOCAL_CID) {
                     chan_closed = 1;
                     kprintf("bt: L2CAP: Gegenstelle schliesst den AVDTP-Kanal\n");
+                } else if (le16(v) == AVRCP_CID) {
+                    avrcp_remote = 0;
                 }
             }
             break;
@@ -576,6 +594,94 @@ static int av_request(uint8_t sig, const uint8_t *param, uint32_t plen, uint8_t 
     return (int)avw.len;
 }
 
+/* ---------- AVRCP: Fernbedienung (wir sind "Target", die Soundbar "Controller") ----------
+ * AVCTP-Kopf: Transaktion << 4 | Paketart << 2 | Antwort << 1 | ungueltige PID; PID 0x110E (AV Remote Control).
+ * Dahinter AV/C: Art (Befehl bzw. Antwort), Subunit, Opcode, Operanden. Unit/Subunit Info beantworten wir als Panel;
+ * Pass Through (Tasten) nehmen wir an und fuehren sie aus: Lautstaerke direkt am Mischer, Play/Pause/Stop/vor/zurueck
+ * landen in einer Warteschlange fuer Programme (SYS_BT 10, music liest sie). Herstellerbefehle (Titel-Infos, absolute
+ * Lautstaerke) und alles andere: "nicht implementiert" - dann bleibt die Soundbar bei den einfachen Tasten. */
+#define AVC_NOT_IMPLEMENTED 0x08
+#define AVC_ACCEPTED        0x09
+#define AVC_STABLE          0x0C
+
+static void mkey_push(uint8_t k)
+{
+    uint32_t next = (mkey_head + 1) % sizeof(mkeys);
+    if (next == mkey_tail)
+        return;
+    mkeys[mkey_head] = k;
+    mkey_head = next;
+}
+
+int bt_media_key(void)
+{
+    if (mkey_tail == mkey_head)
+        return 0;
+    int k = mkeys[mkey_tail];
+    mkey_tail = (mkey_tail + 1) % sizeof(mkeys);
+    return k;
+}
+
+static void pass_through(uint8_t op)
+{
+    static int saved_volume = 50;
+    int v = hda_volume(-1);
+    const char *name = "?";
+    switch (op) {
+    case 0x41: name = "lauter"; hda_volume(v + 5); break;
+    case 0x42: name = "leiser"; hda_volume(v - 5 > 0 ? v - 5 : 0); break;
+    case 0x43: /* stumm bzw. zurueck */
+        name = "stumm";
+        if (v > 0) {
+            saved_volume = v;
+            hda_volume(0);
+        } else {
+            hda_volume(saved_volume);
+        }
+        break;
+    case 0x44: name = "Play"; mkey_push(BT_KEY_PLAY); break;
+    case 0x46: name = "Pause"; mkey_push(BT_KEY_PAUSE); break;
+    case 0x45: name = "Stop"; mkey_push(BT_KEY_STOP); break;
+    case 0x4B: name = "vor"; mkey_push(BT_KEY_NEXT); break;
+    case 0x4C: name = "zurueck"; mkey_push(BT_KEY_PREV); break;
+    }
+    kprintf("bt: AVRCP: Taste %s (%#x)\n", name, op);
+}
+
+static void avrcp_rx(const uint8_t *d, uint32_t len)
+{
+    if (len < 3 || !avrcp_remote || (d[0] & 0x02)) /* nur Befehle */
+        return;
+    uint8_t r[64];
+    uint32_t n = len < sizeof(r) ? len : sizeof(r);
+    memcpy(r, d, n);
+    r[0] = (uint8_t)((d[0] & 0xF0) | 0x02); /* Antwort, gleiche Transaktion */
+    if (d[1] != 0x11 || d[2] != 0x0E) { /* andere PID: nur den Kopf mit "ungueltige PID" zurueck */
+        r[0] |= 0x01;
+        l2_send(avrcp_remote, r, 3);
+        return;
+    }
+    if (len < 6)
+        return;
+    uint8_t op = d[5];
+    if (op == 0x30 || op == 0x31) { /* Unit Info / Subunit Info: wir sind ein Panel */
+        static const uint8_t info[5] = {0x07, 0x48, 0xFF, 0xFF, 0xFF};
+        r[3] = AVC_STABLE;
+        r[4] = 0xFF;
+        r[5] = op;
+        memcpy(r + 6, info, 5);
+        l2_send(avrcp_remote, r, 11);
+    } else if (op == 0x7C && len >= 8) { /* Pass Through: Taste (Bit 7 = losgelassen) */
+        r[3] = AVC_ACCEPTED;
+        l2_send(avrcp_remote, r, n);
+        if (!(d[6] & 0x80))
+            pass_through(d[6] & 0x7F);
+    } else {
+        r[3] = AVC_NOT_IMPLEMENTED;
+        l2_send(avrcp_remote, r, n);
+    }
+}
+
 /* ---------- Thread "bt": Antworten auf Anfragen des Geraets ---------- */
 
 static void handle_event(uint8_t code, const uint8_t *p, uint32_t plen)
@@ -667,6 +773,8 @@ static void worker(void *arg)
                 av_rx(rxq[rxq_tail].d, rxq[rxq_tail].len);
             else if (cid == MEDIA_CID)
                 ; /* Audiodaten der Gegenstelle: nicht erwartet */
+            else if (cid == AVRCP_CID)
+                avrcp_rx(rxq[rxq_tail].d, rxq[rxq_tail].len);
             else
                 kprintf("bt: L2CAP-PDU fuer unbekannten Kanal %#x\n", cid);
             rxq_tail = (rxq_tail + 1) % RXQ;
@@ -757,6 +865,8 @@ static int connect_locked(const uint8_t addr[6])
     remote_cfg_done = media_cfg_done = chan_closed = 0;
     sig_connecting = media_connecting = sig_our_cfg = media_our_cfg = 0;
     sig_cfg_id = media_cfg_id = 0;
+    avrcp_remote = 0;
+    mkey_tail = mkey_head;
     acl_as_len = l2_need = 0;
     rxq_tail = rxq_head;
     say("verbinde mit %02x:%02x:%02x:%02x:%02x:%02x ...", addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);

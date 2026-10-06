@@ -564,6 +564,8 @@ static void syscall_do(SyscallFrame *f)
                 memcpy(&k, (const void *)ptr, sizeof(k));
                 ret = bt_key_add(&k);
             }
+        } else if (f->rdi == 10) { /* naechste Taste der Fernbedienung (AVRCP) */
+            ret = bt_media_key();
         } else if (f->rdi == 4) { /* gefundenes Geraet rsi nach rdx */
             BtDev bd;
             if (!process_user_range_ok(process_current(), f->rdx, sizeof(bd), 1))
