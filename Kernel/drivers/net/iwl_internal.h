@@ -40,6 +40,17 @@ typedef struct {
     uint8_t  rates[16];         /* Datenraten (Elemente 1 und 50) in 500 kbit/s, Bit 7 = Grundrate */
     uint8_t  rsn_len;           /* ganzes RSN-Element (Kennung, Laenge, Inhalt), 0 = keins */
     uint8_t  rsn[64];
+    /* 802.11n/ac und QoS: HT Capabilities (45), HT Operation (61), VHT Capabilities (191), VHT Operation (192), WMM */
+    uint8_t  has_ht, has_vht, has_wmm, ht_ampdu; /* ht_ampdu: A-MPDU-Parameter des AP (Faktor, Abstand) */
+    uint16_t ht_cap;            /* HT Capabilities Info */
+    uint8_t  ht_mcs[2];         /* MCS 0-7 bzw. 8-15, die der AP empfaengt */
+    uint8_t  ht_primary, ht_sec, ht_wide, ht_prot; /* Hauptkanal; Zweitkanal 0 keiner, 1 darueber, 3 darunter;
+                                                     * 40 MHz erlaubt; HT-Schutz (0-3) */
+    uint8_t  vht_width, vht_center;                 /* VHT Operation: 0 = 20/40 MHz, 1 = 80 MHz (und mehr); Mitte */
+    uint16_t vht_rx_mcs;        /* VHT: MCS je Zahl der Datenstroeme, die der AP empfaengt (je 2 Bit, 3 = keine) */
+    uint32_t vht_cap;           /* VHT Capabilities Info */
+    uint8_t  wmm_ac[4][4];      /* WMM-Parameter je Zugriffsklasse BE, BK, VI, VO: ACI/AIFSN, ECWmin/max, TXOP */
+    uint8_t  wmm_params;        /* wmm_ac gueltig (WMM-Parameterelement, nicht nur das Informationselement) */
 } IwlBss;
 
 /* mit iwl_op_lock: Firmware (neu) laden und einrichten; 0 oder Fehler wie iwl_load_fw */
@@ -59,7 +70,12 @@ void iwl_poll(void);
 /* Firmware oder Hardware hat einen Fehler gemeldet (CSR_INT) */
 int iwl_fw_failed(void);
 
+/* Faehigkeit der Firmware (Bit aus IWL_UCODE_TLV_ENABLED_CAPABILITIES) */
+int iwl_fw_capa(unsigned bit);
+#define CAPA_BAID_ML_SUPPORT 63 /* Block-Ack beim Empfang ueber RX_BAID_ALLOCATION_CONFIG_CMD statt ADD_STA */
+
 /* iwl_sta.c, aufgerufen mit iwl_ring_lock aus dem Empfang */
+int  iwl_sta_notif(uint8_t grp, uint8_t cmd, const uint8_t *d, uint32_t len); /* 1 = Meldung ausgewertet */
 void iwl_sta_rx_mpdu(const uint8_t *d, uint32_t len);                 /* Beschreibung (48 Byte) + 802.11-Rahmen */
 void iwl_sta_tx_resp(uint16_t seq, const uint8_t *d, uint32_t len);  /* Antwort auf einen gesendeten Rahmen */
 int  iwl_sta_wants_rx(void);                                          /* 1 = Rahmen an iwl_sta_rx_mpdu geben */

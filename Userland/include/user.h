@@ -346,6 +346,7 @@ typedef struct {
     unsigned char bssid[6];  /* 0: der staerkste AP mit diesem Namen */
 } WlanConnect;
 enum { WLAN_ST_IDLE, WLAN_ST_CONNECTING, WLAN_ST_CONNECTED, WLAN_ST_FAILED };
+enum { WLAN_PHY_LEGACY, WLAN_PHY_HT, WLAN_PHY_VHT };
 enum { WLAN_STEP_NONE, WLAN_STEP_FW, WLAN_STEP_SCAN, WLAN_STEP_PMK, WLAN_STEP_CONTEXT, WLAN_STEP_STATION,
        WLAN_STEP_QUEUES, WLAN_STEP_PROTECT, WLAN_STEP_AUTH, WLAN_STEP_ASSOC, WLAN_STEP_KEYS, WLAN_STEP_DONE };
 typedef struct {
@@ -356,9 +357,11 @@ typedef struct {
     unsigned char  bssid[6];
     unsigned char  channel, security;
     signed char    signal;
-    unsigned char  pad[6];
+    unsigned char  phy_mode;       /* WLAN_PHY_*: 802.11a/g, n, ac */
+    unsigned char  width, nss;     /* Kanalbreite (MHz), Datenstroeme */
+    unsigned char  ba_rx, tlc, pad; /* Block-Ack (TIDs), Rate von der Firmware gewaehlt */
     unsigned       aid, rate_kbps, connect_ms;
-    unsigned       pad2;
+    unsigned       max_kbps;       /* hoechste moegliche Rate mit diesem AP */
     u64            rx_frames, tx_frames, rx_dropped, tx_failed, rekeys;
     char           msg[96];
 } WlanStatus;

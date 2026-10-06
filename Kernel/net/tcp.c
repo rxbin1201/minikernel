@@ -1,11 +1,13 @@
 /* IPv4-Stack: TCP (Verbindungen nach aussen, also als Client)
  *
- * Pro Verbindung ein Empfangs- (64 KB) und ein Sendepuffer (32 KB). Gesendete, noch nicht bestaetigte Daten bleiben im
+ * Pro Verbindung ein Empfangs- (256 KB) und ein Sendepuffer (32 KB). Gesendete, noch nicht bestaetigte Daten bleiben im
  * Sendepuffer, bis die Gegenseite sie bestaetigt; laeuft der Wiederholungs-Timer ab (RTO aus der gemessenen Laufzeit,
  * mindestens 200 ms, bei jedem Versuch doppelt so lang), wird ab der ersten unbestaetigten Stelle neu gesendet
- * (ebenso nach drei doppelten ACKs). Segmente, die nicht der Reihe nach kommen, werden verworfen (die Gegenseite
- * wiederholt sie). Angekuendigt wird als Fenster der freie Platz im Empfangspuffer (ohne Window Scaling); bestaetigt
- * wird jedes zweite Segment, ein einzelnes am Ende jedes Empfangsdurchgangs (net_poll_locked).
+ * (ebenso nach drei doppelten ACKs). Segmente, die vor der Zeit kommen (Luecke davor), werden an ihrer Stelle im
+ * Empfangspuffer abgelegt und gemerkt (bis 8 Bereiche); schliesst die Wiederholung die Luecke, springt rcv_nxt ueber
+ * alles. Angekuendigt wird als Fenster der freie Platz im Empfangspuffer - mit Window Scaling (Faktor 8, wenn die
+ * Gegenseite es auch kann) der ganze, sonst hoechstens 64 KB; bestaetigt wird jedes zweite Segment, ein einzelnes am
+ * Ende jedes Empfangsdurchgangs (net_poll_locked).
  *
  * Nach close() (Deskriptor zu) lebt die Verbindung weiter, bis die gepufferten Daten und das FIN bestaetigt sind; dann
  * raeumt tcp_timer sie ab. Alles laeuft unter net_lock. */
@@ -17,8 +19,10 @@
 
 #define TCP_HDR   20
 #define TCP_CONNS 16
-#define RX_SIZE   65536u
+#define RX_SIZE   262144u /* Empfangspuffer: mit Window Scaling wird er ganz als Fenster angekuendigt */
 #define TX_SIZE   32768u
+#define OUR_WS    3       /* unser Fensterfaktor: Fenster = Feld << 3 (bis 512 KB) */
+#define OOO_MAX   8       /* Luecken, die wir uns merken (Segmente, die vor der Zeit kamen) */
 #define OUR_MSS   (NET_MTU - IP_HDR - TCP_HDR)
 
 #define F_FIN 0x01
@@ -52,6 +56,9 @@ struct TcpConn {
     int      rtt_on;
     uint64_t srtt, rttvar;      /* in ms (x8 bzw. x4 wie ueblich gespeichert) */
     uint64_t deadline;          /* TIME_WAIT bzw. FIN_WAIT_2 ohne Deskriptor: dann abraeumen */
+    uint8_t  snd_scale, rcv_scale; /* Window Scaling (RFC 7323): Faktor der Gegenseite bzw. unserer, 0 = ohne */
+    int      n_ooo;             /* gemerkte Bereiche [ooo_start, ooo_end), schon im Empfangspuffer abgelegt */
+    uint32_t ooo_start[OOO_MAX], ooo_end[OOO_MAX];
     Event    ev;
 };
 
@@ -91,23 +98,29 @@ static uint16_t tcp_csum(const uint8_t src[4], const uint8_t dst[4], const uint8
 static void send_seg(TcpConn *c, uint32_t seq, uint8_t flags, uint32_t off, uint32_t n)
 {
     uint8_t *t = net_txbuf + ETH_HDR + IP_HDR;
-    uint32_t hl = (flags & F_SYN) ? TCP_HDR + 4 : TCP_HDR;
+    uint32_t hl = (flags & F_SYN) ? TCP_HDR + 8 : TCP_HDR;
     uint32_t wnd = c->orphan ? 65535 : rx_free(c);
-    if (wnd > 65535)
-        wnd = 65535;
+    uint32_t field = (flags & F_SYN) ? wnd : wnd >> c->rcv_scale; /* im SYN nie skaliert */
+    if (field > 65535)
+        field = 65535;
+    wnd = (flags & F_SYN) ? field : field << c->rcv_scale;
     put16(t, c->lport);
     put16(t + 2, c->rport);
     put32(t + 4, seq);
     put32(t + 8, (flags & F_ACK) ? c->rcv_nxt : 0);
     t[12] = (uint8_t)((hl / 4) << 4);
     t[13] = flags;
-    put16(t + 14, (uint16_t)wnd);
+    put16(t + 14, (uint16_t)field);
     put16(t + 16, 0);
     put16(t + 18, 0);
-    if (flags & F_SYN) { /* Option MSS */
+    if (flags & F_SYN) { /* Optionen MSS und Window Scaling (NOP davor: auf 4 Byte ausgerichtet) */
         t[20] = 2;
         t[21] = 4;
         put16(t + 22, OUR_MSS);
+        t[24] = 1;
+        t[25] = 3;
+        t[26] = 3;
+        t[27] = OUR_WS;
     }
     for (uint32_t i = 0; i < n;) { /* aus dem Ringpuffer (hoechstens ein Umbruch) */
         uint32_t pos = (c->tx_head + off + i) % TX_SIZE, k = TX_SIZE - pos;
@@ -255,6 +268,58 @@ static int process_ack(TcpConn *c, uint32_t ack, uint32_t wnd, uint32_t dlen)
     return c->fin_queued && seq_lt(fin_seq, c->snd_una);
 }
 
+/* Segment, das vor der Zeit kam (Luecke davor, z.B. umsortiert durch WLAN-Aggregation): an seiner Stelle im
+ * Empfangspuffer ablegen und den Bereich merken - schliesst die Wiederholung die Luecke, ist alles schon da */
+static void ooo_store(TcpConn *c, uint32_t seq, const uint8_t *data, uint32_t dlen)
+{
+    if (c->orphan || (c->state != T_ESTABLISHED && c->state != T_FIN_WAIT_1 && c->state != T_FIN_WAIT_2))
+        return;
+    uint32_t off = seq - c->rcv_nxt;
+    if (off >= rx_free(c) || dlen > rx_free(c) - off)
+        return; /* ausserhalb des Fensters */
+    for (uint32_t i = 0; i < dlen;) {
+        uint32_t pos = (c->rx_head + c->rx_count + off + i) % RX_SIZE, k = RX_SIZE - pos;
+        if (k > dlen - i)
+            k = dlen - i;
+        memcpy(c->rx + pos, data + i, k);
+        i += k;
+    }
+    uint32_t s = seq, e = seq + dlen;
+    for (int i = 0; i < c->n_ooo; i++) /* mit ueberlappenden oder angrenzenden Bereichen vereinen */
+        if (seq_le(c->ooo_start[i], e) && seq_le(s, c->ooo_end[i])) {
+            if (seq_lt(c->ooo_start[i], s))
+                s = c->ooo_start[i];
+            if (seq_lt(e, c->ooo_end[i]))
+                e = c->ooo_end[i];
+            c->ooo_start[i] = c->ooo_start[--c->n_ooo];
+            c->ooo_end[i] = c->ooo_end[c->n_ooo];
+            i = -1;
+        }
+    if (c->n_ooo < OOO_MAX) {
+        c->ooo_start[c->n_ooo] = s;
+        c->ooo_end[c->n_ooo++] = e;
+    }
+}
+
+/* Nach neuen Daten in der Reihe: anschliessende gemerkte Bereiche uebernehmen. 1 = rcv_nxt ist weitergesprungen */
+static int ooo_advance(TcpConn *c)
+{
+    int moved = 0;
+    for (int i = 0; i < c->n_ooo; i++) {
+        if (seq_lt(c->rcv_nxt, c->ooo_start[i]))
+            continue;
+        if (seq_lt(c->rcv_nxt, c->ooo_end[i])) {
+            c->rx_count += c->ooo_end[i] - c->rcv_nxt;
+            c->rcv_nxt = c->ooo_end[i];
+            moved = 1;
+        }
+        c->ooo_start[i] = c->ooo_start[--c->n_ooo]; /* erledigt (oder schon ueberholt) */
+        c->ooo_end[i] = c->ooo_end[c->n_ooo];
+        i = -1;
+    }
+    return moved;
+}
+
 void tcp_in(Iface *f, const uint8_t *iph, const uint8_t *t, uint32_t len, const uint8_t *src_mac)
 {
     if (len < TCP_HDR)
@@ -296,7 +361,8 @@ void tcp_in(Iface *f, const uint8_t *iph, const uint8_t *t, uint32_t len, const 
         if (!(flags & F_SYN) || !(flags & F_ACK))
             return; /* gleichzeitiges Oeffnen gibt es hier nicht */
         c->mss = 536;
-        for (uint32_t o = TCP_HDR; o < hl;) { /* Optionen: nur MSS */
+        int ws = -1;
+        for (uint32_t o = TCP_HDR; o < hl;) { /* Optionen: MSS, Window Scaling */
             uint8_t kind = t[o];
             if (kind == 0)
                 break;
@@ -308,7 +374,13 @@ void tcp_in(Iface *f, const uint8_t *iph, const uint8_t *t, uint32_t len, const 
                 break;
             if (kind == 2 && t[o + 1] == 4 && o + 4 <= hl)
                 c->mss = be16(t + o + 2);
+            if (kind == 3 && t[o + 1] == 3 && o + 3 <= hl)
+                ws = t[o + 2] > 14 ? 14 : t[o + 2];
             o += t[o + 1];
+        }
+        if (ws >= 0) { /* beide Seiten koennen es: ab jetzt gelten die Faktoren */
+            c->snd_scale = (uint8_t)ws;
+            c->rcv_scale = OUR_WS;
         }
         if (c->mss > OUR_MSS)
             c->mss = OUR_MSS;
@@ -328,11 +400,12 @@ void tcp_in(Iface *f, const uint8_t *iph, const uint8_t *t, uint32_t len, const 
         return;
     }
 
-    /* Bereits Empfangenes (Wiederholung) vorne abschneiden; spaeteres (Luecke davor) verwerfen */
+    /* Bereits Empfangenes (Wiederholung) vorne abschneiden; spaeteres (Luecke davor) im Puffer ablegen */
     if (flags & F_SYN) { /* wiederholtes SYN-ACK: unser ACK ging verloren */
         c->ack_pending = 1;
         return;
     }
+    wnd <<= c->snd_scale; /* ausser im SYN gilt der Faktor der Gegenseite */
     if (seq_lt(seq, c->rcv_nxt)) {
         uint32_t skip = c->rcv_nxt - seq;
         if (skip >= dlen + ((flags & F_FIN) ? 1 : 0)) {
@@ -346,6 +419,8 @@ void tcp_in(Iface *f, const uint8_t *iph, const uint8_t *t, uint32_t len, const 
         seq += skip;
         flags &= (uint8_t)~F_RST;
     } else if (seq != c->rcv_nxt) {
+        if (dlen)
+            ooo_store(c, seq, data, dlen);
         if (dlen || (flags & F_FIN)) /* sofort ein doppeltes ACK: die Gegenseite wiederholt dann schnell */
             send_seg(c, c->snd_nxt, F_ACK, 0, 0);
         return;
@@ -396,8 +471,12 @@ void tcp_in(Iface *f, const uint8_t *iph, const uint8_t *t, uint32_t len, const 
         }
         c->rcv_nxt += n;
         c->ack_pending = 1;
-        if (++c->unacked >= 2) /* wie ueblich: spaetestens jedes zweite Segment bestaetigen */
+        if (c->n_ooo && ooo_advance(c)) { /* Luecke geschlossen: gleich bestaetigen, was jetzt alles da ist */
             send_seg(c, c->snd_nxt, F_ACK, 0, 0);
+            flags &= (uint8_t)~F_FIN; /* ein FIN hinter der Luecke kommt noch einmal */
+        } else if (++c->unacked >= 2) { /* wie ueblich: spaetestens jedes zweite Segment bestaetigen */
+            send_seg(c, c->snd_nxt, F_ACK, 0, 0);
+        }
         if (n < dlen)
             flags &= (uint8_t)~F_FIN;
     }
@@ -573,7 +652,8 @@ int64_t tcp_recv(TcpConn *c, void *buf, uint64_t max)
                 i += k;
             }
             c->rx_count -= n;
-            uint32_t fr = rx_free(c) > 65535 ? 65535 : rx_free(c);
+            uint32_t most = 65535u << c->rcv_scale, fr = rx_free(c) > most ? most : rx_free(c);
+            fr &= ~((1u << c->rcv_scale) - 1); /* so, wie es im Feld ankommt */
             if (c->state != T_CLOSED && c->state != T_SYN_SENT && fr - c->adv_wnd >= 2u * c->mss && fr > c->adv_wnd)
                 send_seg(c, c->snd_nxt, F_ACK, 0, 0); /* das Fenster ist deutlich groesser geworden */
             r = n;

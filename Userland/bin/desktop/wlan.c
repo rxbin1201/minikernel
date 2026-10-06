@@ -199,7 +199,7 @@ int wlan_net_signal(int i)
 /* ---------- Menue ---------- */
 
 static MenuItem items[WL_MAX + 16];
-static char st_txt[48], ip_txt[24], step_txt[40], msg_txt[44], pw_dots[200], net_keys[WL_MAX][16];
+static char st_txt[48], ip_txt[24], step_txt[40], mode_txt[40], msg_txt[44], pw_dots[200], net_keys[WL_MAX][16];
 
 void wlan_menu_opened(void)
 {
@@ -262,6 +262,10 @@ const MenuItem *wlan_menu(int *count)
         items[n++] = (MenuItem){"IP-Adresse", A_INFO, ip_txt};
         snprintf(step_txt, sizeof(step_txt), "%d dBm, %u Mbit/s", wl_st.signal, wl_st.rate_kbps / 1000);
         items[n++] = (MenuItem){"Signal", A_INFO, step_txt};
+        static const char *const mode[] = {"802.11a/g", "Wi-Fi 4 (802.11n)", "Wi-Fi 5 (802.11ac)"};
+        snprintf(mode_txt, sizeof(mode_txt), "%s, %u MHz", wl_st.phy_mode < 3 ? mode[wl_st.phy_mode] : "?",
+                 wl_st.width ? wl_st.width : 20);
+        items[n++] = (MenuItem){"Standard", A_INFO, mode_txt};
     } else if (st == WLAN_ST_CONNECTING) {
         static const char *const steps[] = {"Start", "Firmware", "Netz suchen", "Passwort", "Kontexte", "Station",
                                             "Warteschlangen", "Zeitfenster", "Authentifizierung", "Assoziierung",

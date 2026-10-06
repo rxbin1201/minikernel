@@ -8,8 +8,13 @@
  *   3 Zeitfenster auf dem Kanal (SESSION_PROTECTION), Authentifizierung (offen), Assoziierung
  *   4 MAC-Kontext "assoziiert"; bei WPA2 der 4-Wege-Handshake (net/wpa.c), dann Paar- und Gruppenschluessel in die
  *     Firmware (ADD_STA_KEY) - sie ver- und entschluesselt CCMP selbst
- * Wir treten als 802.11a/g-Station auf (ohne HT/VHT/HE und ohne QoS): einfache Datenrahmen, feste Senderate (nach der
- * Signalstaerke beim Suchen gewaehlt), keine Aggregation. Das versteht jeder AP, nur nicht so schnell.
+ * Geschwindigkeit: kann der AP QoS (WMM) und 802.11n bzw. 802.11ac, treten wir als HT- bzw. VHT-Station mit bis zu
+ * zwei Datenstroemen auf - auf 5 GHz mit 40 bzw. 80 MHz (PHY-Kontext mit Breite und Lage des Hauptkanals), auf
+ * 2,4 GHz mit 20 MHz. Die Senderate waehlt die Firmware selbst (TLC_MNG_CONFIG v4: erlaubte Raten, Breite, Ketten,
+ * kurzes Schutzintervall, LDPC/STBC) und meldet jede Aenderung (TLC_MNG_UPDATE_NOTIF). Will der AP aggregiert senden
+ * (ADDBA-Anfrage), richten wir Block-Ack beim Empfang ein (RX_BAID_ALLOCATION_CONFIG bzw. ADD_STA) und sagen zu;
+ * die Firmware bestaetigt dann ganze A-MPDUs. Umsortiert wird nicht: Rahmen gehen sofort weiter. Selbst gesendet
+ * wird ohne Aggregation (QoS-Datenrahmen, TID 0). Ohne WMM bleibt es bei 802.11a/g.
  *
  * Senden: jede Warteschlange ist ein Ring aus 64 TFDs (je ein Puffer mit Befehlskopf, TX-Befehl, 802.11-Kopf, auf 4 Byte
  * aufgefuellt, Nutzdaten) und einer Tabelle mit der Laenge je Eintrag (in 32-Bit-Worten, gen2). Die Firmware meldet
@@ -20,6 +25,7 @@
 #include <stdarg.h>
 #include "arch/x86_64/apic.h"
 #include "arch/x86_64/cpu.h"
+#include "core/cmdline.h"
 #include "lib/crypto.h"
 #include "lib/kprintf.h"
 #include "lib/string.h"
@@ -36,6 +42,9 @@
 #define NOTIF_SESSION_PROT 0xFB /* MAC_CONF_GROUP */
 #define CMD_RLC_CONFIG     0x08 /* DATA_PATH_GROUP */
 #define CMD_SCD_QUEUE_CFG  0x17 /* DATA_PATH_GROUP */
+#define CMD_TLC_CONFIG     0x0F /* DATA_PATH_GROUP: Ratenanpassung durch die Firmware */
+#define NOTIF_TLC_UPDATE   0xF7 /* DATA_PATH_GROUP: neue Senderate */
+#define CMD_RX_BAID_CFG    0x16 /* DATA_PATH_GROUP: Block-Ack beim Empfang */
 
 #define ACTION_ADD      1
 #define ACTION_MODIFY   2
@@ -92,6 +101,10 @@ _Static_assert(sizeof(MacCtxtCmd) == 148, "MAC_CONTEXT_CMD");
 #define MAC_FILTER_IN_BEACON   (1u << 6)
 #define MAC_FLG_SHORT_SLOT     (1u << 4)
 #define MAC_FLG_SHORT_PREAMBLE (1u << 5)
+#define MAC_QOS_FLG_UPDATE_EDCA (1u << 0)
+#define MAC_QOS_FLG_TGN         (1u << 1) /* HT */
+#define MAC_PROT_FLG_HT_PROT    (1u << 23)
+#define MAC_PROT_FLG_FAT_PROT   (1u << 24)
 
 /* BINDING_CONTEXT_CMD Version 2 (mit lmac_id) */
 typedef struct __attribute__((packed)) {
@@ -120,9 +133,38 @@ typedef struct __attribute__((packed)) {
 _Static_assert(sizeof(AddStaCmd) == 48, "ADD_STA");
 
 #define STA_FLG_RTS_MIMO_PROT (1u << 17)
-#define STA_FLG_FAT_EN_MSK    (3u << 26)
-#define STA_FLG_MIMO_EN_MSK   (3u << 28)
+#define STA_FLG_MAX_AGG_SHIFT 19        /* groesstes A-MPDU des AP (Exponent) */
+#define STA_FLG_MAX_AGG_MSK   (0xFu << 19)
+#define STA_FLG_DENS_SHIFT    23        /* Mindestabstand der MPDUs */
+#define STA_FLG_DENS_MSK      (7u << 23)
+#define STA_FLG_FAT_EN_MSK    (3u << 26) /* 1 = 40 MHz, 2 = 80 MHz */
+#define STA_FLG_MIMO_EN_MSK   (3u << 28) /* 1 = zwei Datenstroeme */
+#define STA_MODIFY_ADD_BA     (1u << 3)
+#define STA_MODIFY_REMOVE_BA  (1u << 4)
 #define ADD_STA_SUCCESS       1
+
+/* TLC_MNG_CONFIG_CMD Version 4 (iwl_tlc_config_cmd_v4): was die Firmware beim Waehlen der Rate darf */
+typedef struct __attribute__((packed)) {
+    uint8_t  sta_id, reserved1[3];
+    uint8_t  max_ch_width;          /* 0 = 20, 1 = 40, 2 = 80 MHz */
+    uint8_t  mode;                  /* 0 ohne HT, 1 HT, 2 VHT */
+    uint8_t  chains;                /* Sendeketten (Bit 0 A, Bit 1 B) */
+    uint8_t  sgi_ch_width_supp;     /* kurzes Schutzintervall je Breite (Bit = Breite) */
+    uint16_t flags;                 /* Bit 0 STBC, Bit 1 LDPC */
+    uint16_t non_ht_rates;          /* Bit je Rate: 0-3 CCK 1..11, 4-11 OFDM 6..54 */
+    uint16_t ht_rates[2][3];        /* je Zahl der Datenstroeme: MCS-Bits bis 80 MHz (dann 160, 320) */
+    uint16_t max_mpdu_len, max_tx_op;
+} TlcCmd;
+_Static_assert(sizeof(TlcCmd) == 28, "TLC_MNG_CONFIG_CMD");
+
+/* RX_BAID_ALLOCATION_CONFIG_CMD Version 2: Block-Ack-Sitzung beim Empfang anlegen bzw. entfernen */
+typedef struct __attribute__((packed)) {
+    uint32_t action;                /* 0 anlegen, 2 entfernen */
+    uint32_t sta_id_mask;
+    uint8_t  tid, reserved[3];      /* beim Entfernen: TID als 32 Bit an dieser Stelle */
+    uint16_t ssn, win_size;
+} BaidCmd;
+_Static_assert(sizeof(BaidCmd) == 16, "RX_BAID_ALLOCATION_CONFIG_CMD");
 
 /* ADD_STA_KEY Version 3 (iwl_mvm_add_sta_key_cmd) */
 typedef struct __attribute__((packed)) {
@@ -178,6 +220,7 @@ _Static_assert(sizeof(TxCmd) == 20, "TX_CMD");
 #define RX_SEC_CCM       (2u << 8)
 #define RX_DUPLICATE     (1u << 22)
 #define RX_MFLG2_PAD     0x20
+#define RX_MFLG2_AMSDU   0x40 /* Teil eines A-MSDU, von der Firmware zu einem eigenen Rahmen gemacht */
 
 _Static_assert(sizeof(WlanStatus) == 216 && sizeof(WlanConnect) == 104, "WlanStatus/WlanConnect wie in user.h");
 
@@ -185,7 +228,7 @@ _Static_assert(sizeof(WlanStatus) == 216 && sizeof(WlanConnect) == 104, "WlanSta
 #define TXQ_SLOT  2048
 #define TFD_SIZE  256
 #define HBUS_TARG_WRPTR 0x460
-#define RXQ_LEN   64
+#define RXQ_LEN   256 /* Ethernet-Rahmen fuer den Netzwerk-Thread (ein A-MPDU hat bis zu 64) */
 #define RXQ_SLOT  1536
 #define EAPOL_MAX 1024
 
@@ -207,6 +250,18 @@ static struct {
     uint8_t   ant;         /* Sendeantenne (1 = A, 2 = B) */
     uint16_t  seq;         /* Folgenummern der gesendeten Rahmen */
     uint32_t  rate_mgmt, rate_data;
+    /* 802.11n/ac: was wir mit diesem AP nutzen (choose_phy) */
+    int       qos;         /* WMM: QoS-Datenrahmen (TID 0) */
+    uint8_t   width_code;  /* 0 = 20, 1 = 40, 2 = 80 MHz */
+    uint8_t   center;      /* Mittenkanal (bei 40/80 MHz) */
+    volatile int tlc_ok;   /* die Firmware waehlt die Rate der Datenrahmen */
+    /* ADDBA-Anfragen und DELBA des AP (aus dem Empfang, erledigt mit iwl_op_lock in ba_work) */
+    struct {
+        volatile int pending;
+        uint8_t  dialog, tid, del;
+        uint16_t ssn, buf, timeout;
+    } ba[4];
+    uint32_t  ba_head;
     int       secure;      /* WPA2 */
     volatile int keys_on;  /* Paarschluessel eingebaut: Daten werden verschluesselt */
     Wpa       wpa;
@@ -221,7 +276,10 @@ static struct {
     uint8_t   dtim_count;
     int       beacon_seen;
     /* Replay-Schutz: naechste erlaubte CCMP-Paketnummer, paarweise und je Gruppenschluessel (Nummer 0..3) */
-    uint64_t  pn_next_uc, pn_next_mc[4];
+    uint64_t  pn_next_mc[4];
+    /* paarweise je TID (0-7, 8 = ohne QoS): hoechste angenommene Nummer + 1 und welche der 64 davor schon kamen -
+     * mit Aggregation koennen wiederholte Rahmen nach neueren ankommen */
+    uint64_t  rp_top[9], rp_map[9];
     volatile int kicked; /* der AP hat uns abgemeldet (Deauth/Disassoc) */
     /* EAPOL-Rahmen vom AP, wartet auf die Auswertung (ab dem EAPOL-Kopf) */
     uint8_t   eapol[EAPOL_MAX];
@@ -421,16 +479,26 @@ static int send_mgmt(uint8_t fc0, const uint8_t *body, uint32_t len)
     return r;
 }
 
-/* EAPOL an den AP: verschluesselt, sobald der Paarschluessel eingebaut ist */
+/* Kopf eines Datenrahmens an den AP (ToDS): mit WMM ein QoS-Datenrahmen (26 Byte, TID 0), sonst 24 Byte */
+static uint32_t data_hdr(uint8_t *h, int enc, const uint8_t *sa, const uint8_t *da)
+{
+    hdr80211(h, sta.qos ? 0x88 : 0x08, (uint8_t)(0x01 | (enc ? 0x40 : 0)), sta.net.bssid, sa, da);
+    if (!sta.qos)
+        return 24;
+    h[24] = h[25] = 0; /* QoS Control: TID 0, normale Bestaetigung */
+    return 26;
+}
+
+/* EAPOL an den AP: verschluesselt, sobald der Paarschluessel eingebaut ist (feste, robuste Rate) */
 static int send_eapol(const uint8_t *e, uint32_t len)
 {
     static const uint8_t llc[8] = {0xAA, 0xAA, 0x03, 0, 0, 0, 0x88, 0x8E};
-    uint8_t h[24];
+    uint8_t h[26];
     const uint8_t *mac = iwl_state()->mac;
     mutex_lock(&iwl_ring_lock);
     int enc = sta.keys_on;
-    hdr80211(h, 0x08, (uint8_t)(0x01 | (enc ? 0x40 : 0)), sta.net.bssid, mac, sta.net.bssid);
-    int r = txq_send(&dataq, h, 24, llc, 8, e, len,
+    uint32_t hl = data_hdr(h, enc, mac, sta.net.bssid);
+    int r = txq_send(&dataq, h, hl, llc, 8, e, len,
                      TX_FLAGS_CMD_RATE | TX_FLAGS_HIGH_PRI | (enc ? 0 : TX_FLAGS_ENCRYPT_DIS), sta.rate_mgmt);
     mutex_unlock(&iwl_ring_lock);
     return r;
@@ -472,6 +540,33 @@ static void rx_mgmt(const uint8_t *f, uint32_t len, const uint8_t *d)
     }
     if (memcmp(f + 4, iwl_state()->mac, 6) != 0 && !(f[4] & 1))
         return;
+    if (sub == 13 && blen >= 2 && body[0] == 3) { /* Aktion "Block Ack": ADDBA-Anfrage (0) bzw. DELBA (2) des AP */
+        uint32_t slot = sta.ba_head % 4;
+        if ((body[1] == 0 && blen >= 9) || (body[1] == 2 && blen >= 6)) {
+            if (sta.ba[slot].pending)
+                return; /* voll: der AP wiederholt die Anfrage */
+            sta.ba[slot].del = body[1] == 2;
+            if (body[1] == 0) {
+                uint16_t param = get16le(body + 3);
+                sta.ba[slot].dialog = body[2];
+                sta.ba[slot].tid = (uint8_t)((param >> 2) & 0xF);
+                sta.ba[slot].buf = (uint16_t)(param >> 6);
+                sta.ba[slot].timeout = get16le(body + 5);
+                sta.ba[slot].ssn = (uint16_t)(get16le(body + 7) >> 4);
+            } else {
+                uint16_t param = get16le(body + 2);
+                if (param & 0x0800) /* Initiator: der AP beendet seine Sendesitzung (unsere Empfangssitzung) */
+                    sta.ba[slot].tid = (uint8_t)(param >> 12);
+                else
+                    return;     /* Empfaenger beendet: wir senden nicht aggregiert, nichts zu tun */
+            }
+            __sync_synchronize();
+            sta.ba[slot].pending = 1;
+            sta.ba_head++;
+            event_signal(&worker_ev);
+        }
+        return;
+    }
     if (sub == 11 && blen >= 6 && get16le(body + 2) == 2) { /* Authentifizierung, Schritt 2 */
         sta.auth_status = get16le(body + 4);
         sta.auth_got = 1;
@@ -489,7 +584,35 @@ static void rx_mgmt(const uint8_t *f, uint32_t len, const uint8_t *d)
     }
 }
 
-static void rx_data(const uint8_t *f, uint32_t len, uint32_t status, int pad)
+/* Verworfenen Rahmen zaehlen; die ersten 20 mit Grund ins Log (Fehlersuche auf echter Hardware) */
+static void rx_drop(const char *why, uint32_t len, uint32_t status)
+{
+    if (sta.st.rx_dropped++ < 20)
+        kprintf("wlan: Rahmen verworfen: %s (%u Byte, Status %#x)\n", why, len, status);
+}
+
+/* Wiederholschutz paarweise (TID t): neu, oder in den letzten 64 Nummern noch nicht gesehen. same_ok: weiterer
+ * Teilrahmen eines A-MSDU - alle tragen die Nummer ihres MPDU */
+static int replay_ok(int t, uint64_t pn, int same_ok)
+{
+    uint64_t *top = &sta.rp_top[t], *map = &sta.rp_map[t];
+    if (same_ok && *top && pn == *top - 1)
+        return 1;
+    if (pn >= *top) {
+        uint64_t sh = pn + 1 - *top;
+        *map = sh >= 64 ? 0 : *map << sh;
+        *map |= 1; /* Bit i: Nummer top - 1 - i */
+        *top = pn + 1;
+        return 1;
+    }
+    uint64_t back = *top - 1 - pn;
+    if (back >= 64 || (*map & (1ULL << back)))
+        return 0;
+    *map |= 1ULL << back;
+    return 1;
+}
+
+static void rx_data(const uint8_t *f, uint32_t len, uint32_t status, int pad, int amsdu_split, int amsdu_idx)
 {
     uint8_t fc0 = f[0], fc1 = f[1], sub = fc0 >> 4;
     if (sub & 4) /* Null-Rahmen ohne Daten */
@@ -499,38 +622,59 @@ static void rx_data(const uint8_t *f, uint32_t len, uint32_t status, int pad)
     if ((fc1 & 3) != 2 || memcmp(f + 10, sta.net.bssid, 6) != 0) /* nur vom AP (FromDS) */
         return;
     if (len < hl + pad + 8 || (fc1 & 0x04) || (get16le(f + 22) & 0xF)) { /* zu kurz, Fragmente */
-        sta.st.rx_dropped++;
+        rx_drop("zu kurz oder Fragment", len, status);
         return;
     }
     if (status & RX_DUPLICATE)
         return;
-    const uint8_t *da = f + 4, *sa = f + 16, *b = f + hl + pad;
-    uint32_t bl = len - hl - pad;
+    /* Die Firmware fuellt auf 4 Byte auf (pad), und zwar hinter dem CCMP-Kopf, nicht direkt hinter dem 802.11-Kopf:
+     * Kopf (26 Byte bei QoS), CCMP (8), Auffuellung (2), Daten */
+    const uint8_t *da = f + 4, *sa = f + 16, *b = f + hl;
+    uint32_t bl = len - hl;
     int eapol_only = 0;
     if (fc1 & 0x40) { /* verschluesselt: die Firmware hat entschluesselt und den MIC geprueft, der CCMP-Kopf bleibt */
-        if ((status & RX_SEC_MASK) != RX_SEC_CCM || !(status & RX_MIC_OK) || bl < 16) {
-            sta.st.rx_dropped++;
+        if ((status & RX_SEC_MASK) != RX_SEC_CCM || !(status & RX_MIC_OK) || bl < 16u + (uint32_t)pad) {
+            rx_drop("Entschluesselung/MIC", len, status);
             return;
         }
         uint64_t pn = (uint64_t)b[0] | (uint64_t)b[1] << 8 | (uint64_t)b[4] << 16 | (uint64_t)b[5] << 24 |
                       (uint64_t)b[6] << 32 | (uint64_t)b[7] << 40;
-        uint64_t *next = da[0] & 1 ? &sta.pn_next_mc[b[3] >> 6] : &sta.pn_next_uc;
-        if (pn < *next) { /* schon gesehen: nicht noch einmal annehmen */
-            sta.st.rx_dropped++;
+        int ok;
+        if (da[0] & 1) { /* Gruppe: streng aufsteigend (Gruppenrahmen werden nicht aggregiert) */
+            uint64_t *next = &sta.pn_next_mc[b[3] >> 6];
+            ok = pn >= *next;
+            if (ok)
+                *next = pn + 1;
+        } else {
+            ok = replay_ok(qos ? f[24] & 7 : 8, pn, amsdu_idx > 0);
+        }
+        if (!ok) { /* schon gesehen: nicht noch einmal annehmen */
+            rx_drop("Wiederholung (Paketnummer)", len, status);
             return;
         }
-        *next = pn + 1;
-        b += 8;
-        bl -= 8;
-    } else if (sta.keys_on) {
-        eapol_only = 1; /* unverschluesselt trotz Schluessel: nur EAPOL */
+        b += 8 + pad;
+        bl -= 8 + (uint32_t)pad;
+    } else {
+        b += pad;
+        bl -= (uint32_t)pad;
+        if (sta.keys_on)
+            eapol_only = 1; /* unverschluesselt trotz Schluessel: nur EAPOL */
     }
-    if (qos && (f[24] & 0x80)) { /* A-MSDU (bekommen wir ohne QoS eigentlich nicht) */
-        sta.st.rx_dropped++;
-        return;
+    if (qos && (f[24] & 0x80)) { /* A-MSDU: die Firmware zerlegt es in einzelne Rahmen (je ein Teilrahmen) */
+        /* Steht der Teilrahmenkopf (DA, SA, Laenge) noch davor, die Adressen daraus nehmen; sonst die des Kopfes */
+        if (bl >= 22 && !(b[0] == 0xAA && b[1] == 0xAA && b[2] == 0x03) && b[14] == 0xAA && b[15] == 0xAA) {
+            uint32_t sl = (uint32_t)(b[12] << 8 | b[13]);
+            da = b;
+            sa = b + 6;
+            b += 14;
+            bl = sl <= bl - 14 ? sl : bl - 14;
+        } else if (!amsdu_split) {
+            rx_drop("A-MSDU", len, status); /* ungeteiltes A-MSDU mit mehreren Teilrahmen: nicht unterstuetzt */
+            return;
+        }
     }
     if (bl < 8 || b[0] != 0xAA || b[1] != 0xAA || b[2] != 0x03 || b[3] || b[4] || b[5]) {
-        sta.st.rx_dropped++;
+        rx_drop("kein LLC/SNAP", len, status);
         return;
     }
     uint16_t type = (uint16_t)(b[6] << 8 | b[7]);
@@ -547,7 +691,7 @@ static void rx_data(const uint8_t *f, uint32_t len, uint32_t status, int pad)
         return; /* eigene Broadcasts kommen vom AP zurueck */
     uint32_t elen = 14 + bl - 8;
     if (!rxq || elen > RXQ_SLOT - 2 || rxq_count == RXQ_LEN) {
-        sta.st.rx_dropped++;
+        rx_drop("Empfangsring voll", len, status);
         return;
     }
     uint8_t *e = rxq + ((rxq_head + rxq_count) % RXQ_LEN) * RXQ_SLOT;
@@ -573,7 +717,56 @@ void iwl_sta_rx_mpdu(const uint8_t *d, uint32_t len)
     if (type == 0)
         rx_mgmt(f, mpdu_len, d);
     else if (type == 2)
-        rx_data(f, mpdu_len, status, pad);
+        rx_data(f, mpdu_len, status, pad, (d[3] & RX_MFLG2_AMSDU) != 0,
+                (d[3] & RX_MFLG2_AMSDU) ? d[4] & 0x7F : -1); /* amsdu_info: Nummer des Teilrahmens */
+}
+
+/* ---------- Senderate (Meldung der Firmware) ---------- */
+
+/* kbit/s fuer MCS 0-9 mit einem Datenstrom und langem Schutzintervall, je 20/40/80 MHz (HT und VHT gleich) */
+static const uint32_t mcs_kbps[3][10] = {
+    {6500, 13000, 19500, 26000, 39000, 52000, 58500, 65000, 78000, 86700},
+    {13500, 27000, 40500, 54000, 81000, 108000, 121500, 135000, 162000, 180000},
+    {29300, 58500, 87800, 117000, 175500, 234000, 263300, 292500, 351000, 390000},
+};
+
+static uint32_t mcs_rate(int width, int mcs, int nss, int sgi)
+{
+    if (width < 0 || width > 2 || mcs < 0 || mcs > 9 || nss < 1)
+        return 0;
+    uint32_t r = mcs_kbps[width][mcs] * (uint32_t)nss;
+    return sgi ? r * 10 / 9 : r;
+}
+
+/* rate_n_flags im neuen Format: Art (Bits 8-10), MCS (0-3), Datenstroeme - 1 (Bit 4), Breite (11-13), SGI (17) */
+static uint32_t rate_kbps(uint32_t r)
+{
+    static const uint32_t cck[4] = {1000, 2000, 5500, 11000}, ofdm[8] = {6000, 9000, 12000, 18000, 24000, 36000,
+                                                                         48000, 54000};
+    uint32_t mod = (r >> 8) & 7;
+    int nss = (int)((r >> 4) & 1) + 1, width = (int)((r >> 11) & 7), sgi = (r >> 17) & 1;
+    switch (mod) {
+    case 0: return cck[r & 3];
+    case 1: return ofdm[r & 7];
+    case 2: return mcs_rate(width, (int)(r & 7), nss, sgi);
+    case 3: return mcs_rate(width, (int)(r & 0xF), nss, sgi);
+    default: return 0;
+    }
+}
+
+int iwl_sta_notif(uint8_t grp, uint8_t cmd, const uint8_t *d, uint32_t len)
+{
+    if (grp != GRP_DATA_PATH || cmd != NOTIF_TLC_UPDATE)
+        return 0;
+    static uint32_t logged;
+    if (len >= 12 && d[0] == STA_ID && (iwl_le32(d + 4) & 1)) { /* Station, Flags (Bit 0: neue Rate), Rate */
+        uint32_t k = rate_kbps(iwl_le32(d + 8));
+        if (logged++ < 10)
+            kprintf("wlan: TLC meldet Rate %#x = %u kbit/s\n", iwl_le32(d + 8), k);
+        if (k)
+            sta.st.rate_kbps = k;
+    }
+    return 1;
 }
 
 void iwl_sta_fw_reset(void)
@@ -584,6 +777,8 @@ void iwl_sta_fw_reset(void)
     sta.state = WLAN_ST_IDLE;
     sta.keys_on = 0;
     sta.joined = 0;
+    sta.tlc_ok = 0;
+    sta.st.ba_rx = 0;
     mgmtq.qid = dataq.qid = -1;
     rxq_head = rxq_count = 0;
     sta.eapol_len = 0;
@@ -598,10 +793,15 @@ static int add_phy(void)
     memset(&c, 0, sizeof(c));
     c.id_and_color = PHY_ID;
     c.action = ACTION_ADD;
-    c.channel = sta.net.channel;
+    c.channel = sta.net.channel; /* Hauptkanal */
     c.band = sta.band;
-    c.width = 0;    /* 20 MHz */
-    c.ctrl_pos = 0;
+    c.width = sta.width_code;    /* 0 = 20, 1 = 40, 2 = 80 MHz */
+    c.ctrl_pos = 4;              /* bei 20 MHz egal ("darueber", wie Linux) */
+    if (sta.width_code) {        /* Lage des Hauptkanals zur Mitte: Bits 0-1 wie weit (in 20 MHz), Bit 2 darueber */
+        int offs = ((int)sta.net.channel - (int)sta.center) * 5, a = offs < 0 ? -offs : offs;
+        int pos = (a - 10) / 20;
+        c.ctrl_pos = (uint8_t)((pos & 3) | ((pos & 4) << 1) | (offs > 0 ? 4 : 0));
+    }
     c.lmac_id = 0;  /* ohne CDB immer LMAC 0 */
     if (iwl_cmd(GRP_LONG, CMD_PHY_CONTEXT, &c, sizeof(c), "PHY_CONTEXT", 0, 0) < 0)
         return -1;
@@ -639,12 +839,23 @@ static int mac_ctxt(uint32_t action, int assoc)
     c.cck_short_preamble = sta.band == 1 && (sta.bss.cap & 0x20) ? MAC_FLG_SHORT_PREAMBLE : 0;
     c.short_slot = sta.band == 0 || (sta.bss.cap & 0x400) ? MAC_FLG_SHORT_SLOT : 0;
     c.filter_flags = MAC_FILTER_ACCEPT_GRP | (assoc ? 0 : MAC_FILTER_IN_BEACON);
-    /* Zugriff ohne QoS (DCF) wie mac80211: alle Klassen AIFSN 2, CW 15..1023; Reihenfolge BE, BK, VI, VO;
-     * FIFOs der Familie 22000: BK 1, BE 2, VI 3, VO 4 */
-    ac_param(&c.ac[0], 15, 1023, 2, 2, 0);
-    ac_param(&c.ac[1], 15, 1023, 2, 1, 0);
-    ac_param(&c.ac[2], 15, 1023, 2, 3, 0);
-    ac_param(&c.ac[3], 15, 1023, 2, 4, 0);
+    /* Reihenfolge BE, BK, VI, VO; FIFOs der Familie 22000: BK 1, BE 2, VI 3, VO 4 */
+    static const uint8_t fifo[4] = {2, 1, 3, 4};
+    if (sta.qos) { /* EDCA wie vom AP (WMM-Parameter), sonst die Vorgaben von 802.11 */
+        static const uint8_t def[4][4] = {{0x03, 0xA4, 0, 0}, {0x27, 0xA4, 0, 0}, {0x42, 0x43, 94, 0},
+                                          {0x62, 0x32, 47, 0}};
+        for (int a = 0; a < 4; a++) {
+            const uint8_t *p = sta.bss.wmm_params ? sta.bss.wmm_ac[a] : def[a];
+            ac_param(&c.ac[a], (uint16_t)((1u << (p[1] & 0xF)) - 1), (uint16_t)((1u << (p[1] >> 4)) - 1),
+                     (uint8_t)(p[0] & 0xF), fifo[a], (uint16_t)(get16le(p + 2) * 32));
+        }
+        c.qos_flags = MAC_QOS_FLG_UPDATE_EDCA | (sta.st.phy_mode != WLAN_PHY_LEGACY ? MAC_QOS_FLG_TGN : 0);
+        if (sta.st.phy_mode != WLAN_PHY_LEGACY && sta.bss.ht_prot) /* HT-Schutz (Geraete ohne HT im Netz) */
+            c.protection_flags |= MAC_PROT_FLG_HT_PROT | MAC_PROT_FLG_FAT_PROT;
+    } else { /* Zugriff ohne QoS (DCF) wie mac80211: alle Klassen AIFSN 2, CW 15..1023 */
+        for (int a = 0; a < 4; a++)
+            ac_param(&c.ac[a], 15, 1023, 2, fifo[a], 0);
+    }
     uint32_t bi = sta.bss.beacon_int ? sta.bss.beacon_int : 100;
     c.bi = bi;
     c.dtim_interval = bi * sta.bss.dtim_period;
@@ -687,8 +898,16 @@ static int add_sta(int modify)
     c.mac_id_n_color = MAC_ID;
     memcpy(c.addr, sta.net.bssid, 6);
     c.sta_id = STA_ID;
-    c.station_flags = 0;       /* 20 MHz, ein Datenstrom */
-    c.station_flags_msk = STA_FLG_FAT_EN_MSK | STA_FLG_MIMO_EN_MSK | STA_FLG_RTS_MIMO_PROT;
+    c.station_flags = 0;       /* ohne HT: 20 MHz, ein Datenstrom */
+    if (sta.st.phy_mode != WLAN_PHY_LEGACY) {
+        uint32_t agg = sta.bss.ht_ampdu & 3, dens = (sta.bss.ht_ampdu >> 2) & 7;
+        if (sta.st.phy_mode == WLAN_PHY_VHT)
+            agg = (sta.bss.vht_cap >> 23) & 7; /* VHT: groesseres A-MPDU moeglich */
+        c.station_flags = (uint32_t)sta.width_code << 26 | (sta.st.nss == 2 ? 1u << 28 : 0) |
+                          agg << STA_FLG_MAX_AGG_SHIFT | dens << STA_FLG_DENS_SHIFT;
+    }
+    c.station_flags_msk = STA_FLG_FAT_EN_MSK | STA_FLG_MIMO_EN_MSK | STA_FLG_RTS_MIMO_PROT | STA_FLG_MAX_AGG_MSK |
+                          STA_FLG_DENS_MSK;
     c.station_type = 0;        /* IWL_STA_LINK */
     c.assoc_id = modify ? sta.assoc_aid : 0;
     uint8_t r[4] = {0};
@@ -696,6 +915,155 @@ static int add_sta(int modify)
     if (n >= 4 && (iwl_le32(r) & 0xFF) != ADD_STA_SUCCESS)
         kprintf("wlan: ADD_STA: Status %#x\n", iwl_le32(r));
     return n < 4 || (iwl_le32(r) & 0xFF) != ADD_STA_SUCCESS ? -1 : 0;
+}
+
+/* Legacy-Raten des AP als Bits der Firmware: 0-3 CCK 1/2/5,5/11, 4-11 OFDM 6..54 */
+static uint16_t legacy_bits(void)
+{
+    static const uint8_t r500[12] = {2, 4, 11, 22, 12, 18, 24, 36, 48, 72, 96, 108};
+    uint16_t m = 0;
+    for (uint32_t i = 0; i < sta.bss.n_rates; i++)
+        for (int k = 0; k < 12; k++)
+            if ((sta.bss.rates[i] & 0x7F) == r500[k])
+                m |= (uint16_t)(1u << k);
+    if (sta.band == 0)
+        m &= 0xFF0; /* 5 GHz: kein CCK */
+    return m ? m : (uint16_t)(sta.band == 1 ? 0xFFF : 0xFF0);
+}
+
+/* VHT-MCS-Grenze des AP fuer n Datenstroeme als Bitmaske (MCS 0-7, 0-8, 0-9), 0 = nicht unterstuetzt */
+static uint16_t vht_mask(int nss)
+{
+    switch ((sta.bss.vht_rx_mcs >> ((nss - 1) * 2)) & 3) {
+    case 0: return 0x0FF;
+    case 1: return 0x1FF;
+    case 2: return 0x3FF;
+    default: return 0;
+    }
+}
+
+/* Ratenanpassung an die Firmware geben: sie waehlt ab jetzt die Rate der Datenrahmen und meldet sie */
+static int tlc_config(void)
+{
+    TlcCmd c;
+    memset(&c, 0, sizeof(c));
+    c.sta_id = STA_ID;
+    c.max_ch_width = sta.width_code;
+    c.chains = (uint8_t)(iwl_state()->nvm_tx_chains ? iwl_state()->nvm_tx_chains : 1);
+    c.non_ht_rates = legacy_bits();
+    c.max_mpdu_len = 3839;
+    uint16_t hc = sta.bss.ht_cap;
+    if (sta.st.phy_mode == WLAN_PHY_VHT) {
+        c.mode = 2;
+        c.ht_rates[0][0] = vht_mask(1);
+        c.ht_rates[1][0] = sta.st.nss == 2 ? vht_mask(2) : 0;
+        c.max_mpdu_len = 3895;
+    } else if (sta.st.phy_mode == WLAN_PHY_HT) {
+        c.mode = 1;
+        c.ht_rates[0][0] = sta.bss.ht_mcs[0];
+        c.ht_rates[1][0] = sta.st.nss == 2 ? sta.bss.ht_mcs[1] : 0;
+    }
+    if (sta.st.phy_mode != WLAN_PHY_LEGACY) {
+        c.sgi_ch_width_supp = (uint8_t)((hc & 0x20 ? 1 : 0) | (hc & 0x40 && sta.width_code >= 1 ? 2 : 0) |
+                                        (sta.st.phy_mode == WLAN_PHY_VHT && (sta.bss.vht_cap & 0x20) ? 4 : 0));
+        int ldpc = (hc & 1) || (sta.st.phy_mode == WLAN_PHY_VHT && (sta.bss.vht_cap & 0x10));
+        int stbc = c.chains == 3 && ((hc >> 8) & 3);
+        c.flags = (uint16_t)((stbc ? 1 : 0) | (ldpc ? 2 : 0));
+    }
+    int n = iwl_cmd(GRP_DATA_PATH, CMD_TLC_CONFIG, &c, sizeof(c), "TLC_MNG_CONFIG", 0, 0);
+    kprintf("wlan: TLC: Modus %u, Breite %u, Ketten %#x, SGI %#x, Flags %#x, Legacy %#x, MCS %#x/%#x -> %d\n", c.mode,
+            c.max_ch_width, c.chains, c.sgi_ch_width_supp, c.flags, c.non_ht_rates, c.ht_rates[0][0],
+            c.ht_rates[1][0], n);
+    sta.tlc_ok = n >= 0;
+    sta.st.tlc = (uint8_t)sta.tlc_ok;
+    return n < 0 ? -1 : 0;
+}
+
+/* ADDBA-Antwort an den AP */
+static int send_addba_resp(uint8_t dialog, uint8_t tid, uint16_t status, uint16_t buf, uint16_t timeout)
+{
+    uint8_t b[9];
+    uint16_t param = (uint16_t)(0x0002 | tid << 2 | buf << 6); /* kein A-MSDU im A-MPDU, sofortige Bestaetigung */
+    b[0] = 3; /* Block Ack */
+    b[1] = 1; /* ADDBA-Antwort */
+    b[2] = dialog;
+    b[3] = (uint8_t)status;
+    b[4] = (uint8_t)(status >> 8);
+    b[5] = (uint8_t)param;
+    b[6] = (uint8_t)(param >> 8);
+    b[7] = (uint8_t)timeout;
+    b[8] = (uint8_t)(timeout >> 8);
+    return send_mgmt(0xD0, b, sizeof(b));
+}
+
+/* Block-Ack-Sitzung beim Empfang in der Firmware anlegen (start) bzw. entfernen; 0 oder -1 */
+static int rx_ba(int start, uint8_t tid, uint16_t ssn, uint16_t win)
+{
+    if (iwl_fw_capa(CAPA_BAID_ML_SUPPORT)) {
+        BaidCmd c;
+        memset(&c, 0, sizeof(c));
+        c.action = start ? 0 : 2;
+        c.sta_id_mask = 1u << STA_ID;
+        c.tid = tid;
+        c.ssn = ssn;
+        c.win_size = start ? win : 0;
+        uint8_t r[4] = {0};
+        int n = iwl_cmd(GRP_DATA_PATH, CMD_RX_BAID_CFG, &c, sizeof(c), start ? "RX_BAID (anlegen)" :
+                        "RX_BAID (entfernen)", r, sizeof(r));
+        if (n >= 4 && start)
+            kprintf("wlan: Block-Ack fuer TID %u: BAID %u, Fenster %u, ab %u\n", tid, iwl_le32(r), win, ssn);
+        return n < 0 ? -1 : 0;
+    }
+    AddStaCmd c; /* aeltere Firmware: ueber ADD_STA */
+    memset(&c, 0, sizeof(c));
+    c.add_modify = 1;
+    c.mac_id_n_color = MAC_ID;
+    c.sta_id = STA_ID;
+    if (start) {
+        c.add_immediate_ba_tid = tid;
+        c.add_immediate_ba_ssn = ssn;
+        c.rx_ba_window = win;
+        c.modify_mask = STA_MODIFY_ADD_BA;
+    } else {
+        c.remove_immediate_ba_tid = tid;
+        c.modify_mask = STA_MODIFY_REMOVE_BA;
+    }
+    uint8_t r[4] = {0};
+    int n = iwl_cmd(GRP_LONG, CMD_ADD_STA, &c, sizeof(c), "ADD_STA (Block-Ack)", r, sizeof(r));
+    return n < 4 || (iwl_le32(r) & 0xFF) != ADD_STA_SUCCESS ? -1 : 0;
+}
+
+/* mit iwl_op_lock: ADDBA-Anfragen und DELBA des AP erledigen */
+static void ba_work(void)
+{
+    for (int i = 0; i < 4; i++) {
+        if (!sta.ba[i].pending)
+            continue;
+        uint8_t tid = sta.ba[i].tid;
+        if (sta.ba[i].del) {
+            if (sta.st.ba_rx & (1u << tid)) {
+                rx_ba(0, tid, 0, 0);
+                sta.st.ba_rx &= (uint8_t)~(1u << tid);
+                kprintf("wlan: AP beendet Block-Ack fuer TID %u\n", tid);
+            }
+        } else if (tid >= 8 || sta.st.phy_mode == WLAN_PHY_LEGACY || cmdline_has("wlannoba")) {
+            kprintf("wlan: ADDBA fuer TID %u abgelehnt\n", tid);
+            send_addba_resp(sta.ba[i].dialog, tid, 37 /* abgelehnt */, 0, 0);
+        } else {
+            uint16_t win = sta.ba[i].buf && sta.ba[i].buf < 64 ? sta.ba[i].buf : 64;
+            if (sta.st.ba_rx & (1u << tid)) /* neue Anfrage fuer eine bestehende Sitzung: neu anlegen */
+                rx_ba(0, tid, 0, 0);
+            if (rx_ba(1, tid, sta.ba[i].ssn, win) == 0) {
+                sta.st.ba_rx |= (uint8_t)(1u << tid);
+                send_addba_resp(sta.ba[i].dialog, tid, 0, win, sta.ba[i].timeout);
+            } else {
+                sta.st.ba_rx &= (uint8_t)~(1u << tid);
+                send_addba_resp(sta.ba[i].dialog, tid, 37, 0, 0);
+            }
+        }
+        __sync_synchronize();
+        sta.ba[i].pending = 0;
+    }
 }
 
 static int protect_session(uint32_t tu)
@@ -763,7 +1131,7 @@ static int handle_eapol(void)
             return -1;
         mutex_lock(&iwl_ring_lock);
         sta.keys_on = 1;
-        sta.pn_next_uc = 0;
+        memset(sta.rp_top, 0, sizeof(sta.rp_top));
         mutex_unlock(&iwl_ring_lock);
     }
     if (sta.wpa.events & WPA_EV_GTK) {
@@ -894,6 +1262,81 @@ static void choose_rates(void)
     sta.st.rate_kbps = ofdm_kbps[r];
 }
 
+/* 802.11n/ac mit diesem AP? Modus, Breite (auf 5 GHz 40/80 MHz, wenn der AP so arbeitet), Datenstroeme */
+static void choose_phy(void)
+{
+    const WlanInfo *wi = iwl_state();
+    int chains2 = (wi->nvm_tx_chains & 3) == 3 && ((wi->nvm_rx_chains ? wi->nvm_rx_chains : 3) & 3) == 3;
+    int legacy = cmdline_has("wlanlegacy"); /* Notschalter: wie frueher nur 802.11a/g, ohne QoS */
+    sta.qos = sta.bss.has_wmm && !legacy;
+    sta.width_code = 0;
+    sta.center = sta.net.channel;
+    sta.st.phy_mode = WLAN_PHY_LEGACY;
+    sta.st.nss = 1;
+    if (sta.qos && sta.bss.has_ht) { /* HT braucht QoS */
+        sta.st.phy_mode = sta.band == 0 && sta.bss.has_vht ? WLAN_PHY_VHT : WLAN_PHY_HT;
+        if (chains2 && (sta.st.phy_mode == WLAN_PHY_VHT ? ((sta.bss.vht_rx_mcs >> 2) & 3) != 3 : sta.bss.ht_mcs[1]))
+            sta.st.nss = 2;
+        if (sta.band == 0 && sta.bss.ht_wide && (sta.bss.ht_sec == 1 || sta.bss.ht_sec == 3)) {
+            sta.width_code = 1;
+            sta.center = (uint8_t)(sta.bss.ht_sec == 1 ? sta.net.channel + 2 : sta.net.channel - 2);
+        }
+        if (sta.st.phy_mode == WLAN_PHY_VHT && sta.bss.vht_width >= 1 && sta.bss.vht_center) {
+            int d = (int)sta.net.channel - (int)sta.bss.vht_center;
+            if (d >= -6 && d <= 6 && (d == -6 || d == -2 || d == 2 || d == 6)) { /* Hauptkanal im 80-MHz-Block */
+                sta.width_code = 2;
+                sta.center = sta.bss.vht_center;
+            }
+        }
+    }
+    sta.st.width = (uint8_t)(20 << sta.width_code);
+    int sgi = sta.st.phy_mode != WLAN_PHY_LEGACY;
+    sta.st.max_kbps = sta.st.phy_mode == WLAN_PHY_LEGACY ? 54000 :
+                      mcs_rate(sta.width_code, sta.st.phy_mode == WLAN_PHY_VHT ? 9 : 7, sta.st.nss, sgi);
+}
+
+/* Eigene Faehigkeiten fuer die Assoc-Anfrage: HT Capabilities (und auf 5 GHz VHT Capabilities), WMM */
+static uint32_t put_phy_caps(uint8_t *p)
+{
+    uint32_t o = 0;
+    int two = sta.st.nss == 2 || ((iwl_state()->nvm_tx_chains & 3) == 3);
+    if (sta.st.phy_mode != WLAN_PHY_LEGACY) {
+        /* LDPC, SM-Energiesparen aus, SGI 20, TX-STBC, RX-STBC (1 Strom); auf 5 GHz dazu 40 MHz und SGI 40 */
+        uint16_t cap = 0x0001 | 0x000C | 0x0020 | 0x0080 | 0x0100;
+        if (sta.band == 0)
+            cap |= 0x0002 | 0x0040;
+        p[o++] = 45;
+        p[o++] = 26;
+        memset(p + o, 0, 26);
+        p[o] = (uint8_t)cap;
+        p[o + 1] = (uint8_t)(cap >> 8);
+        p[o + 2] = 0x03 | 5 << 2;          /* A-MPDU bis 64 KB, Abstand 4 us */
+        p[o + 3] = 0xFF;                   /* MCS 0-7 */
+        p[o + 4] = two ? 0xFF : 0;         /* MCS 8-15 (zweiter Strom) */
+        p[o + 15] = 0x01;                  /* Sende-MCS wie Empfang */
+        o += 26;
+        if (sta.st.phy_mode == WLAN_PHY_VHT) {
+            /* MPDU bis 3895 Byte (passt in 4 KiB), 80 MHz, LDPC, SGI 80, TX-STBC, RX-STBC 1, A-MPDU 64 KB, Antennen fest */
+            uint32_t vc = 0x10 | 0x20 | 0x80 | 0x100 | 3u << 23 | 1u << 28 | 1u << 29;
+            uint16_t map = two ? 0xFFFA : 0xFFFE; /* MCS 0-9 fuer 1 (und 2) Datenstroeme */
+            p[o++] = 191;
+            p[o++] = 12;
+            memset(p + o, 0, 12);
+            for (int i = 0; i < 4; i++)
+                p[o + i] = (uint8_t)(vc >> (8 * i));
+            p[o + 4] = p[o + 8] = (uint8_t)map;
+            p[o + 5] = p[o + 9] = (uint8_t)(map >> 8);
+            o += 12;
+        }
+    }
+    if (sta.qos) { /* WMM-Informationselement: Version 1, ohne U-APSD */
+        static const uint8_t wmm[9] = {221, 7, 0x00, 0x50, 0xF2, 0x02, 0x00, 0x01, 0x00};
+        memcpy(p + o, wmm, sizeof(wmm));
+        o += sizeof(wmm);
+    }
+    return o;
+}
+
 /* Datenraten fuer die Assoc-Anfrage: die des AP, ohne die "BSS Membership Selectors" (HT/VHT/HE/SAE-Pflicht) */
 static uint32_t put_rates(uint8_t *p)
 {
@@ -908,8 +1351,8 @@ static uint32_t put_rates(uint8_t *p)
         }
         r[n++] = v;
     }
-    if (need_ht)
-        kprintf("wlan: Achtung: der AP verlangt 802.11n (HT) - das koennen wir noch nicht\n");
+    if (need_ht && sta.st.phy_mode == WLAN_PHY_LEGACY)
+        kprintf("wlan: Achtung: der AP verlangt 802.11n (HT), meldet aber kein WMM/HT - Assoziierung wird scheitern\n");
     if (!n) { /* keine Raten bekannt: die Pflichtraten */
         static const uint8_t g[8] = {0x82, 0x84, 0x8B, 0x96, 0x0C, 0x12, 0x18, 0x24}, a[8] = {0x8C, 0x12, 0x98, 0x24,
                                                                                             0xB0, 0x48, 0x60, 0x6C};
@@ -989,10 +1432,17 @@ static int connect_op(const WlanConnect *c)
     sta.band = sta.net.channel <= 14 ? 1 : 0;
     sta.ant = wi->nvm_tx_chains & 1 ? 1 : 2;
     choose_rates();
+    choose_phy();
+    sta.tlc_ok = 0;
+    sta.st.ba_rx = 0;
+    for (int i = 0; i < 4; i++)
+        sta.ba[i].pending = 0;
     kprintf("wlan: verbinde mit '%s' (%02x:%02x:%02x:%02x:%02x:%02x, Kanal %u, %d dBm, Beacon %u TU, DTIM %u), "
-            "Daten mit %u Mbit/s\n", sta.net.ssid, sta.net.bssid[0], sta.net.bssid[1], sta.net.bssid[2],
-            sta.net.bssid[3], sta.net.bssid[4], sta.net.bssid[5], sta.net.channel, sta.net.signal, sta.bss.beacon_int,
-            sta.bss.dtim_period, sta.st.rate_kbps / 1000);
+            "%s, %u MHz, %u Strom/Stroeme, bis %u Mbit/s%s\n", sta.net.ssid, sta.net.bssid[0], sta.net.bssid[1],
+            sta.net.bssid[2], sta.net.bssid[3], sta.net.bssid[4], sta.net.bssid[5], sta.net.channel, sta.net.signal,
+            sta.bss.beacon_int, sta.bss.dtim_period, sta.st.phy_mode == WLAN_PHY_VHT ? "802.11ac" :
+            sta.st.phy_mode == WLAN_PHY_HT ? "802.11n" : "802.11a/g", sta.st.width, sta.st.nss,
+            sta.st.max_kbps / 1000, sta.qos ? ", WMM" : "");
 
     /* 3. Verschluesselung: offen oder WPA2-PSK (auch WPA2/WPA3 gemischt) */
     sta.st.step = WLAN_STEP_PMK;
@@ -1025,7 +1475,7 @@ static int connect_op(const WlanConnect *c)
     sta.beacon_seen = 0;
     sta.eapol_len = 0;
     sta.kicked = 0;
-    sta.pn_next_uc = 0;
+    memset(sta.rp_top, 0, sizeof(sta.rp_top));
     memset(sta.pn_next_mc, 0, sizeof(sta.pn_next_mc));
     rxq_head = rxq_count = 0;
     mutex_unlock(&iwl_ring_lock);
@@ -1076,7 +1526,7 @@ static int connect_op(const WlanConnect *c)
 
     /* 8. Assoziierung: Faehigkeiten, Hoerintervall, SSID, Raten, RSN-Element */
     sta.st.step = WLAN_STEP_ASSOC;
-    static uint8_t req[128];
+    static uint8_t req[256];
     uint32_t n = 0;
     uint16_t cap = 0x0001; /* ESS */
     if (sta.band == 1)
@@ -1096,6 +1546,7 @@ static int connect_op(const WlanConnect *c)
         memcpy(req + n, sta.rsn_ie, sta.rsn_ie_len);
         n += sta.rsn_ie_len;
     }
+    n += put_phy_caps(req + n); /* HT/VHT Capabilities, WMM (in der Reihenfolge von 802.11: nach RSN) */
     ok = 0;
     for (int t = 0; t < 3 && !ok; t++) {
         sta.assoc_got = 0;
@@ -1123,6 +1574,11 @@ static int connect_op(const WlanConnect *c)
         deauth(1);
         return fail(WLAN_STEP_ASSOC, -6, "Firmware nimmt die Assoziierung nicht an");
     }
+    if (cmdline_has("wlanlegacy") || cmdline_has("wlannotlc")) /* Fehlersuche: feste Rate wie frueher */
+        kprintf("wlan: Ratenanpassung der Firmware abgeschaltet (Kommandozeile) - feste Rate %u Mbit/s\n",
+                sta.st.rate_kbps / 1000);
+    else if (tlc_config() != 0) /* ohne: weiter mit fester Rate */
+        kprintf("wlan: Ratenanpassung der Firmware abgelehnt - feste Rate %u Mbit/s\n", sta.st.rate_kbps / 1000);
 
     /* 9. WPA2: 4-Wege-Handshake */
     if (sta.secure) {
@@ -1135,6 +1591,7 @@ static int connect_op(const WlanConnect *c)
         uint64_t tk = time_ms();
         while (!(sta.wpa.done && sta.keys_on)) {
             iwl_poll();
+            ba_work(); /* ADDBA-Anfragen kommen oft gleich nach der Assoziierung */
             if (handle_eapol() < 0) {
                 deauth(1);
                 return fail(WLAN_STEP_KEYS, -6, "Schluessel nicht eingebaut");
@@ -1155,8 +1612,10 @@ static int connect_op(const WlanConnect *c)
     sta.st.step = WLAN_STEP_DONE;
     sta.st.connect_ms = (uint32_t)(time_ms() - t0);
     sta.state = WLAN_ST_CONNECTED;
-    say("verbunden mit '%s' nach %u ms (%s, %u Mbit/s)", sta.net.ssid, sta.st.connect_ms,
-        sta.secure ? "WPA2" : "offen", sta.st.rate_kbps / 1000);
+    ba_work();
+    say("verbunden mit '%s' nach %u ms (%s, %s, %u MHz, bis %u Mbit/s)", sta.net.ssid, sta.st.connect_ms,
+        sta.secure ? "WPA2" : "offen", sta.st.phy_mode == WLAN_PHY_VHT ? "802.11ac" :
+        sta.st.phy_mode == WLAN_PHY_HT ? "802.11n" : "802.11a/g", sta.st.width, sta.st.max_kbps / 1000);
     if (!worker_started) {
         worker_started = 1;
         thread_create("wlan", wlan_worker, 0);
@@ -1214,6 +1673,7 @@ static void wlan_worker(void *arg)
         mutex_lock(&iwl_op_lock);
         if (sta.state == WLAN_ST_CONNECTED) {
             iwl_poll();
+            ba_work();
             if (handle_eapol() < 0)
                 link_lost("Schluesselwechsel gescheitert", 0);
             if (iwl_fw_failed()) {
@@ -1237,14 +1697,14 @@ static int wlan_send(NetDev *d, const void *frame, uint32_t len)
     mutex_lock(&iwl_ring_lock);
     int r = -1;
     if (sta.state == WLAN_ST_CONNECTED) {
-        uint8_t h[24], snap[8];
+        uint8_t h[26], snap[8];
         memcpy(snap, llc, 6);
         snap[6] = e[12];
         snap[7] = e[13];
         int enc = sta.keys_on;
-        hdr80211(h, 0x08, (uint8_t)(0x01 | (enc ? 0x40 : 0)), sta.net.bssid, e + 6, e); /* an den AP (ToDS) */
-        r = txq_send(&dataq, h, 24, snap, 8, e + 14, len - 14, TX_FLAGS_CMD_RATE | (enc ? 0 : TX_FLAGS_ENCRYPT_DIS),
-                     sta.rate_data);
+        uint32_t hl = data_hdr(h, enc, e + 6, e); /* an den AP (ToDS) */
+        uint32_t fl = (sta.tlc_ok ? 0 : TX_FLAGS_CMD_RATE) | (enc ? 0 : TX_FLAGS_ENCRYPT_DIS); /* Rate: Firmware */
+        r = txq_send(&dataq, h, hl, snap, 8, e + 14, len - 14, fl, sta.tlc_ok ? 0 : sta.rate_data);
     }
     mutex_unlock(&iwl_ring_lock);
     return r;
