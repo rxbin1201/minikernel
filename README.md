@@ -1,7 +1,53 @@
 # MiniKernel
 
-Ein kleines x86_64-Betriebssystem: eigener UEFI-Bootloader, Kernel mit Prozessen, Dateisystemen, USB und Netzwerk,
-dazu ein Userland mit Shell, Werkzeugen, Editor, Spielen und einer grafischen Oberflaeche.
+Ein eigenes 64-Bit-Betriebssystem fuer x86_64-PCs: UEFI-Bootloader, Kernel mit mehreren CPUs, Prozessen und
+Threads, Dateisystemen, USB, Netzwerk (Kabel und WLAN), Bluetooth-Audio, Ton und Intel-Grafik mit GPU-Beschleunigung -
+dazu ein Userland mit Shell, rund 80 Programmen und einer grafischen Oberflaeche im Stil von macOS.
+
+Laeuft in QEMU (`make run`) und auf echter Hardware (getestet: Intel i5-8400T mit UHD Graphics 630, Intel AX200 fuer
+WLAN/Bluetooth, Monitor 3440x1440 ueber HDMI/DisplayPort).
+
+**Inhalt**
+
+1. [Stand auf einen Blick](#stand-auf-einen-blick)
+2. [Schnellstart](#schnellstart)
+3. [Auf echter Hardware](#auf-echter-hardware)
+4. [Bedienung](#bedienung): Shell, Programme, Desktop, Einstellungen
+5. [Hardware im Detail](#hardware-im-detail): Netzwerk, WLAN, Bluetooth, Intel-Grafik, Ton
+6. [Kernel im Detail](#kernel-im-detail): CPUs, Threads, Speicher, Grenzen
+7. [Fehlersuche und Tests](#fehlersuche-und-tests)
+8. [Kernel-Kommandozeile](#kernel-kommandozeile)
+9. [Aufbau des Projekts](#aufbau-des-projekts)
+10. [Was noch fehlt](#was-noch-fehlt)
+
+---
+
+## Stand auf einen Blick
+
+✅ funktioniert · 🟡 teilweise / Grundfunktion · ❌ fehlt noch
+
+| Bereich | | Was geht | Was fehlt |
+|---|---|---|---|
+| **Start** | ✅ | Eigener UEFI-Bootloader, Startlogo der Firmware mit Ladebalken, Kommandozeile aus `cmdline.txt` | Secure Boot (Bootloader nicht signiert), Legacy-BIOS |
+| **CPUs** | ✅ | Alle CPUs (SMP), Programme rechnen echt parallel, Gleitkomma/SSE in Programmen | Feinere Sperren im Kernel (noch ein Big Kernel Lock), Energiesparen |
+| **Prozesse** | ✅ | `fork` (Copy-on-Write), `exec`, Pipes, Prozessgruppen, Strg+C, `kill`, bis 1024 Threads je Programm, Futex-Sperren | Signale, Benutzer und Rechte, Umgebungsvariablen fuer Programme |
+| **Speicher** | ✅ | Paging, wachsender Stack, `mmap` (auch auf Dateien, Seiten erst bei Bedarf), geteilter Speicher | Auslagern auf die Platte |
+| **Datentraeger** | ✅ | NVMe, AHCI (SATA), virtio-blk, USB-Sticks; MBR und GPT | Installation auf die interne Platte, Schreib-Cache |
+| **Dateisysteme** | 🟡 | FAT12/16/32 mit langen Namen und exFAT, lesen und schreiben; initrd (tar) | ext4, NTFS, Dateirechte |
+| **USB** | 🟡 | xHCI (USB 1-3), Hubs, Tastatur, Maus, Massenspeicher, Bluetooth; Transfers per Interrupt | Ohne xHCI (EHCI/OHCI), USB-Audio, Gamepads, Webcams |
+| **Netzwerk** | 🟡 | Intel e1000/e1000e/I217-I219, IPv4, DHCP, DNS, NTP, UDP, TCP nach aussen, `wget` (HTTP) | HTTPS/TLS, TCP-Server (listen/accept), IPv6, andere Netzwerkkarten (Realtek, ...) |
+| **WLAN** | 🟡 | Intel AX200: suchen, verbinden mit offenen und WPA2-PSK-Netzen, DHCP, im Desktop | Schnelle Raten (802.11n/ac/ax, hoechstens 54 Mbit/s), WPA3-only, Enterprise, andere Karten |
+| **Bluetooth** | 🟡 | Intel AX200: Firmware laden, suchen, koppeln, Musik an Lautsprecher/Kopfhoerer (A2DP, SBC), Fernbedienung (AVRCP) | Tastaturen/Maeuse (HID), Freisprechen, Bluetooth LE, AAC |
+| **Grafik** | ✅ | GOP-Framebuffer ueberall; Intel Gen9 (Skylake bis Comet Lake): Moduswechsel, HDMI/DP, Hotplug, Hardware-Zeiger, Doppelpufferung | AMD- und NVIDIA-Treiber, mehrere Monitore gleichzeitig |
+| **3D** | 🟡 | Intel Gen9: eigene Shader, kleines OpenGL 1.x/1.5 (Texturen, Licht, Tiefentest, Mischen, Vertex-Buffer); Desktop setzt auf der GPU zusammen | Mip-Maps, programmierbare Shader fuer Programme, Mesa |
+| **Ton** | ✅ | Intel HD Audio, 8 Programme gleichzeitig, WAV und MP3, Ausgabe waehlbar (Lautsprecher, Kopfhoerer, Bluetooth) | Mikrofon/Aufnahme, Lautstaerke je Programm im Menue, HDMI-Ton |
+| **Desktop** | ✅ | Fenster mit Animationen, Taskleiste, Startmenue mit Suche, Andocken, Menues fuer Netzwerk, WLAN, Bluetooth und Ton, Task-Manager | Sperrbildschirm, Benachrichtigungen, Drag & Drop zwischen Programmen |
+| **Programme** | ✅ | Terminal, Dateien, Texteditor, Musik, Bilder (BMP), Malen, Rechner, Uhr, Spiele, Einstellungen, Task-Manager | Webbrowser, PNG/JPEG, Compiler im System |
+| **Shell** | ✅ | Pipes, Umleitungen, `&&`/`\|\|`, Hintergrund-Jobs, Variablen, `if`/`while`/`for`, Funktionen, Skripte, Vervollstaendigen | Jobsteuerung mit Strg+Z, Rueckwaertssuche im Verlauf |
+
+Ausfuehrlich in [Was noch fehlt](#was-noch-fehlt).
+
+---
 
 ## Schnellstart
 
@@ -14,6 +60,7 @@ make help     # alle Ziele und Optionen
 
 In der Shell zeigt `help` die Befehle, `desktop` startet die grafische Oberflaeche, `poweroff` beendet das System.
 Alles, was der Kernel ausgibt, steht auch in `Build/Out.log` (serielle Schnittstelle).
+Direkt in den Desktop starten: `make run CMDLINE="init=/bin/desktop"`.
 
 ### Voraussetzungen (Ubuntu/WSL)
 
@@ -25,18 +72,19 @@ Alles, was der Kernel ausgibt, steht auch in `Build/Out.log` (serielle Schnittst
 **KVM:** Ist `/dev/kvm` fuer den Benutzer beschreibbar, startet QEMU mit Hardware-Virtualisierung (deutlich schneller),
 sonst in reiner Emulation. Unter WSL einmalig `sudo usermod -aG kvm $USER` und WSL neu starten. `KVM=0` schaltet es ab.
 
-## Optionen fuer `make run` / `make test`
+### Optionen fuer `make run` / `make test`
 
 | Option | Bedeutung |
 |---|---|
 | `DISK=virtio\|nvme\|ahci\|usb` | Controller der Datenplatte (Standard `virtio`) |
 | `DISK_LAYOUT=none\|mbr\|gpt` | Partitionierung beim Neuanlegen der Datenplatte |
 | `NET=e1000\|e1000e\|none` | Netzwerkkarte im QEMU-User-Netz (Gast 10.0.2.15, Router 10.0.2.2) |
-| `SOUND=none\|wav\|pa\|off` | Soundkarte (Intel HD Audio): Ton ins Leere, nach `Build/sound.wav`, ueber PulseAudio (unter WSLg die Windows-Lautsprecher) oder ohne Karte |
-| `MOUSE=0` | ohne USB-Maus. Standard: `usb-tablet` (absolute Koordinaten, der Zeiger folgt der Maus des Rechners, ohne sie im Fenster einzufangen; PS/2-Mausdaten verwirft der Kernel). Bei den Selbsttests nie |
+| `SOUND=none\|wav\|pa\|off` | Soundkarte: Ton ins Leere, nach `Build/sound.wav`, ueber PulseAudio (unter WSLg die Windows-Lautsprecher) oder ohne Karte |
+| `MOUSE=0` | ohne USB-Maus. Standard: `usb-tablet` (der Zeiger folgt der Maus des Rechners, ohne sie einzufangen) |
+| `SMP=N` | Zahl der CPUs (Standard 4) |
 | `STICK=12\|16\|exfat` | zusaetzlichen Test-Stick (FAT12/FAT16/exFAT) am USB anschliessen |
 | `TESTS=1` / `TESTS=disk,user` | Selbsttests beim Start (alle bzw. nur diese Gruppen); `KEEP=1` bleibt danach im System |
-| `CMDLINE="..."` | weitere Kernel-Kommandozeile, siehe unten |
+| `CMDLINE="..."` | weitere Kernel-Kommandozeile, siehe [Kernel-Kommandozeile](#kernel-kommandozeile) |
 | `HEADLESS=1` | ohne Fenster, Ausgabe nur in `Build/Out.log` (z.B. `make test HEADLESS=1`) |
 | `QEMU_EXTRA="..."` | weitere QEMU-Argumente |
 
@@ -45,32 +93,169 @@ Beispiele: `make run CMDLINE="mode=1600x900 kbd=de"`, `make test TESTS=foreign S
 Die Datenplatte `Image/disk.img` (FAT32, Label `MINIKERNEL`, im System unter `/disk`) bleibt bei `make clean` erhalten;
 `make cleandisk` legt sie neu an, `make fatcheck` prueft sie.
 
-## Netzwerk
+QEMU hat keine Intel-GPU, keine AX200 und kein Bluetooth: diese Treiber lassen sich nur auf echter Hardware testen.
 
-Treiber fuer Intel-Netzwerkkarten (82540EM/82545EM, 82574L, I217-I219); Karten mit MSI melden Pakete per Interrupt,
-die anderen fragt der Thread `net` ab. Darueber ein IPv4-Stack (`Kernel/net`): ARP, ICMP, DHCP, DNS mit Cache, NTP
-(stellt beim Start die Uhr), UDP-Sockets und TCP-Verbindungen nach aussen. TCP: Wiederholung nach gemessener
-Laufzeit, schnelle Wiederholung nach drei doppelten ACKs, 64 KB Empfangsfenster, geordneter Abbau im Hintergrund nach
-`close`. Programme bekommen eine Verbindung als Datei-Deskriptor (`sys_tcp_connect`, dann `read`/`write`).
+---
 
-Programme: `ifconfig`, `ping`, `nslookup`, `ntp`, `udp`, `netstat` (TCP-Verbindungen) und `wget`:
-`wget http://example.com/` speichert `index.html` im aktuellen Verzeichnis (also z.B. erst `cd /disk`),
-`wget -O - url | less` zeigt die Seite, `-S` die Kopfzeilen der Antwort, `-q` keine Meldungen. Folgt Weiterleitungen,
-versteht Content-Length und "chunked"; nur `http://` (fuer `https://` fehlt TLS).
+## Auf echter Hardware
 
-### WLAN und Bluetooth (Intel AX200, im Aufbau)
+```sh
+make usb        # Image/usb/minikernel-usb.img: mit Rufus (DD-Modus) oder balenaEtcher auf einen Stick schreiben
+make usbfiles   # Image/usbfiles/: Inhalt auf einen FAT32-Stick kopieren
+make vmware     # Image/vmware/: VM fuer VMware (VMWARE_BUS=sata|nvme)
+```
 
-Die Firmware kommt aus *linux-firmware* und liegt lokal in `firmware/` (nicht im Repository):
-`iwlwifi-cc-a0-77.ucode` (WLAN) und `ibt-20-1-3.sfi` (Bluetooth). `make` packt sie nach `/firmware` in die initrd,
-so liest der Kernel sie ohne Datentraeger (wie Firmware in der initramfs bei Linux).
+- **Secure Boot** muss aus sein (der Bootloader ist nicht signiert).
+- **Daten:** der Kernel schreibt auf das FAT32-Volume mit dem Label `MINIKERNEL` (`/disk`), z.B. einen USB-Stick, der
+  unter Windows so benannt wurde. Weitere Datentraeger erscheinen unter `/mnt` (`usb0`, `usb0p1`, ...).
+- **Firmware fuer WLAN und Bluetooth** kommt aus *linux-firmware* und liegt lokal in `firmware/` (nicht im
+  Repository): `iwlwifi-cc-a0-77.ucode` (WLAN), `ibt-20-1-3.sfi` und optional `ibt-20-1-3.ddc` (Bluetooth). `make`
+  packt sie nach `/firmware` in die initrd.
+- **Kernel-Log:** `dmesg` zeigt alle Meldungen seit dem Start, `dmesg > /disk/log.txt` speichert sie.
 
-Stufe 1 (`Kernel/drivers/net/iwl.c`): die Karte (PCI 8086:2723) wird erkannt, BAR0 eingeblendet und die Kennungen
-gelesen (`CSR_HW_REV`, `CSR_HW_RF_ID`; die Karte wird noch nicht angefasst); die Firmware wird zerlegt (TLV-Format wie
-bei Linux: Laufzeit-Abschnitte fuer LMAC und UMAC, Paging, Faehigkeiten). `wlan` zeigt alles, dazu das
-Bluetooth-Geraet am USB (8087:0029). `wlan load` startet die Firmware, `wlan scan` sucht Netze.
+---
 
-Stufe 5 (`Kernel/drivers/net/iwl_sta.c`, `Kernel/net/wpa.c`): verbinden mit offenen und WPA2-PSK-Netzen (auch
-WPA2/WPA3-gemischt), als `wlan0` im Netzwerk-Stack - danach holt DHCP die Adresse wie bei eth0:
+## Bedienung
+
+### Shell
+
+Die Shell (`/bin/sh`) ist an die POSIX-Shell angelehnt:
+
+| | |
+|---|---|
+| Zeileneditor | Pfeiltasten, Pos1/Ende, Verlauf (hoch/runter), Tab vervollstaendigt, Strg+C bricht ab, Strg+D beendet |
+| Syntax | `a \| b`, `< > >> 2> 2>&1`, `;`, `&&`, `\|\|`, `&` (Hintergrund), `!`, `# Kommentar`, `'...'`, `"..."` |
+| Bloecke | `if/elif/else/fi`, `while`/`until ... do ... done`, `for x in ...; do ... done`, `name() { ...; }`, `( ... )` |
+| Ersetzungen | `$NAME`, `${NAME:-vorgabe}`, `${#NAME}`, `$?`, `$$`, `$1..$9`, `$@`, `~`, `$(befehl)`, `$((rechnung))`, Platzhalter `* ? [abc]` |
+| Eingebaut | `cd pwd exit echo test [ read set export unset shift return break continue type source history clear jobs fg wait help` |
+| Skripte | `sh datei`, `./datei` bzw. Dateien mit `#!` oder auf `.sh`; beim Start laeuft `/etc/profile` |
+
+Jede Befehlszeile ist eine Prozessgruppe: Strg+C beendet die laufende Gruppe, nicht die Shell. Variablen gelten nur in
+der Shell (Programme bekommen keine Umgebung).
+
+### Programme
+
+Grafische Programme laufen unter dem Desktop im Fenster, ohne Desktop im Vollbild. Auch aus dem Terminal gestartet
+bekommen sie ein Fenster (`snake &`, `view bild.bmp`).
+
+| Art | Programme |
+|---|---|
+| **Desktop-Apps** | `term` (Terminal), `files` (Dateien), `textedit` (Texteditor), `textview` (Text ansehen), `music` (Musik), `view` (Bilder, BMP), `paint` (Malen), `calc` (Rechner), `clock` (Uhr), `settings` (Einstellungen), `taskmgr` (Task-Manager), `about` (Ueber MiniKernel), `snake`, `tetris`, `gldemo` (3D-Demo) |
+| **Dateien und Text** | `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, `touch`, `find`, `tree`, `du`, `df`, `mount`, `grep`, `head`, `tail`, `less`, `wc`, `sort`, `uniq`, `diff`, `hexdump`, `edit` (Editor in der Konsole), `echo`, `seq`, `yes` |
+| **System** | `ps`, `kill`, `cpus` (Auslastung je CPU), `uptime`, `date`, `cal`, `dmesg`, `lspci`, `lsusb`, `mouse`, `keymap`, `resolution`, `sleep`, `reboot`, `poweroff` |
+| **Netzwerk** | `ifconfig`, `ping`, `nslookup`, `wget`, `ntp`, `netstat`, `udp`, `wlan` |
+| **Ton und Bluetooth** | `play` (WAV/MP3 abspielen, Testton, Lautstaerke), `bt` (Bluetooth-Geraete) |
+| **Test und Diagnose** | `ramtest` (Arbeitsspeicher), `burn` (CPU-Last), `igdtest` (Intel-Grafik), `anim` (Bildtakt), dazu die Selbsttests `threadtest`, `limittest`, `cowtest`, `mmaptest`, `shmtest`, `gltest`, `fputest`, `memtest`, ... |
+
+Einige im Einzelnen:
+
+- **Dateien** (`files [ordner]`): Seitenleiste mit Schnellzugriff, Orten (`/disk`, `/`, angesteckte Datentraeger) und
+  belegtem Speicher; Tabs (Strg+T/W/Tab), Zurueck/Vor/Hoch, klickbare Pfadleiste, Suche (Strg+F; im Schnellzugriff auf
+  der ganzen Platte). Liste mit Name, Geaendert, Groesse (sortierbar). Auswahl mit Klick, Strg/Shift+Klick, Pfeilen,
+  Strg+A; Strg+C/X/V (auch zwischen zwei Fenstern), Strg+D duplizieren, Strg+N neuer Ordner, Entf loeschen (mit
+  Rueckfrage), Rechtsklick-Menue, Ziehen auf einen Ordner verschiebt (mit Strg: kopiert). Kopieren laeuft im
+  Hintergrund mit Fortschritt. Doppelklick oeffnet Ordner, Bilder in `view`, Musik in `music`, sonst den Texteditor.
+- **Musik** (`music [ordner|datei]`): MP3 und WAV eines Ordners, Titel und Interpret aus ID3, Fortschritt zum
+  Anklicken/Ziehen, Zufall, Wiederholen, Titelliste mit Laengen, eigene Lautstaerke. Leertaste Pause, Pfeile 10 s
+  springen. Die Tasten einer Bluetooth-Soundbar (Play/Pause/vor/zurueck) wirken auch, wenn ein anderes Fenster vorne ist.
+- **Texteditor** (`textedit [datei]`): Zeilennummern, Markieren mit Maus und Shift+Pfeil, Strg+Pfeil wortweise,
+  Strg+A/C/X/V, Strg+Z/Y, Strg+S; fragt beim Schliessen nach ungesicherten Aenderungen.
+- **Task-Manager** (`taskmgr`, Strg+Shift+Esc): Prozesse mit % CPU (100 % = ein Kern), CPU-Zeit, Threads und Speicher;
+  Klick auf eine Spalte sortiert, "Beenden"/Entf beendet nach Rueckfrage. Unten CPU-Last (Benutzer/System) und
+  Arbeitsspeicher, im Tab "Leistung" der Verlauf jeder CPU.
+- **Ueber MiniKernel** (`about`): wie "Ueber diesen Mac" - Prozessor, Kerne, Arbeitsspeicher, Grafik, Bildschirm,
+  Festplatte, virtuelle Maschine, Build-Datum, Laufzeit.
+- **ramtest** `[MB] [Runden]`: belegt freien Arbeitsspeicher (128 MB bleiben dem Kernel), schreibt sechs Muster
+  (Nullen, Einsen, Schachbrett, laufende Eins, Adresse, Zufall), prueft sie, meldet Fehler mit Adresse und misst die
+  Geschwindigkeit. Mehrere gleichzeitig belasten mehrere Kerne.
+- **wget**: `wget http://example.com/` speichert `index.html` im aktuellen Verzeichnis, `wget -O - url | less` zeigt
+  die Seite, `-S` die Kopfzeilen. Folgt Weiterleitungen, versteht "chunked"; nur `http://`.
+- **play**: `play datei.wav` (8-32 Bit, Gleitkomma, jede Abtastrate), `play lied.mp3` (MPEG-1/2/2.5 Layer I-III),
+  `play -w lied.wav lied.mp3` wandelt um, `play -t` Testton, `play -v 0-100` Lautstaerke.
+
+### Desktop
+
+`desktop` startet die grafische Oberflaeche (oder `init=/bin/desktop` in der Kommandozeile). Unten sitzt die
+Taskleiste aus vier Segmenten aus Milchglas:
+
+| Segment | Inhalt |
+|---|---|
+| **Programme** | Klick startet bzw. holt das Fenster nach vorn; Strich darunter = laeuft, blau = aktiv. Rechts die minimierten Fenster |
+| **Suche, Start, Fenster** | Startmenue mit allen Programmen und Suchfeld (tippen, Enter startet); Fenstermenue mit allen Fenstern und den Befehlen fuers aktive |
+| **Uhrzeit und Datum** | Klick oeffnet die Uhr |
+| **System** | Netzwerk, Bluetooth, Ton und ^ (Einstellungen, Task-Manager, Ueber MiniKernel, Neu starten, Ausschalten, Zur Konsole) |
+
+- **Netzwerk:** ein Knopf fuer Kabel und WLAN. Zeigt Zustand, Adresse, Gateway, DNS, Geschwindigkeit und Datenmengen;
+  "Adresse neu anfragen". Im WLAN-Teil die gefundenen Netze mit Signal und Verschluesselung; Klick verbindet (bei WPA2
+  mit Passwortabfrage). Das zuletzt verbundene Netz steht in `wlan.cfg`, der Desktop verbindet sich beim Start.
+- **Bluetooth:** Zustand, Geraet, Audio und die gefundenen Geraete (Audio zuerst). Klick verbindet, danach geht aller
+  Ton an das Geraet. Das zuletzt verbundene Geraet (`bt_keys.cfg`) wird beim Start wieder verbunden.
+- **Ton:** Mausrad ueber dem Symbol regelt die Lautstaerke; das Menue hat einen Regler, "Stumm schalten" und die
+  Ausgabe: "Automatisch" (Bluetooth, wenn bereit; sonst Soundkarte mit Auto-Mute) oder fest Lautsprecher, Kopfhoerer,
+  Line-Out bzw. Bluetooth. Die Wahl wird gespeichert.
+- **Fenster:** runde Ecken, weiche Schatten, Titelleiste mit Minimieren, Maximieren, Schliessen; Ziehen an den
+  linken/rechten Rand dockt an die Haelfte an, an den oberen Rand maximiert. Weiche Animationen beim Oeffnen,
+  Schliessen, Minimieren und Zoomen. Ab 1300 Pixel Bildschirmhoehe wird alles 25 % groesser.
+- **Neu starten / Ausschalten:** alle Programme werden gebeten, sich zu beenden; bleibt eins offen (z.B. ungespeichertes
+  Bild), fragt der Desktop nach.
+
+**Tastenkuerzel** (linke Alt-Taste):
+
+| Kuerzel | Wirkung |
+|---|---|
+| Alt+Tab (mit Shift: zurueck) | naechstes Fenster |
+| Alt+W / Alt+Q | Fenster schliessen / Programm beenden |
+| Alt+M / Alt+N / Alt+F | minimieren / neues Fenster / zoomen |
+| Alt+Pfeil links/rechts | an die Bildschirmhaelfte andocken |
+| Alt+Pfeil hoch/runter | maximieren / zurueck |
+| Strg+Shift+Esc | Task-Manager |
+| Esc | Menue schliessen |
+
+### Einstellungen
+
+`settings` (Startmenue oder ^ → "Einstellungen ..."), gespeichert in `settings.cfg` auf dem Boot-Volume (sonst `/disk`):
+
+- **Anzeige:** Aufloesung aus den Modi des Monitors; mit Intel-Treiber sofort (mit "beibehalten?" und Ruecksprung nach
+  15 s), sonst ab dem naechsten Start. Groesse der Oberflaeche (automatisch, 100, 125, 150 %).
+- **Zeiger:** Groesse 100-250 %, gilt sofort.
+- **Taskleiste:** klein/normal/gross, Uhr mit Sekunden, Datum unter der Uhrzeit.
+- **Hintergrund:** fuenf Farbthemen (Abendrot, Ozean, Wald, Lavendel, Graphit).
+- **Tastatur:** Layout de/us/uk, sofort und dauerhaft.
+- **Info:** Bildschirm, Grafik, Groesse der Oberflaeche, Speicherort der Einstellungen.
+
+### Technik des Desktops
+
+- **Fensterprotokoll** (`Userland/include/winproto.h`): jedes Fenster gehoert einem eigenen Prozess. Der Desktop
+  startet ihn mit zwei Pipes (Nachrichten zu 64 Byte: Tasten, Maus, Fokus, Schliessen, Bildtakt bzw. Fenster anlegen,
+  geaenderter Bereich, Titel, Datei oeffnen); den Inhalt zeichnet das Programm in geteilten Speicher. Der Desktop
+  wartet nie auf ein Programm; wer auf "Schliessen" nicht reagiert, wird beim dritten Klick beendet. Stuerzt ein
+  Programm ab, verschwindet nur sein Fenster.
+- **Grafikbibliothek** (`gfx.c`): unter dem Desktop liefert `gfx_open()` ein Fenster statt des Bildschirms,
+  `gfx_open_window_ex(w, h, titel, GFX_RESIZABLE)` waehlt Groesse und Titel, Ereignisse `EV_CLOSE`, `EV_FOCUS`,
+  `EV_RESIZE`. Die Titelleiste zeichnet die Bibliothek selbst; Programme mit eigener Kopfleiste nehmen
+  `GFX_FRAMELESS` und `gfx_window_cmd`. Gemeinsames Aussehen: `ui.h`.
+- **Dienste** (`SYS_SERVICE`): benannte Verbindungen wie ein einfacher Unix-Socket; der Desktop meldet sich als
+  "desktop" an, aus dem Terminal gestartete Grafikprogramme verbinden sich dort.
+- **Tasten:** Alt-Kombinationen kommen als `KEY_ALT` + Taste, Shift/Strg mit Sondertasten als `KEY_MODS` + Umschalttasten
+  + Taste (`KEY_MOD_*` in `Event.key`) - nur bei Grafikprogrammen, die Konsole verwirft sie.
+- **Schriften:** Inter und JetBrains Mono (SIL Open Font License, `/share/fonts`), gerastert mit stb_truetype;
+  Zeichnen mit Kantenglaettung und Transparenz in `Userland/lib/draw.c`.
+
+---
+
+## Hardware im Detail
+
+### Netzwerk (Kabel)
+
+- **Treiber** (`Kernel/drivers/net/e1000.c`): Intel 82540EM/82545EM, 82574L, I217-I219. Karten mit MSI melden Pakete
+  per Interrupt, die anderen fragt der Thread `net` ab.
+- **IPv4-Stack** (`Kernel/net`): ARP, ICMP, DHCP, DNS mit Cache, NTP (stellt beim Start die Uhr), UDP-Sockets und
+  TCP-Verbindungen nach aussen.
+- **TCP:** Wiederholung nach gemessener Laufzeit, schnelle Wiederholung nach drei doppelten ACKs, 64 KB
+  Empfangsfenster, geordneter Abbau im Hintergrund. Programme bekommen eine Verbindung als Datei-Deskriptor
+  (`sys_tcp_connect`, dann `read`/`write`).
+
+### WLAN (Intel AX200)
 
 ```sh
 wlan scan
@@ -80,71 +265,114 @@ ifconfig             # wlan0 mit Adresse
 wlan disconnect
 ```
 
-Ablauf wie iwlmvm in Linux: PHY-Kontext (Kanal), MAC-Kontext, Bindung, Station fuer den AP, je eine
-Sendewarteschlange fuer Verwaltung und Daten (`SCD_QUEUE_CONFIG`), Zeitfenster auf dem Kanal (`SESSION_PROTECTION`),
-Authentifizierung, Assoziierung; bei WPA2 der 4-Wege-Handshake (PBKDF2 fuer den PMK, PRF fuer den PTK, AES Key Wrap
-fuer den GTK; `Kernel/lib/crypto.c`), dann Paar- und Gruppenschluessel in die Firmware - sie ver- und entschluesselt
-CCMP selbst. Gruppenschluessel-Wechsel des AP beantwortet der Thread `wlan`. Die Strukturen folgen den
-Befehlsversionen der Firmware `cc-a0-77` (`ADD_STA` 12, `ADD_STA_KEY` 3, `TX_CMD` 9 mit neuem Ratenformat,
-`PHY_CONTEXT` 4, `SCD_QUEUE_CONFIG` 3, `RLC_CONFIG` 2).
+- **Erkennen und Firmware** (`Kernel/drivers/net/iwl.c`): PCI 8086:2723; die Firmware wird zerlegt (TLV wie bei
+  Linux: LMAC/UMAC, Paging, Faehigkeiten), geladen und gestartet. `wlan` zeigt alles.
+- **Verbinden** (`iwl_sta.c`, `Kernel/net/wpa.c`): offene und WPA2-PSK-Netze (auch WPA2/WPA3-gemischt), danach
+  `wlan0` im Netzwerk-Stack mit DHCP. Ablauf wie iwlmvm in Linux: PHY-, MAC-Kontext, Bindung, Station, Sende-
+  warteschlangen, Authentifizierung, Assoziierung, 4-Wege-Handshake (PBKDF2, PRF, AES Key Wrap in
+  `Kernel/lib/crypto.c`); die Firmware ver- und entschluesselt CCMP selbst. Gruppenschluessel-Wechsel beantwortet der
+  Thread `wlan`. Befehlsversionen der Firmware `cc-a0-77`.
+- **Grenzen:** 802.11a/g-Station ohne HT/VHT/HE, QoS und Aggregation; feste Rate nach Signalstaerke (hoechstens
+  54 Mbit/s); Empfang wird abgefragt (kein Interrupt). Nicht unterstuetzt: WEP, WPA1/TKIP, WPA3-only (SAE), Enterprise,
+  Pflicht-MFP.
+- **Test:** Selbsttest `crypto` (17 Pruefungen: RFC- und 802.11-Testvektoren, kompletter Handshake gegen einen
+  simulierten AP, auch mit falschem Passwort). Das Verbinden selbst nur auf echter Hardware.
 
-Bewusst einfach: die Karte tritt als 802.11a/g-Station auf (ohne HT/VHT/HE, ohne QoS und Aggregation), sendet mit
-fester Rate (nach der Signalstaerke, hoechstens 54 Mbit/s) und fragt den Empfang ab (ohne Interrupt). Nicht
-unterstuetzt: WEP, WPA1/TKIP, WPA3-only (SAE), Enterprise (802.1X), Pflicht-MFP (802.11w). Selbsttest `crypto`
-(17 Pruefungen: Testvektoren aus den RFCs und 802.11, dazu ein kompletter Handshake gegen einen simulierten AP, auch
-mit falschem Passwort). Getestet werden kann das Verbinden nur auf echter Hardware - QEMU hat keine AX200.
-Naechste Stufen: Ratenanpassung durch die Firmware (TLC) und HT, Interrupts statt Abfragen.
+### Bluetooth (Intel AX200 am USB)
 
-Bluetooth, Stufe 1 (`Kernel/drivers/bt/btusb.c`): der Bluetooth-Teil der AX200 haengt am USB (8087:0029, Klasse
-E0/01/01). Der Treiber richtet Interrupt-IN (HCI-Ereignisse, in Stuecken empfangen und zusammengesetzt) und
-Bulk-IN/-OUT (Daten, spaeter) ein; HCI-Befehle gehen als Class-Request ueber Endpunkt 0. `bt` fragt die Intel-Version
-(`0xFC05`): Firmware-Variante 0x06 = Bootloader (nach dem Einschalten), 0x23 = Betriebs-Firmware (schon geladen, z.B.
-nach einem Neustart aus Windows). Im Bootloader dazu die Boot-Parameter (`0xFC0D`: Secure Boot, Mindest-Build,
-BD-Adresse aus dem OTP), im Betrieb `HCI_Read_BD_ADDR` und die Version. Der Name der Firmware ergibt sich aus Variante,
-Revision und Firmware-Revision (`ibt-20-1-3.sfi` bei der AX200); `bt` prueft, ob sie in `/firmware` liegt. `lsusb`
-zeigt den Treiber.
+```sh
+bt                   # Geraet, Firmware-Version
+bt scan [s]          # Firmware laden (falls noetig), Geraete suchen
+bt connect NAME      # koppeln, verbinden, A2DP einrichten
+bt status
+bt disconnect
+```
 
-Stufe 2 (`bt load`): Firmware per Secure Send (`0xFC09` ueber Bulk-OUT; Antworten kommen im Bootloader auch ueber
-Bulk-IN) - CSS-Kopf, Schluessel, Signatur, dann die Befehle der Datei in 4-Byte-ausgerichteten Stuecken; Ergebnis
-als Intel-Ereignis 0x06, Start per Intel Reset (`0xFC01`) mit der Boot-Adresse aus dem Befehl `0xFC0E` der Datei,
-die Firmware meldet sich mit Ereignis 0x02. Stufe 3 (`bt scan [s]`): `HCI_Reset`, DDC-Einstellungen
-(`ibt-20-1-3.ddc`, falls vorhanden), Ereignismaske; Suche klassisch (Inquiry mit RSSI/EIR) und LE (aktiver Scan)
-gleichzeitig, mit Namen, Geraeteklasse bzw. Erscheinungsbild.
+| Stufe | Was passiert |
+|---|---|
+| USB (`btusb.c`) | Geraet 8087:0029: Interrupt-IN fuer HCI-Ereignisse, Bulk fuer Daten, Befehle ueber Endpunkt 0; Intel-Version und Boot-Parameter |
+| Firmware | `ibt-20-1-3.sfi` per Secure Send, Start per Intel Reset; DDC-Einstellungen aus `.ddc` |
+| Suche | klassisch (Inquiry mit RSSI/Namen) und LE gleichzeitig |
+| Verbindung (`btconn.c`) | ACL mit Flusskontrolle, Secure Simple Pairing ("Just Works") bzw. PIN 0000, Verschluesselung, L2CAP, AVDTP-Endpunkte; Schluessel in `bt_keys.cfg` |
+| A2DP (`a2dp.c`, `sbc.c`) | SBC 48 kHz Stereo, Bitpool 53, RTP; der Mischer (`hda.c`) spielt alle Programme ueber Bluetooth statt ueber die Soundkarte; nach 2 s Stille Suspend |
+| AVRCP | Tasten der Soundbar: lauter/leiser/stumm direkt, Play/Pause/Stop/vor/zurueck an `music` (`SYS_BT 10`) |
 
-Stufe 4 (`bt connect ADRESSE|NAME`, `Kernel/drivers/bt/btconn.c`): ACL-Verbindung (mit Flusskontrolle ueber
-Number Of Completed Packets), Koppeln per Secure Simple Pairing ("Just Works") bzw. PIN 0000, Verschluesselung,
-L2CAP-Kanal zu AVDTP (PSM 0x19) und die Audio-Endpunkte der Gegenstelle mit ihren Codecs. Anfragen der Gegenstelle
-beantwortet der Thread `bt`. Schluessel speichert `bt` in `bt_keys.cfg` neben `settings.cfg`. `bt status`,
-`bt disconnect`.
+Der SBC-Encoder rechnet nur mit Ganzzahlen und ist gegen den Decoder von BlueZ (libsbc) geprueft (Selbsttest `sbc`,
+bitgenau gegen den Host).
 
-Stufe 5 (A2DP, `a2dp.c`, `sbc.c`): steht die Verbindung, richtet der Thread `a2dp` den Strom ein - SBC 48 kHz Stereo,
-16 Bloecke, 8 Baender, Loudness, Bitpool bis 53 (Pflicht fuer jede Senke), AVDTP Set Configuration und Open, zweiter
-L2CAP-Kanal fuer die Audiodaten. Ab dann mischt der Ton-Mischer (`hda.c`) alle Stimmen im Takt der Uhr (100 ms voraus)
-in diesen Strom statt auf die Soundkarte - `play`, `music` und die Spiele klingen also aus der Soundbar. Kommt Ton,
-folgt AVDTP Start; der Thread kodiert je 128 Samples zu einem SBC-Frame und schickt 5 Frames je RTP-Paket (bei
-MTU 672); nach 2 s Stille AVDTP Suspend. Die Gesamtlautstaerke wirkt dabei digital. Der SBC-Encoder rechnet nur mit
-Ganzzahlen (Analysefilter mit dem Prototyp der Spezifikation in Q31, Bitzuteilung wie der Decoder sie nachrechnet);
-geprueft auf dem Host gegen den Decoder von BlueZ (libsbc): alle Frames angenommen, Verstaerkung 1,000, Sinus mit
-68 dB Abstand, gleichauf mit dem Encoder von libsbc. Selbsttest `sbc` (bitgenau gegen den Host).
+### Intel-Grafik (Gen9: Skylake bis Comet Lake, z.B. UHD Graphics 630)
 
-Stufe 6 (AVRCP, Fernbedienung): oeffnet die Soundbar den AVRCP-Kanal (PSM 0x17), nimmt der Kernel ihn an und ist
-"Target": Unit/Subunit Info als Panel, Tasten (Pass Through) werden angenommen und ausgefuehrt - lauter, leiser,
-stumm direkt an der Gesamtlautstaerke, Play/Pause/Stop/vor/zurueck ueber eine Warteschlange (`SYS_BT 10`), die
-`music` liest (wirkt also auch, wenn ein anderes Fenster vorne ist; "zurueck" springt wie im Fenster erst an den
-Anfang des Titels). Herstellerbefehle (Titel-Infos, absolute Lautstaerke) beantwortet er mit "nicht implementiert".
+`Kernel/drivers/gpu/igd*.c` setzt auf der Anzeige der UEFI-Firmware auf. Ohne Intel-GPU (QEMU, VMware, andere
+Grafikkarten) bleibt der Framebuffer der Firmware; `noigd` schaltet den Treiber ab.
 
-## Mehrere CPUs (SMP)
+**Anzeige**
 
-Der Kernel startet alle CPUs aus der ACPI-MADT (QEMU: `make run SMP=N`, Standard 4). Threads und Prozesse kommen aus
-einer gemeinsamen Run-Queue und laufen auf jeder CPU. Kernel-Code ist durch einen Big Kernel Lock geschuetzt
-(immer nur eine CPU im Kernel), User-Programme rechnen echt parallel. Details: `Kernel/arch/x86_64/smp.h`.
+- **Hardware-Mauszeiger** als eigene Ebene der Pipe.
+- **Doppelpufferung:** ganze Bilder werden beim Bildwechsel umgeschaltet (kein Tearing).
+- **Moduswechsel im Betrieb** (`igd_mode.c`, `igd_dp.c`): Modi aus der EDID; HDMI bis 300 MHz Pixeltakt, DisplayPort
+  mit der eingemessenen Verbindung (z.B. 3440x1440 mit 100 Hz). `resolution` listet und schaltet
+  (`resolution 2560x1440@60`) und speichert fuer den naechsten Start.
+- **Blitter** (`igd_blt.c`): kopiert Teil-Updates im Hintergrund in den Bildspeicher (`bltmode=N`, `noblt`).
+- **Bildwechsel-Interrupt** (`igd_irq.c`): `gfx_vsync()` laeuft genau im Takt des Monitors (in QEMU 10-ms-Pause).
+- **Anschluss wechseln:** wird der Monitor abgezogen, wechselt das Bild auf einen anderen Anschluss (mit
+  DP-Link-Training); `nohotplug` schaltet das ab.
 
-In der Shell: `burn 5000 & burn 5000 & cpus` zeigt zwei ausgelastete CPUs.
+**Beschleunigung**
+
+- **Render-Engine und EUs** (`igd_rcs.c`): Befehlsprozessor im Ring-Modus, eigene Programme auf den Recheneinheiten
+  (eigener kleiner Assembler fuer die EU-Maschinensprache).
+- **3D-Pipeline:** Vertex- und Pixel-Shader, Tiefenpuffer (D32_FLOAT, Y-Kacheln), Texturen mit Sampler (naechster
+  Texel oder bilinear), Rueckseiten weglassen, Mischen (`BLEND_STATE`). `igdtest 3d` zeigt einen texturierten,
+  beleuchteten Wuerfel.
+- **OpenGL fuer Programme** (`Userland/lib/gl.c`, `gl.h`, Demo `gldemo`): `glBegin`/`glEnd`, Matrix-Stapel,
+  `gluPerspective`/`glFrustum`/`glOrtho`, Texturen, Licht (`GL_LIGHT0`), Tiefentest, `GL_CULL_FACE`, `GL_BLEND`,
+  Puffer und Vertex-Arrays (OpenGL 1.5: `glBufferData`, `glDrawArrays`, `glDrawElements`). Die GPU zeichnet direkt in
+  das Fensterbild; `gl.c` schneidet Dreiecke an naher/ferner Ebene und am Bildrand ab. Ohne Intel-GPU rechnet `gl.c`
+  dasselbe mit der CPU (ein Thread je CPU; `gldemo -cpu` zum Vergleich). Selbsttest `gltest` (28 Pruefungen).
+- **Desktop auf der GPU** (`igd_comp.c`, Desktop `gpu.c`): Hintergrund, Fenster, Schatten, runde Ecken und Animationen
+  setzt die GPU zusammen; Taskleiste und Menues zeichnet die CPU als eigene Ebene. Beim Start prueft ein Selbsttest die
+  GPU gegen die CPU, sonst setzt die CPU zusammen. Auf dem Test-PC etwa doppelt so schnell wie mit der CPU.
+  `gpucomp=off` / `gpucomp=soft` (dieselben Auftraege rechnet die CPU - zum Testen in QEMU).
+
+**Testen** (nur auf echter Hardware): `igdtest` (Page-Flipping), `igdtest cursor|blit|info|edid|scale|mode|dp|dpmode|
+output|vblank|render|gpgpu|3d|comp`; Messwerte stehen in `dmesg`.
+
+### Ton (Intel High Definition Audio)
+
+- **Treiber** (`Kernel/drivers/sound/hda.c`): HDA-Controller (PCI 04.03), Codecs ueber CORB/RIRB; Wege von jedem
+  analogen Ausgang (Kopfhoerer, Line-Out, Lautsprecher) zu einem DAC; Auto-Mute, wenn an einer Buchse etwas steckt.
+- **Mischer:** bis zu 8 Programme gleichzeitig, jedes mit eigener Stimme (auf 48 kHz umgerechnet); ein Thread haelt
+  den DMA-Ring etwa 60 ms voraus gefuellt, ohne Ton schlaeft er. Ausgabe waehlbar (`SYS_AUDIO` 7-9), auch Bluetooth.
+- **Programme:** `#include "sound.h"`, `snd_open()`, `snd_tone(hz, ms, lautstaerke)` (Tetris, Snake); beliebige
+  16-Bit-Daten ueber `SYS_AUDIO`. MP3 dekodiert [minimp3](https://github.com/lieff/minimp3) (CC0).
+- **In QEMU:** `make run SOUND=pa` (hoerbar) oder `SOUND=wav` (Aufnahme in `Build/sound.wav`).
+
+### USB und Datentraeger
+
+- **USB** (`Kernel/drivers/usb`): xHCI mit Hubs, Tastatur und Maus (HID), Massenspeicher (Bulk-Only), Bluetooth.
+  Transfers warten mit MSI schlafend - ein lesender Stick haelt Maus, Tastatur und Ton nicht an.
+- **Platten** (`Kernel/drivers/block`): NVMe, AHCI, virtio-blk, Partitionen MBR und GPT.
+- **Dateisysteme** (`Kernel/fs`): FAT12/16/32 mit langen Namen (VFAT) und exFAT, lesen und schreiben; `fsro` bindet
+  fremde Volumes nur lesbar ein. Die initrd (tar) ist nur lesbar und enthaelt `/bin`, `/etc`, `/share`, `/firmware`.
+
+---
+
+## Kernel im Detail
+
+### Mehrere CPUs (SMP)
+
+Der Kernel startet alle CPUs aus der ACPI-MADT. Threads und Prozesse kommen aus einer gemeinsamen Run-Queue und
+laufen auf jeder CPU. Kernel-Code ist durch einen Big Kernel Lock geschuetzt (immer nur eine CPU im Kernel), einige
+Syscalls (`brk`, `mmap` mit einem Thread, Futex, ...) laufen ohne ihn; User-Programme rechnen echt parallel. Details:
+`Kernel/arch/x86_64/smp.h`. Probieren: `burn 5000 & burn 5000 & cpus` oder der Task-Manager.
+
+Jeder Timer-Tick (10 ms) zaehlt fuer die CPU (Benutzer, Kernel, Leerlauf) und fuer den Prozess des laufenden Threads
+(`tick_sink`); daraus rechnen `cpus`, `ps` und der Task-Manager die Auslastung.
 
 ### Threads in Programmen
 
-Ein Programm kann bis zu 1024 Threads haben (`Userland/include/thread.h`). Sie teilen Speicher, Datei-Deskriptoren und
-Arbeitsverzeichnis und rechnen auf mehreren CPUs gleichzeitig:
+Ein Programm kann bis zu 1024 Threads haben (`Userland/include/thread.h`). Sie teilen Speicher, Deskriptoren und
+Arbeitsverzeichnis:
 
 ```c
 #include "thread.h"
@@ -157,420 +385,67 @@ void *ergebnis;
 thread_join(t, &ergebnis);               // wartet aufs Ende und gibt den Stack frei
 ```
 
-- **Sperren** (`Mutex`) warten ueber einen Futex (`SYS_FUTEX_WAIT/WAKE`): wer nicht drankommt, schlaeft. `malloc`/`free`
-  sperren, sobald ein zweiter Thread laeuft.
-- **Ende:** `sys_exit` (auch das Ende von `_start`), ein Absturz oder Strg+C/`kill` beenden alle Threads; die anderen
-  beim naechsten Eintritt in den Kernel, wartende werden geweckt. `thread_exit` beendet nur den eigenen Thread, mit dem
-  letzten endet das Programm (Code 0).
-- **fork** uebernimmt nur den aufrufenden Thread, **exec** geht nur mit einem Thread (sonst `ERR_AGAIN`).
-- **Kernel:** Nummer 0..1023 je Prozess (`process.c`), der letzte Thread raeumt den Prozess ab. `brk`/`mmap`/`munmap`
-  laufen bei mehreren Threads mit BKL. Ausgeblendete Seiten werden erst frei, wenn jede CPU, auf der gerade ein
-  anderer Thread des Programms lief, ihren TLB geleert hat (IPI `VECTOR_TLB`, ohne darauf zu warten). Ein blockierendes
-  `read` haelt sein Dateiobjekt fest, auch wenn ein anderer Thread den Deskriptor schliesst.
+- **Sperren** (`Mutex`) warten ueber einen Futex: wer nicht drankommt, schlaeft. `malloc`/`free` sperren, sobald ein
+  zweiter Thread laeuft.
+- **Ende:** `sys_exit`, ein Absturz oder Strg+C/`kill` beenden alle Threads; `thread_exit` nur den eigenen.
+- **fork** uebernimmt nur den aufrufenden Thread, **exec** geht nur mit einem Thread.
+- Ausgeblendete Seiten werden erst frei, wenn jede betroffene CPU ihren TLB geleert hat (IPI).
+- Genutzt von `gl.c` (CPU-Rasterer mit einem Thread je CPU) und `files` (Kopieren im Hintergrund). Selbsttest
+  `threadtest` (22 Pruefungen).
 
-`ps` zeigt die Threads je Prozess (Spalte THR). Der Selbsttest `threadtest` prueft das alles (22 Pruefungen).
+### Speicher
 
-Threads nutzen: `gl.c` (die CPU zeichnet mit einem Thread je CPU, hoechstens 4, jeder nimmt jede n-te Bildzeile -
-`gldemo -cpu` in QEMU etwa 2,7-mal schneller) und `files` (Kopieren und Verschieben laufen im Hintergrund, die
-Fusszeile zeigt den Fortschritt, Esc bricht ab).
+- **fork mit Copy-on-Write:** das Kind bekommt dieselben Frames, beschreibbare Seiten werden schreibgeschuetzt
+  (`PAGE_COW`); erst wer schreibt, bekommt eine Kopie. `fork` + `exec` kopiert so gar nichts (bei 32 MiB etwa 7 ms
+  statt 780 ms ohne KVM). Selbsttest `cowtest`.
+- **Dateien einblenden:** `sys_mmap_file(fd, laenge, offset, schreibbar)`; gelesen wird erst beim Zugriff
+  (Seitenfehler, bis 64 KiB am Stueck), privat wie `MAP_PRIVATE`. Genutzt von `play`, `music`, den Schriften und
+  `bmp_load`. Selbsttest `mmaptest`.
+
+  ```c
+  int fd = sys_open("/disk/musik.wav", O_RDONLY);
+  const unsigned char *d = (const unsigned char *)sys_mmap_file(fd, groesse, 0, 0);
+  sys_close(fd);                 // die Einblendung bleibt
+  ... d[i] ...                   // liest beim ersten Zugriff die passenden 4 KiB
+  sys_munmap((void *)d, groesse);
+  ```
+- **Geteilter Speicher** (`SYS_SHM`): eigenes PTE-Bit, damit `fork` ihn nicht kopiert und er nicht doppelt
+  freigegeben wird (Selbsttest `shmtest`).
+- **Stack** waechst bei Bedarf bis 8 MiB.
+- **Gleitkomma:** Programme duerfen `float`/`double` und SSE nutzen; der Kernel selbst nicht. Beim Threadwechsel
+  sichert er die Register (`fxsave`/`fxrstor`). Selbsttest `fputest`.
 
 ### Grenzen
 
-Die Tabellen fuer Prozesse, Deskriptoren, Threads und Einblendungen wachsen bei Bedarf (`process.c`); feste Grenzen
-gibt es nur noch gegen Ausreisser - ein Programm, das endlos Dateien oeffnet, soll nicht den Kernel-Heap belegen:
+Die Tabellen wachsen bei Bedarf; feste Grenzen gibt es nur gegen Ausreisser (Selbsttest `limittest`, 25 Pruefungen):
 
-| | frueher | jetzt |
-|---|---|---|
-| Prozesse gleichzeitig | 64 | 4096 |
-| offene Deskriptoren je Prozess | 32 | 1024 (wie `ulimit -n` unter Linux) |
-| Threads je Prozess | 16 | 1024 |
-| Datei-Einblendungen / geteilter Speicher je Prozess | 32 / 80 | 1024 / 1024 |
-| geteilte Speicherobjekte im System | 192 | 4096 |
-| Stack | 64 KiB | waechst bei Bedarf bis 8 MiB (Seitenfehler) |
-| Kommandozeile | 16 Woerter, 512 Byte | 256 Woerter, 4 KiB (Shell: Eingabezeile 2048 Zeichen) |
-| Pipe in der Shell / Hintergrund-Jobs | 16 / 8 | 64 / 64 |
-| Kernel-Threads im System | 4096 | 65536 |
-| Pfadlaenge | 127 Zeichen (laengere still gekuerzt) | 1023 Zeichen, laengere: `ERR_NAMETOOLONG` |
-| Pfad im Fensterprotokoll (`WP_OPEN`, z.B. Doppelklick in den Dateien) | 255 Zeichen | 1023 Zeichen |
-| Zwischenablage | 16 KiB (still gekuerzt) | 4 MiB (groesser: `ERR_NOMEM`) |
-| benannte Dienste / wartende Verbindungen je Dienst / Name | 8 / 8 / 15 Zeichen | 256 / 256 / 63 Zeichen |
-| Fenster im Desktop / gerade startende Programme | 16 / 8 | 128 / 32 (Taskleiste: so viele minimierte, wie passen; Fenstermenue: die 30 obersten) |
-| GPU-Flaechen zum Zusammensetzen | 96 | 640 (passen sie nicht in den GGTT-Bereich, setzt die CPU zusammen) |
+| | Grenze |
+|---|---|
+| Prozesse gleichzeitig | 4096 |
+| offene Deskriptoren je Prozess | 1024 |
+| Threads je Prozess | 1024 |
+| Datei-Einblendungen / geteilter Speicher je Prozess | 1024 / 1024 |
+| geteilte Speicherobjekte im System | 4096 |
+| Kernel-Threads im System | 65536 |
+| Stack | waechst bis 8 MiB |
+| Kommandozeile | 256 Woerter, 4 KiB (Shell-Eingabezeile 2048 Zeichen) |
+| Pipe in der Shell / Hintergrund-Jobs | 64 / 64 |
+| Pfadlaenge | 1023 Zeichen (laenger: `ERR_NAMETOOLONG`; initrd 256) |
+| Zwischenablage | 4 MiB |
+| benannte Dienste / wartende Verbindungen / Name | 256 / 256 / 63 Zeichen |
+| Fenster im Desktop / gerade startende Programme | 128 / 32 |
+| GPU-Flaechen zum Zusammensetzen | 640 |
 
 Prozess-Eintraege und Thread-Bloecke werden nie freigegeben, sondern wiederverwendet: so koennen Interrupts (Strg+C)
-die Listen ohne BKL durchgehen. Pfade: `VFS_PATH_MAX` (Kernel) und `PATH_MAX` (Userland, `user.h`) sind 1024; die
-initrd speichert ihre Knoten weiter mit 256 Zeichen (mehr kann tar nicht). Frueher liess `vfs_normalize` zu lange
-Teile stillschweigend weg - ein zu langer Pfad konnte so auf eine andere Datei zeigen. Selbsttest: `limittest`
-(25 Pruefungen, u.a. genau 1024 offene Dateien und Threads, 100 Prozesse gleichzeitig, 4 MiB Stack, ein Pfad mit gut
-1000 Zeichen auf FAT, 1023 Zeichen erlaubt, 1024 abgelehnt, 1 MiB Zwischenablage, 20 Dienste mit 40 wartenden
-Verbindungen).
+die Listen ohne BKL durchgehen.
 
-### fork mit Copy-on-Write
+---
 
-`fork` kopiert die Seiten nicht mehr, sondern blendet dieselben Frames im Kind ein und macht beschreibbare Seiten in
-beiden Prozessen schreibgeschuetzt (PTE-Bit `PAGE_COW`, `paging.c: as_clone_cow`). Erst wer schreibt, bekommt im
-Seitenfehler eine eigene Kopie; hat sonst niemand mehr den Frame, wird die Seite einfach wieder beschreibbar. Der PMM
-zaehlt dafuer die Benutzer je Frame (`pmm_ref`, ein Byte je Frame); `pmm_free_frame` gibt erst mit dem letzten frei.
-Schreibt der Kernel in einen User-Puffer, loest schon `process_user_range_ok` die Seite auf.
+## Fehlersuche und Tests
 
-Der haeufigste Fall, `fork` und gleich `exec` (die Shell bei jedem Befehl), kopiert so gar nichts mehr: in QEMU ohne
-KVM dauert `fork` bei 32 MiB belegtem Speicher etwa 7 ms statt 780 ms. Prozesse mit mehreren Threads kopieren weiter
-sofort, und vor dem zweiten Thread werden alle geteilten Seiten aufgeloest - sonst muessten bei jedem Aufloesen erst die
-anderen CPUs ihren TLB leeren. Selbsttest: `cowtest` (11 Pruefungen).
-
-### Dateien einblenden (mmap auf Dateien)
-
-`sys_mmap_file(fd, laenge, offset, schreibbar)` blendet eine Datei in den Speicher ein: das Programm greift einfach
-ueber einen Zeiger darauf zu, gelesen wird erst, wenn es eine Seite anfasst (Seitenfehler, `process.c: vma_fault`;
-jeder Fehler laedt bis zu 64 KiB am Stueck, soweit die Seiten noch fehlen).
-So geht das Einblenden auch bei grossen Dateien sofort, und Teile, die nie gebraucht werden, werden nie gelesen:
-
-```c
-int fd = sys_open("/disk/musik.wav", O_RDONLY);
-const unsigned char *d = (const unsigned char *)sys_mmap_file(fd, groesse, 0, 0);
-sys_close(fd);                 // die Einblendung bleibt
-... d[i] ...                   // liest beim ersten Zugriff die passenden 4 KiB
-sys_munmap((void *)d, groesse);
-```
-
-- **Privat:** mit `schreibbar` darf das Programm hineinschreiben, die Datei bleibt unveraendert (wie `MAP_PRIVATE`).
-  Nur lesbare Einblendungen beenden das Programm beim Schreiben. Hinter dem Dateiende stehen Nullen.
-- Genutzt von `play` und `music` (MP3: der Decoder liest direkt aus der Datei, ohne Puffer und Umkopieren; `play`
-  gibt Gespieltes wieder frei), den Schriften (`ttf.c`: nur gebrauchte Tabellen und Zeichen kommen in den Speicher)
-  und `bmp_load` (`view`, `paint`).
-- Bis zu 1024 Einblendungen je Prozess; jede hat ihre eigene Dateiposition (der Deskriptor darf geschlossen werden).
-  `munmap` nimmt auch Teile heraus, `fork` vererbt sie (das Kind laedt fehlende Seiten selbst), `exec` und das
-  Programmende raeumen auf. Liest der Kernel aus einer Einblendung (z.B. `write` aus ihr), laedt
-  `process_user_range_ok` die Seiten vorher.
-- In QEMU ohne KVM: einblenden und der erste Zugriff etwa 3 ms, dieselbe Datei (2 MiB) ganz lesen etwa 15 ms.
-  Selbsttest: `mmaptest` (23 Pruefungen).
-
-## Intel-Grafik (Gen9: Skylake bis Comet Lake, z.B. UHD Graphics 630)
-
-`Kernel/drivers/gpu/igd.c` setzt auf der Anzeige auf, die die UEFI-Firmware eingerichtet hat, und ergaenzt:
-
-- **Hardware-Mauszeiger:** eigene Ebene der Pipe; Konsole und Grafikprogramme verschieben ihn nur noch
-- **Doppelpufferung:** ganze Bilder von Grafikprogrammen (`gfx_present_all`) kommen in einen verdeckten Puffer und
-  werden beim Bildwechsel umgeschaltet (kein Tearing). Der Puffer liegt im RAM und wird mit Non-Temporal-Stores
-  beschrieben (am CPU-Cache vorbei, den die Display-Engine nicht sieht); bei 3440x1440 ca. 4 ms je Bild
-- **Moduswechsel im Betrieb** (`igd_mode.c`, `igd_dp.c`): die Modi aus den Monitordaten (EDID), die ueber den
-  Anschluss gehen und in den Framebuffer der Firmware passen. HDMI: hoechstens 300 MHz Pixeltakt (Gen9), Pipe und
-  Port werden mit neu berechnetem DPLL neu gestartet. DisplayPort: die von der Firmware eingemessene Verbindung
-  bleibt (z.B. 4 Lanes x 5,4 GBit/s), neu gesetzt werden Zeitablauf, M/N und Watermarks; so gehen z.B.
-  3440x1440 mit 100 Hz. `resolution` listet sie mit
-  Bildrate und schaltet sofort um (`resolution 2560x1440@60`), die Konsole passt sich an. Fuer den naechsten Start
-  speichert es `igdmode=2560x1440@60` und `mode=max` (der Framebuffer der Firmware muss gross genug sein)
-- **Blitter fuer die Bild-Updates** (`igd_blt.c`): die Blitter-Engine kopiert die Teil-Updates der Grafikprogramme
-  (z.B. des Desktops) im Hintergrund in den Bildspeicher, statt der CPU; das Programmbild wird dafuer in die GGTT
-  eingeblendet (nur wenn es sich aendert). Ganze Bilder kopiert die CPU (sie ist dabei schneller). Entscheidend ist die
-  Cache-Steuerung der Engine (MOCS): mit den Werten der Firmware blieben Schreibzugriffe im Cache haengen (Striche mit
-  altem Inhalt), mit "uncached" kommen sie gleich im RAM an, aus dem die Anzeige liest. `igdtest bltmode N` schaltet
-  im Betrieb um (0 aus, 1-4 Varianten mit Strichen, 5 Standard, 6 wie 5 mit Zurueckschreiben aus dem CPU-Cache);
-  `bltmode=N` bzw. `noblt` in der Kommandozeile. Bei jedem Umschalten prueft ein Selbsttest, ob die GPU die frisch
-  geschriebenen Daten der CPU sieht
-- **Render-Engine** (`igd_rcs.c`, erster Schritt Richtung 3D-Beschleunigung, nur auf Befehl): `igdtest render`
-  startet den Befehlsprozessor der Render-Engine im Ring-Modus und prueft Leerauftrag, `PIPE_CONTROL` (Schreiben nach
-  getaner Arbeit), Batch-Buffer und den Zeitstempel der GPU (1000 Befehle). Haengt sie, wird sie zurueckgesetzt.
-  `igdtest gpgpu` laesst das erste Programm auf den Recheneinheiten (EUs) laufen: GPGPU-Pipeline (wie der Fuelltest von
-  IGT), Kernel in EU-Maschinensprache (eigener kleiner Assembler) fuellen, kopieren und mischen Flaechen (gegen die
-  CPU geprueft, an der Konsole zusaetzlich ein halbtransparentes Farbfeld). Ring, Status- und Befehlsseiten bleiben
-  nach dem ersten Test fest in der GGTT; vor jedem Test wird die Engine zurueckgesetzt und vor jedem Auftrag verwirft
-  ein `PIPE_CONTROL` TLB und Caches - so laufen die Tests beliebig oft hintereinander
-- **3D-Pipeline** (`igd_rcs.c`, `igdtest 3d`, Stufe 7): erstes Rechteck ueber die 3D-Pipeline, aufgebaut wie IGTs
-  rendercopy fuer Gen9 - Vertex-Buffer mit drei Eckpunkten (RECTLIST in Bildschirmkoordinaten), Vertex-Shader aus,
-  Clipper durchlassen, Rasterizer ohne Culling, Pixel-Shader (SIMD16, eigener Assembler), der eine feste Farbe per
-  Render-Target-Write schreibt. Die CPU prueft die Testflaeche, die Pipeline-Statistik (Eckpunkte, Clipper,
-  Pixel-Shader) zeigt, wie weit die GPU kam. Danach ein Dreieck, dessen Pixel-Shader die Farbe der Ecken interpoliert
-  (`pln`); die CPU prueft Flaeche, Mitte und Ecken (Eckpunkte von der CPU umgerechnet: Festkomma, Sinus aus einer
-  Tabelle, in float-Bitmuster umgerechnet - der Kernel hat keine FPU). Danach dasselbe Dreieck durch einen
-  Vertex-Shader (SIMD8, Ausgabe per URB-Write), der nur durchreicht. Die VS-Threads hingen lange: der Assembler
-  setzte "NoMask" noch an die Stelle von Gen7 (Bit 9), ab Gen8 ist das "NoDDClr" - der Befehl gibt sein Zielregister
-  nie frei, der folgende `send` wartet ewig (NoMask ist ab Gen8 Bit 34).
-  Zuletzt ein Wuerfel mit Tiefentest: Tiefenpuffer D32_FLOAT (Y-Kacheln, von der CPU mit 1.0 gefuellt), Test
-  "kleiner" mit Schreiben; die CPU dreht die 8 Ecken um zwei Achsen, rechnet die Perspektive und als Tiefe eine
-  Funktion von 1/z (auf dem Bildschirm linear). Die vorderste Seite wird absichtlich zuerst gezeichnet - in der Mitte
-  muss trotzdem ihre Farbe stehen, und der Tiefenwert dort (aus dem gekachelten Puffer gelesen) kleiner als 1.0
-  sein. Derselbe Wuerfel kommt dann noch einmal ganz auf der GPU: im Vertex-Buffer stehen nur
-  Ecken, Grundfarben und Normalen in Objektkoordinaten, der Shader rechnet Ecke mal 4x4-Matrix (W = Abstand, durch W
-  teilt die Hardware) und die Helligkeit aus der gedrehten Normale (`saturate`); die CPU rechnet je Bild nur die
-  Matrix. Texturen: Surface State (Binding-Table-Eintrag 1) und SAMPLER_STATE (naechster Texel oder bilinear,
-  Wiederholen); der Pixel-Shader interpoliert u, v (`pln`) und liest per Sampler-Nachricht `sample` (SIMD16, wie
-  IGT), auf Wunsch mal einer zweiten interpolierten Farbe. Geprueft: ein Pruefmuster 64 x 64 muss mit naechstem Texel
-  Pixel fuer Pixel stimmen und, um einen halben Texel verschoben, bilinear den Mittelwert von 2 x 2 Texeln ergeben.
-  An der Konsole dreht sich danach ein texturierter, beleuchteter Wuerfel (512 x 512 in der Mitte, 240 Bilder,
-  direkt nach dem Bildwechsel gezeichnet)
-- **3D fuer Programme** (`SYS_GPUCOMP 8`, Bibliothek `Userland/lib/gl.c` mit `gl.h`, Demo `gldemo`): ein kleines
-  OpenGL im Stil von 1.x - `glBegin`/`glEnd` (Dreiecke, Streifen, Faecher, Vierecke), Matrix-Stapel mit
-  `glTranslatef`/`glRotatef`/`glScalef`/`gluPerspective`/`glFrustum`/`glOrtho`, Texturen (`glTexImage2D`, naechster
-  Texel oder bilinear), ein Richtungslicht (`GL_LIGHTING`, `GL_LIGHT0`), Tiefentest, `glClear`. Die GPU zeichnet
-  direkt in das geteilte Fensterbild (beim Desktop als Flaeche angemeldet, Breite Vielfaches von 16), der Desktop
-  setzt es wie jedes Fenster zusammen - nichts wird umkopiert. Die Bibliothek sammelt Dreiecke mit gleichem Zustand
-  (bis 1365 Eckpunkte) und gibt sie als einen Auftrag ab: der Kernel loescht auf Wunsch Farbe und Tiefe (Rechteck
-  mit Tiefentest "immer"), laedt Matrix und Licht als Immediates in den Vertex-Shader und zeichnet mit Textur mal
-  Farbe; Tiefenpuffer ist ein weiterer geteilter Speicher (D32_FLOAT, Y-Kacheln). Die Render-Engine teilt er sich mit
-  dem Zusammensetzen (vorher dessen Auftrag abwarten; jeder Batch waehlt seine Pipeline und setzt den ganzen Zustand).
-  Ohne Intel-GPU (QEMU, `gpucomp=soft`, ausserhalb des Desktops) rechnet `gl.c` dasselbe mit der CPU; `gldemo -cpu`
-  erzwingt das zum Vergleich.
-  **Abschneiden:** `gl.c` schneidet jedes Dreieck vor dem Abgeben an der nahen und fernen Ebene und an einem
-  Schutzstreifen von 4096 Pixeln um das Bild ab (Sutherland-Hodgman in Objektkoordinaten: jede Ebene ist eine
-  Linearkombination der Zeilen der fertigen Matrix, die neuen Ecken bekommen alle Werte linear dazwischen); Dreiecke
-  ganz ausserhalb des Bildes fallen gleich weg. So geht auch ein Boden, der hinter der Kamera weiterlaeuft, und man
-  kann in Gegenstaende hineinfahren. Innerhalb des Schutzstreifens rastert die GPU ohne Abschneiden.
-  **Rueckseiten** (`glEnable(GL_CULL_FACE)`, `glCullFace`, `glFrontFace`): die GPU laesst sie im Rasterizer weg
-  (`3DSTATE_RASTER`, Flags `GPU3D_CULL_BACK`/`_FRONT`, FrontWinding "CCW" - auf echter Hardware geprueft; vorn ist
-  auf dem Bildschirm gegen den Uhrzeigersinn), die CPU nach dem Umrechnen.
-  **Mischen** (`glEnable(GL_BLEND)`, `glBlendFunc` mit allen Faktoren ausser den konstanten, `glDepthMask`): die GPU
-  mischt im Blend-State (`BLEND_STATE` und `3DSTATE_PS_BLEND`, Flag `GPU3D_BLEND`, Faktoren als Codes der Hardware
-  in `Gpu3dDraw.blend`), die CPU im Rasterer. Das Fenster hat keinen Alpha-Kanal: Byte 3 bleibt 255
-  (`GPU3D_KEEP_ALPHA`, der Desktop liest es als Deckung), `GL_DST_ALPHA` ist also immer 1.
-  `gldemo`: Pfeiltasten (oder w/s) fahren die Kamera vor und zurueck, `c` schaltet das Weglassen der Rueckseiten um,
-  `b` den grossen Wuerfel aus Glas (erst die hinteren, dann die vorderen Seiten, ohne Tiefe zu schreiben).
-  **Puffer und Vertex-Arrays** (OpenGL 1.5: `glGenBuffers`, `glBindBuffer`, `glBufferData`/`SubData`, `glMapBuffer`,
-  `glVertexPointer`/`TexCoord`/`Normal`/`ColorPointer`, `glDrawArrays`, `glDrawElements` mit 8-, 16- oder 32-Bit-
-  Indizes): ein Puffer ist geteilter Speicher, fuer die GPU als Flaeche angemeldet (4 KiB je Zeile, bis 64 MiB), und
-  bleibt ueber viele Bilder. `SYS_GPUCOMP 9` (`Gpu3dDrawVB`) schickt nur Zustand, Anfang und Abstand je Attribut: der
-  Kernel stellt `VERTEX_BUFFERS` (je Attribut einer, feste Werte als Puffer mit Zeilenlaenge 0), `VERTEX_ELEMENTS`
-  und `INDEX_BUFFER` ein, die GPU holt Ecken und Indizes selbst (Liste, Streifen, Faecher). Groessen begrenzen das
-  Lesen auf die Flaechen des Programms. Abschneiden macht die GPU dabei nicht: `gl.c` prueft vorher den Kasten um die
-  benutzten Ecken (kleinster/groesster Index und Kasten zwischengespeichert, bis sich der Puffer aendert) - ganz
-  ausserhalb faellt die Zeichnung weg, ganz innerhalb geht sie direkt an die GPU, sonst (und fuer Ecken im
-  Programmspeicher, Vierecke, andere Formate) setzt die Bibliothek die Dreiecke zusammen und schneidet ab.
-  Auf der CPU rechnet `glDrawArrays`/`glDrawElements` jede benutzte Ecke nur einmal um (bei Indizes gehoert sie meist
-  zu mehreren Dreiecken) und merkt sich, ausserhalb welcher Ebenen sie liegt; die Dreiecke entstehen direkt aus den
-  umgerechneten Ecken, nur abzuschneidende gehen ueber `tri_v`. In QEMU: Ringe aus Puffern etwa 25 % schneller als
-  mit `glBegin` (Ecken umrechnen halb so lang).
-  `gldemo`: drei Ringe mit je 2304 Dreiecken aus Puffern, `v` wechselt zum Vergleich auf `glBegin`/`glEnd`.
-  Selbsttest `gltest` (28 Pruefungen mit der CPU, Puffer und Arrays muessen pixelgenau dasselbe Bild ergeben wie
-  `glBegin`/`glEnd`). Noch nicht: Mip-Stufen, Auftraege ohne Warten
-- **Zusammensetzen auf der GPU** (`igd_comp.c`, `SYS_GPUCOMP`; Desktop: `gpu.c`): Bildschirmbild, Hintergrund,
-  Fensterbilder und Schatten liegen in geteiltem Speicher, den der Kernel fest in die GGTT einblendet (eigener Bereich,
-  Referenz auf das shm-Objekt, solange angemeldet). Je Bild schickt der Desktop alle geaenderten Rechtecke als eine
-  Liste von Auftraegen: Hintergrund kopieren, je Fenster Schatten (vier vorberechnete Streifen) und die Zeilen mit den
-  runden Ecken mischen (Deckung in Byte 3 des Fensterbildes), den Rest kopieren. Gemessen auf echter Hardware: die GPU
-  rundet die Basisadresse einer Flaeche auf 32 Byte und die Zeilenlaenge auf 64 Byte ab und schneidet Bloecke am Rand
-  nicht ab. Deshalb sind es immer ganze Flaechen ab ihrem Anfang (Ecke des Rechtecks in den Konstanten des Kernels),
-  nur mit Breiten in Vielfachen von 16 Pixeln (der Desktop rundet Fensterbilder und Schatten auf), und jeder Auftrag
-  wird in Stuecke zerlegt, in denen die Bloecke der Threads genau aufgehen (innen 8 x 8 Pixel, Raender 1 x 8, 8 x 1,
-  1 x 1 - je ein eigener Kernel). Animationen (oeffnen, schliessen, minimieren, maximieren) laufen ebenfalls auf der
-  GPU: zwei weitere Kernel skalieren in zwei Durchgaengen (senkrecht: Zeilen 8 x 1 lesen, als 8 x 8 schreiben;
-  waagerecht: Spalten 1 x 8), Schrittweite 8.8 aus den Konstanten; danach mischt der Mischen-Kernel mit der Deckung der
-  Animation (r1.4, 256 = unveraendert). Die Deckung der runden Ecken steht in Byte 3 des Fensterbildes (sonst 255) und
-  wird mitskaliert; die Schattenstreifen werden nur entlang der Kante gestreckt, ihre Ecken bleiben unveraendert.
-  Taskleiste, Menues, Dialog und Andock-Vorschau liegen in einer eigenen Ebene: die CPU zeichnet sie nur, wenn sie sich
-  aendern, und zwar zweimal (auf Schwarz und auf Weiss) - aus dem Unterschied ergeben sich Deckung und Farbe je Pixel;
-  die GPU mischt die Ebene bei jedem Bild ueber die Fenster - nur in den Zonen, wo gerade etwas liegt (Taskleiste,
-  offenes Menue, Dialogkasten, Andock-Vorschau), und nur dort zeichnet die CPU sie auch. Beim Darueberfahren der
-  Taskleiste werden nur das alte und das neue Feld samt Namen neu gezeichnet; das Abdunkeln beim Dialog macht die GPU
-  mit einer festen halbdurchsichtigen Flaeche (Reihenfolge wie bei der CPU). Am Ende jeder Liste steht "anzeigen" (die GPU kopiert die
-  Rechtecke uncached in den angezeigten Puffer), der Desktop wartet nicht: abgewartet wird erst vor dem naechsten Bild
-  bzw. bevor CPU oder Blitter in den Bildspeicher schreiben oder eine Flaeche abgemeldet wird. Die GPU-Zeit misst der Zeitstempel der Render-Engine. Cache: die Render-Engine hat eigene Eintraege fuer "uncached" und "write-back im
-  LLC" (L3 der GPU fuer beide aus, damit sie keine alten Fensterinhalte sieht). Standard ist "alles im Cache" (auf
-  dem Test-PC 8,2/6,1 GB/s kopieren/mischen gegen 4,7/3,4 uncached, Desktop doppelt so schnell wie mit der CPU) -
-  aber nur, wenn ein zweiter Selbsttest zeigt, dass der Blitter das von der GPU in den Cache geschriebene Bild beim
-  Anzeigen richtig liest (sonst "Quellen im Cache", sonst uncached). Beim Start misst der Kernel alle drei Modi
-  (2048 x 1024); `igdtest comp cache N` (0 uncached, 1 Quellen im Cache, 2 alles) wechselt im Betrieb, vorher laufen
-  die Selbsttests.
-  Taskleiste, Menues und Animationen zeichnet weiter die CPU. Beim Start prueft ein Selbsttest die GPU gegen die CPU
-  (ungerade, ueberlappende Rechtecke: jeder Auftrag allein, dann alle als Liste, sonst einzeln nacheinander; ohne und
-  mit Zurueckschreiben der CPU-Caches); geht nichts davon, setzt die CPU zusammen wie bisher. `igdtest comp` zeigt Zustand und Messwerte (GPU gegen CPU je Mpx),
-  `igdtest comp off/on` schaltet im Betrieb um; Kommandozeile `gpucomp=off` bzw. `gpucomp=soft` (dieselben Auftraege
-  rechnet die CPU im Kernel - zum Testen in QEMU)
-- **Bildwechsel-Interrupt** (`igd_irq.c`): die Pipe meldet jeden Bildwechsel per MSI. Grafikprogramme warten mit
-  `gfx_vsync()` darauf und laufen so genau im Takt des Monitors (Tetris, Snake, Desktop; `anim` zeigt es), die
-  Doppelpufferung wartet darauf statt nachzusehen. Ohne Interrupt (QEMU) ersetzt eine 10-ms-Pause den Takt
-- **Anschluss wechseln im Betrieb:** ein Thread prueft jede Sekunde den aktiven Anschluss. Wird der Monitor
-  abgezogen, legt der Treiber das Bild auf einen anderen angeschlossenen Monitor (DisplayPort bevorzugt) und schaltet
-  diesen Anschluss ganz ohne Firmware ein (Strom, Pegel, DPLL, bei DP Link-Training); wird DP neu eingesteckt, misst
-  er die Verbindung neu ein. `nohotplug` in der Kommandozeile schaltet das ab, `igdtest output [b|c|d]` testet es
-
-`noigd` in der Kommandozeile schaltet alles ab. `igdtest`, `igdtest cursor` und `igdtest blit` pruefen
-Page-Flipping, Mauszeiger und Blitter einzeln und schreiben Messwerte ins Kernel-Log (`dmesg`). `igdtest info`
-zeigt, wie viele Bild-Updates es seit dem Start gab und was sie gekostet haben, und vergleicht die Kopierwege fuer
-ganze Bilder. `igdtest edid`, `igdtest scale` und `igdtest mode` pruefen Monitordaten, Skalierer und
-Moduswechsel (HDMI), `igdtest dp` und `igdtest dpmode` dasselbe per DisplayPort. QEMU emuliert keine Intel-GPU: getestet wird
-auf echter Hardware (bisher i5-8400T, UHD 630, 3440x1440 ueber HDMI).
-
-## Desktop
-
-`desktop` startet die grafische Oberflaeche (hell). Unten sitzt die Taskleiste aus vier freistehenden Segmenten aus
-Milchglas ueber einem berechneten Farbverlauf:
-
-- **Programme:** ein Klick startet bzw. holt das Fenster nach vorn; ein Strich darunter = laeuft, lang und blau = aktives
-  Fenster. Rechts hinter einem Trennstrich die minimierten Fenster
-- **Suche, Start, Fenster:** Start zeigt alle Programme mit Suchfeld (einfach tippen, Treffer am Anfang zuerst, Enter
-  startet, Pfeile waehlen); die Lupe oeffnet dasselbe. Das Fenstermenue listet alle Fenster und die Befehle fuer das
-  aktive (minimieren, zoomen, anordnen, schliessen)
-- **Uhrzeit und Datum:** ein Klick oeffnet die Uhr
-- **System:** Netzwerk (Kabel und WLAN), Bluetooth, Ton und ^ (Ueber MiniKernel, Neu starten, Ausschalten, Zur Konsole)
-- **Ton:** das Mausrad ueber dem Symbol regelt die Lautstaerke; ein Klick oeffnet das Ton-Menue mit Regler (klicken
-  oder ziehen), "Stumm schalten" und der Ausgabe: "Automatisch" (Bluetooth, wenn eine Soundbar bereit ist, sonst die
-  Soundkarte, Lautsprecher aus, wenn an einer Buchse etwas steckt) oder fest ein Ausgang der Soundkarte
-  (Lautsprecher, Kopfhoerer, Line-Out) bzw. Bluetooth (`SYS_AUDIO` 7-9, `hda_output_select`). "aktiv" zeigt, wo der
-  Ton herauskommt, "eingesteckt", an welcher Buchse etwas steckt.
-- **Netzwerk:** ein Knopf fuer Kabel und WLAN. Das Symbol zeigt das Kabel, wenn es mit Adresse verbunden ist (oder es
-  kein WLAN gibt), sonst den WLAN-Faecher. Das Menue hat zwei Abschnitte: Ethernet (mit WLAN daneben nur Zustand,
-  Adresse, Verbindung und "Adresse neu anfragen") und WLAN.
-- **WLAN** (nur mit AX200 und Firmware; `desktop/wlan.c`): das Symbol zeigt die Signalstaerke (blass: verbindet bzw.
-  noch ohne Adresse, durchgestrichen: getrennt). Der Abschnitt nennt Zustand, Netz, IP-Adresse und Signal, darunter die
-  gefundenen Netze (je Name der staerkste AP, mit Signal und Verschluesselung), "WLAN trennen" und "Netze suchen". Ein Klick
-  auf ein offenes Netz verbindet, bei WPA2 fragt das Menue nach dem Passwort (Enter verbindet). Suchen und Verbinden
-  laufen in einem eigenen Thread, die Oberflaeche wartet nie. Das zuletzt verbundene Netz steht in `wlan.cfg` neben
-  `settings.cfg` (Passwort im Klartext, wie bei wpa_supplicant); damit verbindet sich der Desktop beim Start
-- **Bluetooth** (nur mit Bluetooth am USB; `desktop/bluetooth.c`): das Zeichen ist kraeftig, wenn ein Geraet verbunden
-  ist, ein blauer Punkt daneben heisst "spielt Ton". Das Menue nennt Zustand, Geraet und Audio, darunter die
-  klassischen Geraete der letzten Suche (Audio-Geraete zuerst, mit Lautsprecher-Symbol), "Trennen" und "Geraete
-  suchen" (beim ersten Oeffnen sucht es von selbst; dabei wird auch die Firmware geladen). Ein Klick verbindet - danach
-  geht aller Ton an das Geraet (A2DP). Schluessel und das zuletzt verbundene Geraet stehen in `bt_keys.cfg` (auch von
-  `bt connect` geschrieben); damit verbindet sich der Desktop beim Start.
-
-Menues oeffnen sich nach oben ueber ihrem Knopf, Esc schliesst sie. Fenster haben runde Ecken, weiche Schatten und
-eine helle Titelleiste mit dem Titel links und rechts Minimieren, Maximieren/Wiederherstellen, Schliessen (wie bei
-Windows; Ziehen an der Leiste verschiebt, Doppelklick maximiert). Die Leiste zeichnet die Grafikbibliothek im Fenster
-selbst (`gfx.c`), die Programme merken davon nichts: ihr `gfx_screen` beginnt darunter. Programme mit eigener
-Kopfleiste oeffnen ihr Fenster mit `GFX_FRAMELESS` (z.B. Dateien mit seinen Tabs): sie zeichnen die Knoepfe dann selbst
-und bitten den Desktop mit `gfx_window_cmd` ums Verschieben, Minimieren, Maximieren und Schliessen. Ab 1300 Pixel Hoehe
-wird alles um 25 % groesser.
-
-Tastenkuerzel (linke Alt-Taste): Alt+Tab naechstes Fenster (mit Shift zurueck), Alt+W Fenster schliessen, Alt+Q
-Programm beenden, Alt+M minimieren, Alt+N neues Fenster, Alt+F zoomen, Alt+Pfeil links/rechts an die Bildschirmhaelfte
-andocken, Alt+Pfeil hoch/runter maximieren bzw. zurueck. Fenster, die man an den linken/rechten Rand zieht, docken an
-die Haelfte an, am oberen Rand fuellen sie den Bildschirm (mit Vorschau); weggezogen bekommen sie ihre alte Groesse.
-Im Systemmenue: Neu starten und Ausschalten mit Rueckfrage - alle Programme werden gebeten, sich zu beenden; bleibt eins
-offen (z.B. Malen mit ungespeichertem Bild), fragt der Desktop, ob trotzdem.
-Das Netzwerk-Symbol zeigt den Zustand (kraeftig: verbunden, blass: ohne Adresse, durchgestrichen: kein Kabel); ein
-Klick oeffnet Karte, Adresse, Gateway, DNS, Geschwindigkeit und die Datenmengen mit aktueller Rate (jede Sekunde neu)
-sowie "Adresse neu anfragen (DHCP)".
-Alt-Kombinationen kommen als zwei Bytes (`KEY_ALT`/`KEY_ALT_SHIFT`, dann die Taste) und nur bei Grafikprogrammen an
-(`KEY_MOD_ALT` in `Event.key`); die Konsole verwirft sie.
-
-Animationen (nach der Uhr, nicht nach Bildern): Fenster blenden beim Oeffnen und Schliessen weich ein und aus, fliegen
-beim Minimieren an ihren Platz in der Taskleiste und von dort zurueck, Zoomen gleitet auf die neue Groesse.
-
-Einstellungen (`settings`; im Startmenue und im Systemmenue unter "Einstellungen ..."): links die Bereiche, rechts
-Karten mit Schaltern im Stil des Desktops.
-
-- **Anzeige:** Aufloesung aus den Modi des Monitors bzw. der Firmware. Mit Intel-Treiber schaltet der Desktop sofort um
-  (`WP_SETMODE`: er gibt den Bildschirm kurz ab, der Kernel schaltet, er holt ihn in der neuen Groesse wieder und passt
-  Hintergrund, Taskleiste und Fenster an); danach fragt das Programm "beibehalten?" und springt nach 15 s zurueck.
-  Beibehalten speichert wie `resolution` (`igdmode=`, `mode=max` in cmdline.txt). Ohne Intel-Treiber stellt der
-  Bootloader die Aufloesung ein: sie gilt ab dem naechsten Start ("Jetzt neu starten"). Groesse der Oberflaeche
-  (automatisch, 100, 125, 150 %): ab dem naechsten Start des Desktops, weil jedes Programm seine Titelleiste in seiner
-  Groesse selbst zeichnet.
-- **Zeiger:** Groesse 100-250 % mit Vorschau. Gilt sofort fuer den Hardware-Zeiger (der Kernel zeichnet sein Bild neu),
-  den Zeiger der Konsole und den der Grafikbibliothek (`SYS_GFX 5/6`; ohne Hardware-Zeiger zeichnet `gfx.c` jetzt
-  denselben kantengeglaetteten Pfeil wie der Kernel statt der alten Pixel-Grafik).
-- **Taskleiste:** klein, normal, gross (85/100/125 %), Uhr mit Sekunden, Datum unter der Uhrzeit.
-- **Hintergrund:** fuenf Farbthemen (Abendrot, Ozean, Wald, Lavendel, Graphit; `ui_wallpaper_at` in `ui.c`).
-- **Tastatur:** Layout de/us/uk, sofort und dauerhaft (`kbd=` in cmdline.txt).
-- **Info:** Bildschirm, Grafik, Groesse der Oberflaeche und wo die Einstellungen liegen.
-
-Gespeichert wird in `settings.cfg` auf dem Boot-Volume neben cmdline.txt (ohne Boot-Volume auf `/disk`;
-`Userland/lib/settings.c`). Der Desktop liest die Datei beim Start und auf `WP_SETTINGS` hin neu und uebernimmt alles
-ausser der Groesse der Oberflaeche sofort.
-
-Jedes Fenster gehoert einem eigenen Prozess; der Desktop zeichnet nur Rahmen und Taskleiste. Programme:
-`term` (Terminal mit Shell), `settings` (Einstellungen), `files` (Dateien; Doppelklick oeffnet Ordner hier, Bilder in `view`, alles andere im
-Texteditor), `textedit`, `textview` (nur ansehen), `view`, `calc`, `clock`, `about`, `paint`, `snake`, `tetris`,
-`taskmgr`. Ohne Desktop gestartet, laufen sie im Vollbild.
-
-`about` ("Ueber MiniKernel") zeigt wie "Ueber diesen Mac" Prozessor (Name per CPUID), Kerne, Arbeitsspeicher, Grafik,
-Bildschirm, Festplatte, virtuelle Maschine, Build-Datum und Laufzeit (`SYS_SYSINFO`).
-
-`taskmgr` (Task-Manager, Strg+Shift+Esc, Startmenue oder MiniKernel-Menue) im Stil der Aktivitaetsanzeige: Tabelle der
-Prozesse mit % CPU (100 % = ein Kern), CPU-Zeit, Threads und Speicher (eigene Seiten, ohne geteilten Speicher);
-Spaltenkopf sortiert, "Beenden"/Entf beendet nach Rueckfrage. Unten CPU-Last (Benutzer/System) und Arbeitsspeicher, im
-Tab "Leistung" der Verlauf jeder CPU. Die Werte liefert `SYS_PROCINFO` (jeder Timer-Tick eines Threads zaehlt auch beim
-Prozess; der Speicher wird aus den Seitentabellen gezaehlt). `ps` zeigt sie ebenfalls.
-
-`ramtest [MB] [Runden]` prueft den freien Arbeitsspeicher: belegt ihn in 64-MB-Bloecken (128 MB bleiben dem Kernel),
-schreibt sechs Muster (Nullen, Einsen, Schachbrett, laufende Eins, Adresse, Zufall), liest sie zurueck, meldet falsche
-Stellen und misst die Geschwindigkeit. Mehrere gleichzeitig belasten mehrere Kerne.
-
-Dateien (`files [ordner]`): links die Seitenleiste mit Schnellzugriff (Ordner der Platte), den Orten (Platte
-`/disk`, System `/`, angesteckte Datentraeger; aufklappbar) und unten dem belegten Speicher. Rechts Tabs (+, Strg+T,
-Strg+W, Strg+Tab) und rechts die Fensterknoepfe (das Fenster hat keine Titelleiste), darunter Zurueck/Vor/Hoch, die Pfadleiste (jeder Teil anklickbar,
-dazu Aktualisieren) und die Suche (Strg+F; filtert den Ordner, im Schnellzugriff sucht sie auf der ganzen Platte).
-Ohne Ordner beginnt es im Schnellzugriff: grosse Ordner der Platte (mit Zeichen fuer Musik, Bilder, Downloads,
-Dokumente) und die zuletzt geaenderten Dateien. In einem Ordner die Liste mit Name, Geaendert, Groesse (Klick auf die
-Spalte sortiert; Rechtsklick auf freie Flaeche: Neuer Ordner, Neue Textdatei, Einfuegen, Sortieren, Aktualisieren),
-unten der freie Platz.
-Auswahl mit Klick, Strg+Klick, Shift+Klick, Pfeilen (mit Shift) und Strg+A; Strg+C/X/V kopieren, ausschneiden,
-einfuegen (ueber die Zwischenablage, auch zwischen zwei Fenstern), Strg+D duplizieren, Strg+N neuer Ordner, Entf
-loeschen (mit Rueckfrage, Ordner samt Inhalt). Rechtsklick oeffnet ein Kontextmenue (auch "Neue Textdatei"). Ziehen
-auf einen Ordner oder Ort verschiebt, mit Strg kopiert; zwischen Datentraegern wird kopiert und danach geloescht.
-Mausklicks bringen dafuer die gedrueckten Umschalttasten mit (`MouseInfo.kbd_mods`, bei Grafikprogrammen in
-`Event.key`). Auf `/disk` gehen lange Namen (VFAT, auch mit Leerzeichen).
-
-Musik (`music [ordner|datei]`): spielt MP3 und WAV eines Ordners. Oben der laufende Titel (Titel und Interpret aus
-ID3v2/ID3v1, sonst der Dateiname), Fortschritt zum Anklicken/Ziehen, Zurueck/Abspielen/Weiter, Zufall, Wiederholen;
-darunter die Titelliste mit Laengen, unten Ordner wechseln und die Lautstaerke des Programms. Leertaste
-Abspielen/Pause, Pfeil links/rechts 10 s zurueck/vor. Doppelklick auf eine MP3/WAV in Dateien oeffnet sie hier.
-Gespielt wird in Portionen von etwa 0,25 s ueber eine eigene Stimme im Mischer, die Oberflaeche wartet also nie;
-die Pause schickt beim Fortsetzen nach, was im Kernel noch ungespielt lag (keine Luecke). Bei MP3 liest das Programm
-nebenbei alle Frame-Koepfe: daraus die genaue Laenge und eine Sprungtabelle (genaues Springen auch ohne feste
-Bitrate). Die Laenge in der Liste kommt aus dem Xing/Info-Kopf oder der Bitrate.
-
-Texteditor (`textedit [datei]`): Zeilennummern, Markieren mit Maus (Doppelklick Wort, Dreifachklick Zeile) und
-Shift + Pfeil/Pos1/Ende/Bild, Strg + Pfeil wortweise, Strg+A/C/X/V (Zwischenablage des Systems), Strg+Z/Y
-rueckgaengig/wiederholen, Strg+S sichern; Werkzeugleiste mit Neu, Oeffnen, Sichern, Sichern unter. Beim Schliessen
-mit ungesicherten Aenderungen fragt er nach. Gespeichert wird z.B. auf `/disk`, mit langen Namen (`/disk/Meine Notizen.txt`).
-Shift und Strg kommen mit Sondertasten als `KEY_MODS`, Umschalttasten, Taste an (`KEY_MOD_SHIFT`/`KEY_MOD_CTRL` in
-`Event.key`), solange ein Grafikprogramm den Bildschirm hat; Strg+V fuegt dann nicht mehr in die Konsole ein, sondern
-geht an das Programm. Stuerzt ein Programm ab, verschwindet nur sein Fenster. Grafikprogramme lassen sich auch im Terminal
-starten (`snake`, `view bild.bmp`, mit `&` dahinter laeuft das Terminal weiter): sie melden sich beim Desktop und
-bekommen ein Fenster.
-
-- Fensterprotokoll (`Userland/include/winproto.h`): der Desktop startet das Programm mit zwei Pipes (Deskriptor 3
-  und 4, Nachrichten zu 64 Byte: Tasten, Maus, Fokus, Schliessen, Bildtakt bzw. Fenster anlegen, geaenderter
-  Bereich, Titel, Datei oeffnen). Den Inhalt zeichnet das Programm in geteilten Speicher, den der Desktop mitliest.
-  Der Desktop wartet nie auf ein Programm (schreibt nur, wenn die Pipe Platz hat); wer auf den Schliessen-Knopf
-  nicht reagiert, wird beim dritten Klick beendet.
-- Die Grafikbibliothek erledigt das selbst: unter dem Desktop liefert `gfx_open()` ein Fenster statt des
-  Bildschirms, `gfx_open_window_ex(w, h, titel, GFX_RESIZABLE)` waehlt Groesse und Titel, neue Ereignisse sind
-  `EV_CLOSE`, `EV_FOCUS` und `EV_RESIZE`. Gemeinsames Aussehen (Masse, Farben, Programmsymbole): `ui.h`
-- Geteilter Speicher: `SYS_SHM` (anlegen, per Nummer einblenden, ausblenden); die Seiten tragen ein eigenes
-  PTE-Bit, damit `fork` sie nicht kopiert und `munmap`/Programmende sie nicht doppelt freigeben (Test: `shmtest`)
-- Benannte Dienste: `SYS_SERVICE` (anmelden, verbinden, annehmen) - wie ein sehr einfacher Unix-Socket, jede
-  Verbindung bekommt zwei Pipes. Der Desktop meldet sich als "desktop" an; findet ein Grafikprogramm keine
-  Begruessung auf Deskriptor 3, verbindet es sich dort. Endet der Anbieter, verschwindet der Dienst.
-- Schriften: Inter und JetBrains Mono (SIL Open Font License, verkleinert in `/share/fonts`), gerastert mit
-  stb_truetype (gemeinfrei, `Userland/include/stb_truetype.h`); `ttf.h` fuer Programme
-- Zeichnen mit Kantenglaettung und Transparenz (`Userland/lib/draw.c`): abgerundete Rechtecke, Kreise, Linien,
-  Schatten, Verlaeufe, Weichzeichnen
-
-## Ton (Intel High Definition Audio)
-
-`Kernel/drivers/sound/hda.c` sucht einen HDA-Controller (PCI-Klasse 04.03), setzt ihn zurueck und fragt die Codecs
-ueber CORB/RIRB ab. Von jedem analogen Ausgang (Kopfhoerer, Line-Out, Lautsprecher) sucht er einen Weg zu einem DAC,
-schaltet ihn durch und stellt die Verstaerker ein. Steckt an einer Buchse etwas, sind die eingebauten Lautsprecher
-aus (Auto-Mute). Bis zu 8 Programme spielen gleichzeitig: jedes hat eine Stimme, deren Abtastrate der Kernel auf
-48 kHz umrechnet; ein Mischer-Thread addiert die Stimmen und haelt den DMA-Ring der Soundkarte etwa 60 ms voraus
-gefuellt. Ohne Ton ist der Stream aus und der Thread schlaeft.
-
-- Programme: `#include "sound.h"`, `snd_open()`, `snd_tone(hz, ms, lautstaerke)`, `snd_rest(ms)` (Tetris und Snake
-  machen damit ihre Effekte); direkt ueber `SYS_AUDIO` gehen beliebige 16-Bit-Daten
-
-- `play datei.wav` spielt WAV-Dateien: PCM mit 8/16/24/32 Bit oder 32-Bit-Gleitkomma, Mono oder Stereo, jede
-  Abtastrate (kann der Codec sie nicht, rechnet `play` auf 48 kHz um). Beispiel: `play /share/klang.wav`
-- `play lied.mp3` spielt MP3-Dateien (MPEG-1/2/2.5, Layer I-III, mit ID3-Tag), `play -w lied.wav lied.mp3` wandelt
-  sie in WAV um. Dekodiert wird mit [minimp3](https://github.com/lieff/minimp3) (CC0, unveraendert in
-  `Userland/include/minimp3.h`); die ISO-Testdateien ergeben im System bitgenau dieselben Werte wie auf dem Host
-- `play -t [Hz]` spielt einen Testton (links, rechts, beide), `play -v 0-100` setzt die Lautstaerke
-- In QEMU: `make run SOUND=pa` (hoerbar) oder `SOUND=wav` (Aufnahme in `Build/sound.wav`)
-
-## Gleitkomma in Programmen
-
-Programme duerfen mit `float`/`double` und SSE rechnen (das Userland wird ohne `-mno-sse` uebersetzt). Der Kernel
-selbst nutzt FPU/SSE nicht; beim Threadwechsel sichert er die Register des alten Threads (`fxsave`) und laedt die des
-neuen (`fxrstor`), `fork` gibt sie ans Kind weiter, `exec` setzt sie zurueck. Selbsttest: acht `fputest` rechnen
-gleichzeitig (mehr Programme als CPUs) und muessen dasselbe Ergebnis erhalten wie ohne Unterbrechung.
-
-## Fehlersuche
-
-- **Selbsttests:** `make test` (alle Gruppen) oder `make test TESTS=disk,user`; jede Gruppe laeuft auch einzeln.
-  Nach jeder Gruppe wird der Kernel-Heap geprueft.
-- **Backtraces:** Eine Exception im Kernel gibt die Aufrufkette mit Funktionsnamen aus (Framepointer-Kette,
-  Symboltabelle aus `tools/mksyms.py`), z.B.
+- **Selbsttests:** `make test` (alle Gruppen, derzeit 288 Pruefungen) oder `make test TESTS=disk,user`; nach jeder
+  Gruppe wird der Kernel-Heap geprueft. `make test DISK=usb` testet zusaetzlich USB-Massenspeicher.
+- **Backtraces:** eine Exception im Kernel gibt die Aufrufkette mit Funktionsnamen aus:
   ```
   *** EXCEPTION 14: Page Fault ***
     Aufrufkette:
@@ -579,19 +454,17 @@ gleichzeitig (mehr Programme als CPUs) und muessen dasselbe Ergebnis erhalten wi
       0x12bf17 kmain+0x257
   ```
   Ist der Heap beschaedigt, nennt `heap_check` die Funktion, die den Block davor angelegt hat.
-- **gdb:** `make debug` startet QEMU angehalten mit gdb-Server (ohne KVM), `make gdb` im zweiten Terminal verbindet
-  sich, laedt die Symbole aus `Build/kernel.debug.elf` und setzt einen Breakpoint auf `kmain` (`tools/gdbinit`).
-  Braucht `sudo apt install gdb`.
-- **Adressen von Hand:** `addr2line -f -e Build/kernel.debug.elf 0x10427d`
-- **Haenger finden:** stockt das System (Mauszeiger, Ton), stehen die Gruende im Log -
-  `dmesg | grep -e wartete -e stockte -e dauerte -e Rueckstand`:
-  `smp: CPU n wartete X ms auf den BKL - gehalten von Thread '...'` (wer den Kernel so lange belegte),
-  `usb: vvvv:pppp Bulk/Control ... dauerte X ms`, `sched: System stockte etwa X ms` (Thread "wachhund"),
-  `hda: Bluetooth-Mischer ... im Rueckstand`. USB-Transfers warten mit MSI schlafend (Controller-Sperre und BKL
-  frei), damit z.B. ein lesender USB-Stick Maus, Tastatur und Bluetooth nicht anhaelt.
-- **Kernel-Log auf echter Hardware:** `dmesg` zeigt alle Kernel-Meldungen seit dem Start (letzte 256 KiB);
-  `dmesg > /disk/log.txt` speichert sie. `/disk` ist das FAT32-Volume mit dem Label `MINIKERNEL` (nur dieses
-  beschreibt der Kernel), z.B. ein USB-Stick, der unter Windows so benannt wurde.
+- **gdb:** `make debug` startet QEMU angehalten mit gdb-Server, `make gdb` im zweiten Terminal verbindet sich (Symbole
+  aus `Build/kernel.debug.elf`, Breakpoint auf `kmain`). Adressen von Hand: `addr2line -f -e Build/kernel.debug.elf 0x...`.
+- **Haenger finden:** stockt das System (Mauszeiger, Ton), stehen die Gruende im Log:
+  `dmesg | grep -e wartete -e stockte -e dauerte -e Rueckstand`
+  - `smp: CPU n wartete X ms auf den BKL - gehalten von Thread '...'`
+  - `usb: vvvv:pppp Bulk/Control ... dauerte X ms`
+  - `sched: System stockte etwa X ms` (Thread "wachhund")
+  - `hda: Bluetooth-Mischer ... im Rueckstand`
+- **Auf echter Hardware:** `dmesg > /disk/log.txt`, Arbeitsspeicher mit `ramtest`, Auslastung im Task-Manager.
+
+---
 
 ## Kernel-Kommandozeile
 
@@ -609,65 +482,99 @@ Der Bootloader liest `\cmdline.txt` von der EFI-Systempartition (bei QEMU aus `C
 | `ip=192.168.1.50/24,192.168.1.1[,dns]` | feste Adresse fuer eth0 statt DHCP; `nodhcp`, `nonet`, `nontp` schalten ab |
 | `fsro` | fremde Volumes nur lesbar einbinden |
 | `nosmp`, `cpus=N` | nur die Boot-CPU bzw. hoechstens N CPUs benutzen |
+| `noigd`, `nohotplug`, `noblt`, `bltmode=N`, `gpucomp=off\|soft` | Intel-Grafik abschalten bzw. einzelne Teile |
 | `selftest`, `selftest=gruppe,...`, `keep` | Selbsttests (siehe `Kernel/tests/selftest.c`) |
 
-Im laufenden System schreibt `resolution` Grafikmodus und Schriftgroesse in die `cmdline.txt` der Boot-Partition.
+**Startbild:** ohne `verbose` zeigt der Bootloader das Logo der Firmware (ACPI-Tabelle BGRT, wie Windows und Linux),
+der Kernel darunter einen Ladebalken wie bei macOS (`Kernel/console/splash.c`). Das Bild bleibt, bis das erste
+Programm etwas zeigt - so geht es direkt in den Desktop ueber. Meldungen des Kernels kommen danach nur noch seriell und
+in `dmesg` (wie `quiet` bei Linux); bei einer Exception und nach 60 s ohne Programm erscheinen alle.
 
-**Startbild:** ohne `verbose` loescht der Bootloader den Bildschirm nicht und gibt nichts aus; er kopiert das
-Startlogo der Firmware (ACPI-Tabelle BGRT, wie Windows und Linux) in eigenen Speicher (`BootInfo.logo`), zeichnet den
-Bildschirm schwarz mit dem Logo an seiner Stelle (Text der Firmware weg) und reicht es weiter. Der Kernel zeigt gleich
-nach dem Start dasselbe Bild und darunter einen schmalen, abgerundeten Ladebalken wie bei macOS
-(`Kernel/console/splash.c`, nur Ganzzahlen, kantengeglaettet). Den Fortschritt melden die Startschritte des Kernels
-(`console_splash_progress`); der Konsolen-Thread laesst ihn weich nachgleiten, waehrend das erste Programm startet,
-langsam bis 99 %. Nach einem Moduswechsel (Bootloader `mode=`, Intel `igdmode=`) steht das Logo an derselben relativen
-Stelle (ab doppelter Groesse doppelt so gross). Ohne BGRT nur der Balken. Die Konsole schreibt solange nur in ihr
-RAM-Abbild. Das Bild bleibt, bis das erste Programm etwas zeigt: der Desktop nimmt den Bildschirm, die
-Grafikbibliothek zeichnet den Mauszeiger erst nach dem ersten Bild des Programms - so geht das Startbild direkt in den
-Desktop ueber. Schreibt das erste Programm in die Konsole (Shell), erscheint eine leere Konsole mit seiner Ausgabe; bei
-einer Ausnahme im Kernel und nach 60 s ohne Programm alle Meldungen. Auch danach kommen Meldungen des Kernels nicht auf
-den Bildschirm (wie `quiet` bei Linux), nur seriell und in `dmesg`; Ausgaben der Programme und Abstuerze von
-Programmen schon. Bei den Selbsttests immer Text.
+---
 
-## Echte Hardware und VMware
-
-```sh
-make usb        # Image/usb/minikernel-usb.img: mit Rufus (DD-Modus) oder balenaEtcher auf einen Stick schreiben
-make usbfiles   # Image/usbfiles/: Inhalt auf einen FAT32-Stick kopieren
-make vmware     # Image/vmware/: VM fuer VMware (VMWARE_BUS=sata|nvme)
-```
-
-Secure Boot muss aus sein (der Bootloader ist nicht signiert).
-
-## Aufbau
+## Aufbau des Projekts
 
 ```
-Sources/main.c        UEFI-Bootloader: laedt kernel.elf, initrd.tar, cmdline.txt; Grafikmodus; springt in den Kernel
+Sources/main.c        UEFI-Bootloader: laedt kernel.elf, initrd.tar, cmdline.txt; Grafikmodus; Startlogo
 Includes/boot_info.h  Uebergabe Bootloader -> Kernel
 
 Kernel/
-  arch/x86_64/        Einstieg (entry.S), GDT/IDT, Interrupts, APIC/IOAPIC, ACPI, Ausschalten, Syscall-Einstieg,
-                      SMP (smp.c, trampoline.S)
-  mm/                 physischer Speicher, Paging, Heap, Kernel-Stacks
-  core/               kmain (kernel.c), Prozesse, Scheduler, Syscalls, TTY, Kommandozeile
-  console/            Textkonsole im Framebuffer, Schriften
-  drivers/            PCI, serielle Schnittstelle, Uhr, Tastatur, Maus, Grafik
+  arch/x86_64/        Einstieg, GDT/IDT, Interrupts, APIC/IOAPIC, ACPI, Ausschalten, Syscall-Einstieg, SMP
+  mm/                 physischer Speicher, Paging (Copy-on-Write), Heap, Kernel-Stacks
+  core/               kmain (kernel.c), Prozesse, Scheduler, Syscalls, TTY, Kommandozeile, Dienste
+  console/            Textkonsole im Framebuffer, Schriften, Startbild
+  drivers/            PCI, serielle Schnittstelle, Uhr, Tastatur, Maus
     block/            AHCI, NVMe, virtio-blk, Partitionen (MBR/GPT)
     usb/              xHCI, Tastatur/Maus (HID), Massenspeicher
-    net/              Intel e1000/e1000e, WLAN Intel AX200 (iwl.c: Firmware, Suche; iwl_sta.c: Verbinden, wlan0)
+    net/              Intel e1000/e1000e, WLAN Intel AX200 (iwl.c, iwl_sta.c)
+    bt/               Bluetooth: USB-Transport, Verbindung (L2CAP, AVDTP, AVRCP), A2DP, SBC-Encoder
+    gpu/              Intel-Grafik Gen9: Anzeige, Modi, DisplayPort, Blitter, Render-Engine, Zusammensetzen
+    sound/            Intel HD Audio mit Mischer
   fs/                 VFS, Dateisystem-Schicht; fat/: FAT12/16/32 und exFAT
   net/                IPv4-Stack: ARP, ICMP, DHCP, UDP, TCP, DNS, NTP; WPA2-Handshake (wpa.c)
   lib/                string, kprintf, UTF-8, Kryptografie (SHA-1, HMAC, PBKDF2, AES, Key Wrap)
   tests/              Selbsttests, je Gruppe eine Datei
 
 Userland/
-  include/            Syscalls (user.h), libc, malloc, gfx (Grafik), ui (Aussehen), winproto (Fensterprotokoll),
-                      util (Helfer fuer Werkzeuge)
+  include/            Syscalls (user.h), libc, malloc, gfx (Grafik), ui (Aussehen), gl (OpenGL), sound, thread,
+                      settings, winproto (Fensterprotokoll), util
   lib/                libuser.a
-  bin/                je Programm eine Datei (NAME.c) oder ein Ordner (sh/, desktop/) -> /bin/NAME
+  bin/                je Programm eine Datei (NAME.c) oder ein Ordner (sh/, desktop/, music/, play/) -> /bin/NAME
 
 Initrd/               wird 1:1 in die initrd kopiert (/etc/profile, /etc/motd, Test-Skripte)
-tools/                Images erzeugen (mkdisk, mkesp, mkstick, mkvmx), FAT pruefen (fatcheck), Schriften (gen_font*)
+firmware/             Firmware fuer WLAN und Bluetooth (lokal, nicht im Repository)
+tools/                Images erzeugen (mkdisk, mkesp, mkstick, mkvmx), FAT pruefen (fatcheck), Schriften, Symbole
 ```
 
-Build-Ergebnisse landen in `Build/` (Objektdateien, `kernel.debug.elf` mit Debug-Infos, `esp.img`, `Out.log`) und
-`Image/` (`bootx64.efi`, `kernel.elf`, `initrd.tar`, Datenplatte).
+Build-Ergebnisse landen in `Build/` (Objektdateien, `kernel.debug.elf`, `esp.img`, `Out.log`) und `Image/`
+(`bootx64.efi`, `kernel.elf`, `initrd.tar`, Datenplatte).
+
+---
+
+## Was noch fehlt
+
+Grob nach Nutzen sortiert. ✳ = laesst sich komplett in QEMU entwickeln und testen.
+
+**Netzwerk und Internet**
+
+- [ ] HTTPS/TLS (fuer `wget` und spaeter einen Browser) ✳
+- [ ] TCP-Server (`listen`/`accept`) - Voraussetzung fuer Webserver, Fernzugriff (VNC), Dateiuebertragung ✳
+- [ ] IPv6 ✳
+- [ ] Weitere Netzwerkkarten (Realtek RTL8111, virtio-net) ✳
+- [ ] WLAN schneller: Ratenanpassung der Firmware (TLC), 802.11n/ac, Empfang per Interrupt
+- [ ] WLAN: WPA3 (SAE), Enterprise
+
+**Hardware**
+
+- [ ] Installation auf die interne SSD (Bootloader und System ohne Stick)
+- [ ] Bluetooth-Tastatur und -Maus (HID), Freisprechen (HFP), Bluetooth LE
+- [ ] USB-Audio, Gamepads ✳
+- [ ] Energiesparen (CPU-Takt, Ruhezustand), Akku-Anzeige
+- [ ] Mehrere Monitore gleichzeitig
+- [ ] Grafik fuer AMD/NVIDIA (bisher nur Framebuffer der Firmware)
+- [ ] Mikrofon/Aufnahme, Ton ueber HDMI
+
+**Kernel**
+
+- [ ] Feinere Sperren statt des Big Kernel Lock ✳
+- [ ] Signale (SIGINT, SIGTERM, SIGCHLD, ...) und Umgebungsvariablen fuer Programme ✳
+- [ ] Benutzer, Rechte, Dateirechte ✳
+- [ ] Schreib-Cache fuer Datentraeger ✳
+- [ ] Weitere Dateisysteme: ext4, NTFS (z.B. Windows-Partitionen lesen) ✳
+- [ ] Absturzberichte von Programmen als Datei ✳
+
+**Programme und Oberflaeche**
+
+- [ ] PNG und JPEG (Bildansicht, Hintergrundbilder) ✳
+- [ ] Webbrowser (einfaches HTML, braucht TLS) ✳
+- [ ] Skriptsprache (Lua oder MicroPython) und ein Compiler im System (TCC) ✳
+- [ ] DOOM-Port ✳
+- [ ] Sperrbildschirm, Benachrichtigungen, Drag & Drop zwischen Programmen ✳
+- [ ] Lautstaerke je Programm im Ton-Menue ✳
+- [ ] Shell: Jobsteuerung mit Strg+Z, Rueckwaertssuche (Strg+R), Aliase ✳
+- [ ] Screenshots (Druck-Taste) ✳
+
+**3D**
+
+- [ ] Mip-Maps, Auftraege ohne Warten
+- [ ] Shader fuer Programme, langfristig Mesa
