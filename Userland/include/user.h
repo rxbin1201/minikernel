@@ -84,6 +84,7 @@ typedef unsigned int       u32;
 #define SYS_CLOSEFROM     75
 #define SYS_WLAN          76
 #define SYS_BT            77
+#define SYS_SYSINFO       78
 #define ERR_NOENT     (-2)
 #define ERR_IO        (-5)
 #define ERR_EXIST     (-17)
@@ -180,11 +181,23 @@ typedef struct {
     u64      ticks_user, ticks_kernel, ticks_idle;
 } CpuInfo;
 
+/* SYS_SYSINFO: Arbeitsspeicher (Bytes, vom Kernel verwaltet), CPUs, Intel-GPU (leer: keine erkannt), Version, Build */
+typedef struct {
+    u64      mem_total, mem_free;
+    unsigned cpus, pad;
+    char     gpu[64];
+    char     version[16];
+    char     build[24];
+} SysInfo;
+
 /* state: 0 = laeuft, 1 = beendet (noch nicht abgeholt) */
 typedef struct {
     unsigned pid, ppid, pgid, state;
     char     name[32];
     unsigned threads, pad; /* laufende Threads */
+    u64      cpu_ticks;    /* Timer-Ticks (je 10 ms) aller Threads seit dem Start */
+    u64      mem_bytes;    /* eigene Seiten */
+    u64      shm_bytes;    /* geteilter Speicher (Fensterflaechen usw.) */
 } ProcInfo;
 
 /* PCI-Geraet (SYS_PCIINFO); driver: Name des Kernel-Treibers oder "" */
@@ -602,6 +615,7 @@ static inline s64 sys_tcp_connect(const unsigned char ip[4], unsigned port, unsi
 static inline s64 sys_tcpinfo(unsigned index, TcpInfo *ti)   { return syscall3(SYS_SOCKET, 3, index, (u64)ti); } /* ERR_NOENT am Ende */
 static inline s64 sys_sockport(int fd)                       { return syscall3(SYS_SOCKPORT, fd, 0, 0); }
 static inline s64 sys_cpuinfo(u64 index, CpuInfo *ci)        { return syscall3(SYS_CPUINFO, index, (u64)ci, 0); } /* ERR_NOENT: keine CPU mehr */
+static inline s64 sys_sysinfo(SysInfo *si)                   { return syscall3(SYS_SYSINFO, (u64)si, 0, 0); }
 static inline s64 sys_gpu(u64 op)                           { return syscall3(SYS_GPU, op, 0, 0); } /* 1 = Page-Flip-Test, 2 = Mauszeiger-Test, 3 = Blitter-Test, 4 = Info, 5 = EDID, 6 = Skalierer, 7 = Moduswechsel, 8 = DisplayPort, 9 = DP-Moduswechsel, 10 = DP-Link-Training, 11 | Port << 8 = Anschluss, 12 = Bildwechsel */
 static inline s64 sys_klog(u64 *pos, char *buf, u64 max)     { return syscall3(SYS_KLOG, (u64)pos, (u64)buf, max); } /* 0 = Ende des Kernel-Logs; *pos = ~0: setzt *pos auf das Ende */
 

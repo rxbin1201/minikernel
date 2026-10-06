@@ -29,6 +29,7 @@
 #include "fs/vfs.h"
 #include "core/service.h"
 #include "mm/heap.h"
+#include "mm/pmm.h"
 
 #define MSR_EFER   0xC0000080
 #define MSR_STAR   0xC0000081
@@ -958,6 +959,25 @@ static void syscall_do(SyscallFrame *f)
             memcpy((void *)f->rsi, &vi, sizeof(vi));
             ret = 0;
         }
+        break;
+    }
+    case SYS_SYSINFO: {
+        SysInfo si;
+        if (!process_user_range_ok(process_current(), f->rdi, sizeof(si), 1)) {
+            ret = ERR_FAULT;
+            break;
+        }
+        memset(&si, 0, sizeof(si));
+        si.mem_total = pmm_total_frames() * PMM_FRAME_SIZE;
+        si.mem_free = pmm_free_frame_count() * PMM_FRAME_SIZE;
+        si.cpus = smp_cpu_count();
+        const IgdInfo *g = igd_info();
+        if (g->present && g->name)
+            ksnprintf(si.gpu, sizeof(si.gpu), "Intel %s", g->name);
+        ksnprintf(si.version, sizeof(si.version), "%s", MINIKERNEL_VERSION);
+        ksnprintf(si.build, sizeof(si.build), "%s %s", __DATE__, __TIME__);
+        memcpy((void *)f->rdi, &si, sizeof(si));
+        ret = 0;
         break;
     }
     case SYS_TIME:     ret = (int64_t)rtc_now(); break;

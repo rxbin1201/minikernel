@@ -470,8 +470,21 @@ ausser der Groesse der Oberflaeche sofort.
 
 Jedes Fenster gehoert einem eigenen Prozess; der Desktop zeichnet nur Rahmen und Taskleiste. Programme:
 `term` (Terminal mit Shell), `settings` (Einstellungen), `files` (Dateien; Doppelklick oeffnet Ordner hier, Bilder in `view`, alles andere im
-Texteditor), `textedit`, `textview` (nur ansehen), `view`, `calc`, `clock`, `about`, `paint`, `snake`, `tetris`. Ohne
-Desktop gestartet, laufen sie im Vollbild.
+Texteditor), `textedit`, `textview` (nur ansehen), `view`, `calc`, `clock`, `about`, `paint`, `snake`, `tetris`,
+`taskmgr`. Ohne Desktop gestartet, laufen sie im Vollbild.
+
+`about` ("Ueber MiniKernel") zeigt wie "Ueber diesen Mac" Prozessor (Name per CPUID), Kerne, Arbeitsspeicher, Grafik,
+Bildschirm, Festplatte, virtuelle Maschine, Build-Datum und Laufzeit (`SYS_SYSINFO`).
+
+`taskmgr` (Task-Manager, Strg+Shift+Esc, Startmenue oder MiniKernel-Menue) im Stil der Aktivitaetsanzeige: Tabelle der
+Prozesse mit % CPU (100 % = ein Kern), CPU-Zeit, Threads und Speicher (eigene Seiten, ohne geteilten Speicher);
+Spaltenkopf sortiert, "Beenden"/Entf beendet nach Rueckfrage. Unten CPU-Last (Benutzer/System) und Arbeitsspeicher, im
+Tab "Leistung" der Verlauf jeder CPU. Die Werte liefert `SYS_PROCINFO` (jeder Timer-Tick eines Threads zaehlt auch beim
+Prozess; der Speicher wird aus den Seitentabellen gezaehlt). `ps` zeigt sie ebenfalls.
+
+`ramtest [MB] [Runden]` prueft den freien Arbeitsspeicher: belegt ihn in 64-MB-Bloecken (128 MB bleiben dem Kernel),
+schreibt sechs Muster (Nullen, Einsen, Schachbrett, laufende Eins, Adresse, Zufall), liest sie zurueck, meldet falsche
+Stellen und misst die Geschwindigkeit. Mehrere gleichzeitig belasten mehrere Kerne.
 
 Dateien (`files [ordner]`): links die Seitenleiste mit Schnellzugriff (Ordner der Platte), den Orten (Platte
 `/disk`, System `/`, angesteckte Datentraeger; aufklappbar) und unten dem belegten Speicher. Rechts Tabs (+, Strg+T,

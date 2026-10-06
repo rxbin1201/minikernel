@@ -118,6 +118,7 @@ struct Process {
     volatile int killed;
     int          exit_code;
     int          faulted;
+    uint64_t     cpu_ticks;  /* Timer-Ticks aller Threads (je 10 ms; tick_sink in sched.c) */
 };
 
 /* Alle Prozess-Eintraege; sie werden nie freigegeben (beendete werden wiederverwendet), damit auch Interrupts
@@ -511,10 +512,17 @@ static int first_slot(Process *p)
     return p->threads || uthread_slot(p) ? 0 : -1;
 }
 
+/* Thread gehoert zu p: process_current findet den Prozess, seine Ticks zaehlen als CPU-Zeit des Prozesses */
+static void bind_thread(Thread *t, Process *p)
+{
+    thread_set_data(t, p);
+    thread_set_tick_sink(t, &p->cpu_ticks);
+}
+
 /* Erster Thread eines neuen Prozesses (laeuft fruehestens, wenn der Erzeuger den BKL abgibt) */
 static void first_thread(Process *p, Thread *t)
 {
-    thread_set_data(t, p);
+    bind_thread(t, p);
     UThread *u = uth(p, 0);
     u->t = t;
     u->used = 1;
@@ -525,7 +533,7 @@ static void first_thread(Process *p, Thread *t)
 static void process_main(void *arg)
 {
     Process *p = arg;
-    thread_set_data(thread_current(), p);
+    bind_thread(thread_current(), p);
     to_user(p->entry, p->user_rsp, (uint64_t)p->argc, p->argv);
 }
 
@@ -588,7 +596,7 @@ static void fork_child_main(void *arg)
     Process *p = ctx->proc;
     SyscallFrame regs = ctx->regs;
     kfree(ctx);
-    thread_set_data(thread_current(), p);
+    bind_thread(thread_current(), p);
     regs.rax = 0; /* fork liefert im Kind 0 */
     cpu_cli();
     bkl_release();
@@ -949,7 +957,7 @@ int process_thread_create(Process *p, uint64_t entry, uint64_t stack_top, uint64
         kfree(ctx);
         return ERR_NOMEM;
     }
-    thread_set_data(t, p);
+    bind_thread(t, p);
     uthread_reset(u);
     u->t = t;
     u->used = 1;
@@ -1074,6 +1082,13 @@ int process_info(unsigned index, ProcInfo *out)
         out->state = q->exited ? 1 : 0;
         out->threads = (uint32_t)q->nlive;
         memcpy(out->name, q->name, sizeof(out->name));
+        out->cpu_ticks = __atomic_load_n(&q->cpu_ticks, __ATOMIC_RELAXED);
+        out->mem_bytes = out->shm_bytes = 0;
+        if (!q->exited && q->as) { /* beendete: der Adressraum wird gerade abgebaut */
+            uint64_t shared = 0;
+            out->mem_bytes = as_user_pages(q->as, &shared) * PAGE;
+            out->shm_bytes = shared * PAGE;
+        }
         r = 0;
         break;
     }

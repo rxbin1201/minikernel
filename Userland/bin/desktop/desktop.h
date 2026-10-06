@@ -69,7 +69,7 @@ static inline int shadow_b8(void) { return (SHADOW + RADIUS + 7) & ~7; }
 static inline int win_th(const Win *w) { return (w->flags & WPF_FRAMELESS) ? 0 : TITLE_H; }
 
 /* Aktionen (Menues und Taskleiste). Die ersten sind zugleich die Programmsymbole (ICON_* in ui.h). */
-enum { A_NONE, A_TERM, A_FILES, A_CALC, A_CLOCK, A_ABOUT, A_PAINT, A_SNAKE, A_TETRIS, A_EDIT, A_MUSIC, A_SETTINGS,
+enum { A_NONE, A_TERM, A_FILES, A_CALC, A_CLOCK, A_ABOUT, A_PAINT, A_SNAKE, A_TETRIS, A_EDIT, A_MUSIC, A_SETTINGS, A_TASKS,
        A_QUIT = 20, A_SEP,
        A_WIN_NEW, A_WIN_MIN, A_WIN_ZOOM, A_WIN_CLOSE, A_APP_QUIT, A_SNAP_LEFT, A_SNAP_RIGHT, A_NEXT_WIN,
        A_RESTART, A_POWEROFF, A_INFO, A_NET_DHCP, A_SEARCH,

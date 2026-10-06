@@ -90,6 +90,7 @@ static const struct {
     {"clock", "Uhr", A_CLOCK},      {"about", "Info", A_ABOUT},          {"paint", "Malen", A_PAINT},
     {"snake", "Snake", A_SNAKE},    {"tetris", "Tetris", A_TETRIS},      {"textview", "Textansicht", ICON_TEXT},
     {"view", "Bildansicht", ICON_IMAGE},  {"textedit", "Texteditor", A_EDIT},   {"music", "Musik", A_MUSIC},
+    {"taskmgr", "Task-Manager", A_TASKS},
 };
 
 /* Programme, die sich selbst melden (aus dem Terminal gestartet): annehmen und begruessen */

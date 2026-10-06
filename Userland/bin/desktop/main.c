@@ -72,6 +72,7 @@ void do_action(int a)
     case A_SNAKE: launch_app("/bin/snake", "snake", A_SNAKE, "Snake"); break;
     case A_TETRIS: launch_app("/bin/tetris", "tetris", A_TETRIS, "Tetris"); break;
     case A_SETTINGS: launch_app("/bin/settings", "settings", A_SETTINGS, "Einstellungen"); break;
+    case A_TASKS: launch_app("/bin/taskmgr", "taskmgr", A_TASKS, "Task-Manager"); break;
     case A_QUIT: quit = 1; break;
     case A_WIN_NEW: /* noch eins vom aktiven Programm (Text- und Bildansicht brauchen eine Datei: dann ein Terminal) */
         do_action(f && f->app > A_NONE && f->app < A_QUIT ? f->app : A_TERM);
@@ -309,6 +310,11 @@ static void key(int k)
 {
     if (dialog_kind) {
         dialog_key(k);
+        return;
+    }
+    if (KEY_BASE(k) == 0x1B && (k & KEY_MOD_CTRL) && (k & KEY_MOD_SHIFT)) { /* Strg+Umschalt+Esc wie bei Windows */
+        close_menu();
+        do_action(A_TASKS);
         return;
     }
     if (k == 0x1B && menu_open) {

@@ -28,7 +28,7 @@ void ui_setup(int pct);
 
 /* Programmsymbole; die Nummern sind zugleich die Aktionen des Desktops (A_TERM = ICON_TERM ...) */
 enum { ICON_NONE, ICON_TERM, ICON_FILES, ICON_CALC, ICON_CLOCK, ICON_ABOUT, ICON_PAINT, ICON_SNAKE, ICON_TETRIS,
-       ICON_EDIT, ICON_MUSIC, ICON_SETTINGS, ICON_TEXT = 100, ICON_IMAGE = 101 };
+       ICON_EDIT, ICON_MUSIC, ICON_SETTINGS, ICON_TASKS, ICON_TEXT = 100, ICON_IMAGE = 101 };
 void ui_app_icon(Surface *s, int icon, int x, int y, int size);
 
 /* Hintergrund des Desktops: Farbverlauf mit Wellen und hellem Schein oben rechts. Farbe an der Stelle (u, v) des

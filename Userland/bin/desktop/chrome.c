@@ -772,7 +772,7 @@ static const struct {
 } start_apps[] = {
     {A_TERM, "Terminal"}, {A_FILES, "Dateien"}, {A_EDIT, "Texteditor"}, {A_MUSIC, "Musik"}, {A_CALC, "Rechner"},
     {A_CLOCK, "Uhr"},     {A_PAINT, "Malen"},   {A_SNAKE, "Snake"},     {A_TETRIS, "Tetris"},
-    {A_SETTINGS, "Einstellungen"}, {A_ABOUT, "\xC3\x9C" "ber MiniKernel"},
+    {A_SETTINGS, "Einstellungen"}, {A_TASKS, "Task-Manager"}, {A_ABOUT, "\xC3\x9C" "ber MiniKernel"},
 };
 #define NSTART ((int)(sizeof(start_apps) / sizeof(start_apps[0])))
 static MenuItem start_items[NSTART + 2];
@@ -845,7 +845,8 @@ static int build_windows(void)
 }
 
 static const MenuItem sys_menu[] = {
-    {"Einstellungen \xE2\x80\xA6", A_SETTINGS, 0}, {"\xC3\x9C" "ber MiniKernel", A_ABOUT, 0}, {"", A_SEP, 0},
+    {"Einstellungen \xE2\x80\xA6", A_SETTINGS, 0}, {"Task-Manager", A_TASKS, "Strg+Shift+Esc"},
+    {"\xC3\x9C" "ber MiniKernel", A_ABOUT, 0}, {"", A_SEP, 0},
     {"Neu starten \xE2\x80\xA6", A_RESTART, 0},
     {"Ausschalten \xE2\x80\xA6", A_POWEROFF, 0}, {"", A_SEP, 0}, {"Zur Konsole", A_QUIT, 0},
 };
