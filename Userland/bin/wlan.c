@@ -25,9 +25,14 @@ static void show_status(const WlanStatus *s)
         printf("Netz:      '%s' (%02x:%02x:%02x:%02x:%02x:%02x), Kanal %u, %d dBm, %s\n", s->ssid, s->bssid[0],
                s->bssid[1], s->bssid[2], s->bssid[3], s->bssid[4], s->bssid[5], s->channel, s->signal,
                s->security < 6 ? sec_name[s->security] : "?");
-    if (s->state == WLAN_ST_CONNECTED)
-        printf("Verbindung: AID %u, senden mit %u Mbit/s, aufgebaut in %u ms\n", s->aid, s->rate_kbps / 1000,
-               s->connect_ms);
+    if (s->state == WLAN_ST_CONNECTED) {
+        static const char *const mode[] = {"802.11a/g", "802.11n (HT)", "802.11ac (VHT)"};
+        printf("Verbindung: AID %u, senden mit %u Mbit/s%s, aufgebaut in %u ms\n", s->aid, s->rate_kbps / 1000,
+               s->tlc ? " (Rate waehlt die Firmware)" : " (fest)", s->connect_ms);
+        printf("Funk:      %s, %u MHz, %u Datenstrom/-stroeme, bis %u Mbit/s, Block-Ack beim Empfang: %s\n",
+               s->phy_mode < 3 ? mode[s->phy_mode] : "?", s->width ? s->width : 20, s->nss ? s->nss : 1,
+               s->max_kbps / 1000, s->ba_rx ? "ja (AP sendet aggregiert)" : "nein");
+    }
     if (s->state == WLAN_ST_FAILED)
         printf("Schritt:   %s (Fehler %d)\n", s->step < 12 ? step_name[s->step] : "?", s->error);
     if (s->msg[0])

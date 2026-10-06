@@ -4,6 +4,7 @@
  *   wget http://example.com/              -> index.html im aktuellen Verzeichnis
  *   wget -O bild.bmp http://host:8000/a.bmp
  *   wget -O - http://example.com/          (auf die Standardausgabe)
+ *   wget -O /dev/null http://host/gross    (nichts speichern: misst nur die Geschwindigkeit des Netzes)
  *   wget -S ...                            (zeigt zusaetzlich die Kopfzeilen der Antwort)
  *   wget -q ...                            (ohne Meldungen; Fehler kommen trotzdem)
  * Folgt bis zu 5 Weiterleitungen, versteht Content-Length und "chunked". Nur http:// (kein TLS fuer https://). */
@@ -150,7 +151,7 @@ static void file_name(const Url *u, char *out, int max)
 
 static int    out_fd = -1;
 static char   out_name[256];
-static int    to_stdout, out_named;
+static int    to_stdout, out_named, discard;
 static u64    got, total, t_start, t_last;
 
 static void progress(int final)
@@ -177,6 +178,11 @@ static void progress(int final)
 
 static void put(const char *p, int n)
 {
+    if (discard) { /* -O /dev/null: nur zaehlen (Geschwindigkeit des Netzes ohne die der Platte) */
+        got += (u64)n;
+        progress(0);
+        return;
+    }
     if (out_fd < 0) {
         out_fd = to_stdout ? 1 : (int)sys_open(out_name, O_WRONLY | O_CREAT | O_TRUNC);
         if (out_fd < 0) {
@@ -371,6 +377,7 @@ void _start(int argc, char **argv)
             i++;
             if (!strcmp(argv[i], "-"))
                 to_stdout = 1;
+            discard = !strcmp(argv[i], "/dev/null");
             snprintf(out_name, sizeof(out_name), "%s", argv[i]);
             out_named = 1;
         } else if (!strcmp(argv[i], "-q")) {

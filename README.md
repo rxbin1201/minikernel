@@ -36,7 +36,7 @@ WLAN/Bluetooth, Monitor 3440x1440 ueber HDMI/DisplayPort).
 | **Dateisysteme** | 🟡 | FAT12/16/32 mit langen Namen und exFAT, lesen und schreiben; initrd (tar) | ext4, NTFS, Dateirechte |
 | **USB** | 🟡 | xHCI (USB 1-3), Hubs, Tastatur, Maus, Massenspeicher, Bluetooth; Transfers per Interrupt | Ohne xHCI (EHCI/OHCI), USB-Audio, Gamepads, Webcams |
 | **Netzwerk** | 🟡 | Intel e1000/e1000e/I217-I219, IPv4, DHCP, DNS, NTP, UDP, TCP nach aussen, `wget` (HTTP) | HTTPS/TLS, TCP-Server (listen/accept), IPv6, andere Netzwerkkarten (Realtek, ...) |
-| **WLAN** | 🟡 | Intel AX200: suchen, verbinden mit offenen und WPA2-PSK-Netzen, DHCP, im Desktop | Schnelle Raten (802.11n/ac/ax, hoechstens 54 Mbit/s), WPA3-only, Enterprise, andere Karten |
+| **WLAN** | 🟡 | Intel AX200: suchen, verbinden mit offenen und WPA2-PSK-Netzen, 802.11n/ac bis 80 MHz und 2 Datenstroeme (Rate waehlt die Firmware, Aggregation beim Empfang), DHCP, im Desktop | Wi-Fi 6 (802.11ax), Aggregation beim Senden, WPA3-only, Enterprise, andere Karten |
 | **Bluetooth** | 🟡 | Intel AX200: Firmware laden, suchen, koppeln, Musik an Lautsprecher/Kopfhoerer (A2DP, SBC), Fernbedienung und Lautstaerke der Soundbar (AVRCP 1.4) | Tastaturen/Maeuse (HID), Freisprechen, Bluetooth LE, AAC |
 | **Grafik** | ✅ | GOP-Framebuffer ueberall; Intel Gen9 (Skylake bis Comet Lake): Moduswechsel, HDMI/DP, Hotplug, Hardware-Zeiger, Doppelpufferung | AMD- und NVIDIA-Treiber, mehrere Monitore gleichzeitig |
 | **3D** | 🟡 | Intel Gen9: eigene Shader, kleines OpenGL 1.x/1.5 (Texturen, Licht, Tiefentest, Mischen, Vertex-Buffer); Desktop setzt auf der GPU zusammen | Mip-Maps, programmierbare Shader fuer Programme, Mesa |
@@ -169,7 +169,8 @@ Einige im Einzelnen:
   (Nullen, Einsen, Schachbrett, laufende Eins, Adresse, Zufall), prueft sie, meldet Fehler mit Adresse und misst die
   Geschwindigkeit. Mehrere gleichzeitig belasten mehrere Kerne.
 - **wget**: `wget http://example.com/` speichert `index.html` im aktuellen Verzeichnis, `wget -O - url | less` zeigt
-  die Seite, `-S` die Kopfzeilen. Folgt Weiterleitungen, versteht "chunked"; nur `http://`.
+  die Seite, `-S` die Kopfzeilen, `wget -O /dev/null url` speichert nichts und misst nur die Geschwindigkeit des Netzes.
+  Folgt Weiterleitungen, versteht "chunked"; nur `http://`.
 - **play**: `play datei.wav` (8-32 Bit, Gleitkomma, jede Abtastrate), `play lied.mp3` (MPEG-1/2/2.5 Layer I-III),
   `play -w lied.wav lied.mp3` wandelt um, `play -t` Testton, `play -v 0-100` Lautstaerke.
 
@@ -251,9 +252,10 @@ Taskleiste aus vier Segmenten aus Milchglas:
   per Interrupt, die anderen fragt der Thread `net` ab.
 - **IPv4-Stack** (`Kernel/net`): ARP, ICMP, DHCP, DNS mit Cache, NTP (stellt beim Start die Uhr), UDP-Sockets und
   TCP-Verbindungen nach aussen.
-- **TCP:** Wiederholung nach gemessener Laufzeit, schnelle Wiederholung nach drei doppelten ACKs, 64 KB
-  Empfangsfenster, geordneter Abbau im Hintergrund. Programme bekommen eine Verbindung als Datei-Deskriptor
-  (`sys_tcp_connect`, dann `read`/`write`).
+- **TCP:** Wiederholung nach gemessener Laufzeit, schnelle Wiederholung nach drei doppelten ACKs, Window Scaling
+  (256 KB Empfangsfenster - ohne waeren bei 20 ms Laufzeit nur etwa 25 Mbit/s moeglich), Segmente ausser der Reihe
+  werden aufgehoben (bis 8 Luecken), geordneter Abbau im Hintergrund. Programme bekommen eine Verbindung als
+  Datei-Deskriptor (`sys_tcp_connect`, dann `read`/`write`).
 
 ### WLAN (Intel AX200)
 
@@ -272,9 +274,16 @@ wlan disconnect
   warteschlangen, Authentifizierung, Assoziierung, 4-Wege-Handshake (PBKDF2, PRF, AES Key Wrap in
   `Kernel/lib/crypto.c`); die Firmware ver- und entschluesselt CCMP selbst. Gruppenschluessel-Wechsel beantwortet der
   Thread `wlan`. Befehlsversionen der Firmware `cc-a0-77`.
-- **Grenzen:** 802.11a/g-Station ohne HT/VHT/HE, QoS und Aggregation; feste Rate nach Signalstaerke (hoechstens
-  54 Mbit/s); Empfang wird abgefragt (kein Interrupt). Nicht unterstuetzt: WEP, WPA1/TKIP, WPA3-only (SAE), Enterprise,
-  Pflicht-MFP.
+- **Geschwindigkeit:** kann der AP QoS (WMM) und 802.11n bzw. 802.11ac, ist MiniKernel eine HT- bzw. VHT-Station mit
+  zwei Datenstroemen - auf 5 GHz mit 40/80 MHz (bis 866 Mbit/s), auf 2,4 GHz mit 20 MHz. Die Senderate waehlt die
+  Firmware (TLC_MNG_CONFIG) und meldet sie; will der AP aggregiert senden, richtet der Treiber Block-Ack ein
+  (RX_BAID_ALLOCATION_CONFIG). Der Wiederholschutz prueft je TID ein Fenster der letzten 64 Paketnummern (wiederholte
+  Rahmen kommen bei Aggregation nach neueren). `wlan status` zeigt Standard, Breite, Datenstroeme und Block-Ack.
+  Auf echter Hardware gemessen: 802.11ac, 80 MHz, 2 Datenstroeme.
+- **Schalter zur Fehlersuche** (Kommandozeile): `wlanlegacy` (wie frueher nur 802.11a/g mit fester Rate), `wlannotlc`
+  (feste Rate), `wlannoba` (keine Aggregation).
+- **Grenzen:** kein 802.11ax (HE), selbst gesendet wird ohne Aggregation, Empfang wird abgefragt (kein Interrupt), keine
+  Umsortierung im Treiber. Nicht unterstuetzt: WEP, WPA1/TKIP, WPA3-only (SAE), Enterprise, Pflicht-MFP.
 - **Test:** Selbsttest `crypto` (17 Pruefungen: RFC- und 802.11-Testvektoren, kompletter Handshake gegen einen
   simulierten AP, auch mit falschem Passwort). Das Verbinden selbst nur auf echter Hardware.
 
@@ -487,6 +496,7 @@ Der Bootloader liest `\cmdline.txt` von der EFI-Systempartition (bei QEMU aus `C
 | `fsro` | fremde Volumes nur lesbar einbinden |
 | `nosmp`, `cpus=N` | nur die Boot-CPU bzw. hoechstens N CPUs benutzen |
 | `noigd`, `nohotplug`, `noblt`, `bltmode=N`, `gpucomp=off\|soft` | Intel-Grafik abschalten bzw. einzelne Teile |
+| `wlanlegacy`, `wlannotlc`, `wlannoba` | WLAN wie frueher (802.11a/g), ohne Ratenanpassung der Firmware bzw. ohne Aggregation |
 | `selftest`, `selftest=gruppe,...`, `keep` | Selbsttests (siehe `Kernel/tests/selftest.c`) |
 
 **Startbild:** ohne `verbose` zeigt der Bootloader das Logo der Firmware (ACPI-Tabelle BGRT, wie Windows und Linux),
@@ -545,7 +555,9 @@ Grob nach Nutzen sortiert. ✳ = laesst sich komplett in QEMU entwickeln und tes
 - [ ] TCP-Server (`listen`/`accept`) - Voraussetzung fuer Webserver, Fernzugriff (VNC), Dateiuebertragung ✳
 - [ ] IPv6 ✳
 - [ ] Weitere Netzwerkkarten (Realtek RTL8111, virtio-net) ✳
-- [ ] WLAN schneller: Ratenanpassung der Firmware (TLC), 802.11n/ac, Empfang per Interrupt
+- [x] WLAN schneller: 802.11n/ac, Ratenanpassung der Firmware, Block-Ack beim Empfang; TCP mit Window Scaling
+- [ ] WLAN: Empfang per Interrupt, Aggregation beim Senden, Wi-Fi 6 (802.11ax)
+- [ ] Schreiben auf FAT-Laufwerke schneller (in QEMU unter 1 MB/s beim Kopieren), Pipes schneller ✳
 - [ ] WLAN: WPA3 (SAE), Enterprise
 
 **Hardware**

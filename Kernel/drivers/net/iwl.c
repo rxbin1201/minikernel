@@ -125,6 +125,13 @@ const WlanInfo *iwl_state(void)
 }
 
 /* Firmware in der initrd suchen und zerlegen */
+static uint32_t fw_capa_words[4];
+
+int iwl_fw_capa(unsigned bit)
+{
+    return bit < 128 && (fw_capa_words[bit / 32] >> (bit % 32)) & 1;
+}
+
 static void parse_fw(void)
 {
     const VfsNode *best = 0;
@@ -190,6 +197,8 @@ static void parse_fw(void)
         } else if (type == TLV_ENABLED_CAPABILITIES && l >= 8) {
             for (uint32_t b = 0; b < 32; b++)
                 info.fw_capa += (le32(v + 4) >> b) & 1;
+            if (le32(v) < 4)
+                fw_capa_words[le32(v)] = le32(v + 4); /* Index, 32 Bits */
         } else if (type == TLV_API_CHANGES_SET && l >= 8) {
             for (uint32_t b = 0; b < 32; b++)
                 info.fw_api_flags += (le32(v + 4) >> b) & 1;
@@ -351,7 +360,7 @@ int iwl_info(WlanInfo *out)
 #define GP1_CMD_BLOCKED        (1u << 2)
 #define CSR_MAC_SHADOW_REG_CTRL 0x0A8 /* Schattenregister fuer die Schreibzeiger der Warteschlangen */
 
-#define RX_RING   64   /* Empfangspuffer zu je 4 KiB */
+#define RX_RING   256  /* Empfangspuffer zu je 4 KiB: genug fuer ein A-MPDU (bis 64 Rahmen) zwischen zwei Abfragen */
 #define CMD_RING  32   /* Befehlswarteschlange (TFDs zu 256 Byte) */
 #define TFD_SIZE  256
 
@@ -815,6 +824,11 @@ static void rx_packet(const uint8_t *pkt, uint32_t len)
         iwl_sta_tx_resp(seq, d, plen);
         return;
     }
+    if (iwl_sta_notif(grp, cmd, d, plen)) /* z.B. neue Senderate (TLC) */
+        return;
+    if (grp == GRP_LEGACY && (cmd == 0xC2 || cmd == 0xC3 || cmd == 0xC5))
+        return; /* BAR_FRAME_RELEASE, FRAME_RELEASE (Hinweise zum Umsortieren bei Block-Ack - wir reichen jeden Rahmen
+                 * sofort weiter), BA_NOTIF */
     if (grp == GRP_LEGACY && cmd == CMD_DEBUG_LOG)
         return; /* Protokoll der Firmware: zu viel fuers Log */
     if (logged++ < 40)
@@ -1181,6 +1195,33 @@ static void scan_frame(const uint8_t *d, uint32_t len)
         } else if (id == 221 && l >= 4 && v[0] == 0x00 && v[1] == 0x50 && v[2] == 0xF2 && v[3] == 1 &&
                    n.security < WLAN_SEC_WPA2) {
             n.security = WLAN_SEC_WPA;
+        } else if (id == 221 && l >= 7 && v[0] == 0x00 && v[1] == 0x50 && v[2] == 0xF2 && v[3] == 2) {
+            x.has_wmm = 1; /* WMM (QoS): Informations- (Untertyp 0) oder Parameterelement (1, mit EDCA je Klasse) */
+            if (v[4] == 1 && l >= 24) {
+                for (int a = 0; a < 4; a++) {
+                    const uint8_t *r = v + 8 + a * 4;
+                    memcpy(x.wmm_ac[(r[0] >> 5) & 3], r, 4);
+                }
+                x.wmm_params = 1;
+            }
+        } else if (id == 45 && l >= 26) { /* HT Capabilities */
+            x.has_ht = 1;
+            x.ht_cap = (uint16_t)(v[0] | v[1] << 8);
+            x.ht_ampdu = v[2];
+            x.ht_mcs[0] = v[3];
+            x.ht_mcs[1] = v[4];
+        } else if (id == 61 && l >= 5) { /* HT Operation */
+            x.ht_primary = v[0];
+            x.ht_sec = v[1] & 3;
+            x.ht_wide = (v[1] >> 2) & 1;
+            x.ht_prot = v[2] & 3;
+        } else if (id == 191 && l >= 12) { /* VHT Capabilities */
+            x.has_vht = 1;
+            x.vht_cap = le32(v);
+            x.vht_rx_mcs = (uint16_t)(v[4] | v[5] << 8);
+        } else if (id == 192 && l >= 3) { /* VHT Operation */
+            x.vht_width = v[0];
+            x.vht_center = v[1];
         }
         o += 2 + l;
     }

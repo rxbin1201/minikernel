@@ -70,6 +70,7 @@ typedef struct {
 
 /* Zustand der Verbindung (SYS_WLAN 7) */
 enum { WLAN_ST_IDLE, WLAN_ST_CONNECTING, WLAN_ST_CONNECTED, WLAN_ST_FAILED };
+enum { WLAN_PHY_LEGACY, WLAN_PHY_HT, WLAN_PHY_VHT };
 /* Schritte beim Verbinden: wie weit es kam */
 enum { WLAN_STEP_NONE, WLAN_STEP_FW, WLAN_STEP_SCAN, WLAN_STEP_PMK, WLAN_STEP_CONTEXT, WLAN_STEP_STATION,
        WLAN_STEP_QUEUES, WLAN_STEP_PROTECT, WLAN_STEP_AUTH, WLAN_STEP_ASSOC, WLAN_STEP_KEYS, WLAN_STEP_DONE };
@@ -81,9 +82,14 @@ typedef struct {
     uint8_t  bssid[6];
     uint8_t  channel, security;
     int8_t   signal;
-    uint8_t  pad[6];
+    uint8_t  phy_mode;             /* WLAN_PHY_*: 802.11a/g, n (HT), ac (VHT) */
+    uint8_t  width;                /* Kanalbreite in MHz (20, 40, 80) */
+    uint8_t  nss;                  /* Datenstroeme (1 oder 2) */
+    uint8_t  ba_rx;                /* Block-Ack beim Empfang: Bitmaske der TIDs (der AP sendet aggregiert) */
+    uint8_t  tlc;                  /* 1 = die Firmware waehlt die Senderate (rate_kbps aus ihrer Meldung) */
+    uint8_t  pad;
     uint32_t aid, rate_kbps, connect_ms; /* Assoziationsnummer, Senderate, Dauer des Verbindens */
-    uint32_t pad2;
+    uint32_t max_kbps;             /* hoechste moegliche Rate mit diesem AP */
     uint64_t rx_frames, tx_frames, rx_dropped, tx_failed, rekeys;
     char     msg[96];              /* letztes Ereignis im Klartext */
 } WlanStatus;
