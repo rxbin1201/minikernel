@@ -548,6 +548,12 @@ int hda_present(void)
 #define MAX_VOICES   8
 #define VOICE_FRAMES 65536 /* je Stimme 1,37 s bei 48 kHz: Programme koennen genug vorlegen, um kurz zu stocken */
 #define LEAD_MS      60
+/* Bluetooth: eine Stimme spielt erst, wenn BT_PREROLL_MS vorliegen (der Mischer nimmt beim Start gleich BT_LEAD_MS
+ * fuer die Soundbar, dahinter muss Vorrat bleiben, bis das Programm nachliefert) - oder wenn das Programm seit
+ * BT_IDLE_US nichts mehr schreibt (kurze Effekte, Ende eines Titels). Laeuft sie leer, waehrend das Programm noch
+ * liefert, wird neu vorgepuffert: eine kurze Pause statt Stottern. */
+#define BT_PREROLL_MS 500
+#define BT_IDLE_US    40000
 
 typedef struct {
     uint32_t pid;
@@ -558,6 +564,8 @@ typedef struct {
     uint64_t wr, rd;               /* geschrieben / vom Mischer genommen (Frames, laufend) */
     uint64_t done_at;              /* Ring-Position (written), bis zu der der letzte Frame gemischt ist */
     uint64_t mixed;                /* gemischte Bytes (Mischformat) */
+    uint64_t last_write_us;        /* letztes hda_write (Bluetooth: liefert das Programm noch nach?) */
+    int      ready;                /* Bluetooth: genug vorgepuffert, die Stimme spielt */
 } Voice;
 
 static Voice    voices[MAX_VOICES];
@@ -609,14 +617,16 @@ static void hw_stop(void)
 
 /* Ein Frame: Summe aller Stimmen (begrenzt); done_pos = Position, ab der ein leer gewordener Stimme alles gemischt hat.
  * Ergebnis: Zahl der Stimmen mit Daten; -1 = keine Stimme offen */
+static int bt_mixing; /* der Mischer fuellt gerade den Bluetooth-Strom: nur vorgepufferte Stimmen (ready) spielen */
+
 static int mix_frame(int16_t *lr, uint64_t done_pos)
 {
     int32_t l = 0, r = 0;
     int n = 0, open = 0;
     for (int i = 0; i < MAX_VOICES; i++) {
         Voice *v = &voices[i];
-        open |= v->used;
-        if (!v->used || v->rd == v->wr)
+        open |= v->used && (!bt_mixing || v->ready);
+        if (!v->used || v->rd == v->wr || (bt_mixing && !v->ready))
             continue;
         n++;
         const int16_t *smp = v->buf + (v->rd % VOICE_FRAMES) * 2;
@@ -624,8 +634,11 @@ static int mix_frame(int16_t *lr, uint64_t done_pos)
         r += (smp[1] * v->vol) >> 8;
         v->rd++;
         v->mixed += 4;
-        if (v->rd == v->wr)
+        if (v->rd == v->wr) {
             v->done_at = done_pos;
+            if (bt_mixing && time_us() - v->last_write_us < BT_IDLE_US)
+                v->ready = 0; /* leergelaufen, das Programm liefert aber noch: neu vorpuffern statt zu stottern */
+        }
     }
     lr[0] = (int16_t)(l > 32767 ? 32767 : l < -32768 ? -32768 : l); /* begrenzen statt ueberlaufen */
     lr[1] = (int16_t)(r > 32767 ? 32767 : r < -32768 ? -32768 : r);
@@ -689,7 +702,7 @@ static void bt_mix(int data)
                 (uint32_t)((target - bt_frames - lead) * 1000 / mix_rate));
         bt_frames = target - lead;
     }
-    int32_t gain = volume * volume; /* 0..10000 */
+    int32_t gain = bt_abs_volume_active() ? 10000 : volume * volume; /* 0..10000; absolut: regelt die Soundbar */
     static int16_t tmp[512 * 2];
     while (bt_frames < target) {
         uint32_t n = (uint32_t)(target - bt_frames), room = bt_a2dp_room();
@@ -699,33 +712,67 @@ static void bt_mix(int data)
             n = room;
         if (!n)
             break;
-        for (uint32_t f = 0; f < n; f++) {
-            int voiced = mix_frame(tmp + f * 2, 0);
-            if (voiced == 0 && !bt_gap) /* das Programm liefert zu langsam: zaehlen (einmal je Luecke) */
-                bt_a2dp_underrun();
-            bt_gap = voiced == 0;
+        uint32_t f = 0;
+        int empty = 0;
+        for (; f < n; f++) {
+            if (mix_frame(tmp + f * 2, 0) <= 0) { /* keine spielbereite Stimme mehr: keine Stille schicken */
+                empty = 1;
+                break;
+            }
             tmp[f * 2] = (int16_t)(tmp[f * 2] * gain / 10000);
             tmp[f * 2 + 1] = (int16_t)(tmp[f * 2 + 1] * gain / 10000);
         }
-        bt_a2dp_write(tmp, n);
-        bt_frames += n;
+        if (f)
+            bt_a2dp_write(tmp, f);
+        bt_frames += f;
+        if (empty) {
+            int refill = 0; /* leergelaufen, waehrend das Programm noch liefert: Luecke (einmal je Luecke zaehlen) */
+            for (int i = 0; i < MAX_VOICES; i++)
+                refill |= voices[i].used && !voices[i].ready;
+            if (refill && !bt_gap)
+                bt_a2dp_underrun();
+            bt_gap = refill;
+            bt_t0_us = 0; /* Uhr beginnt mit dem naechsten Ton neu (wieder mit Vorlauf fuer die Soundbar) */
+            return;
+        }
+        bt_gap = 0;
     }
+}
+
+/* Bluetooth: Stimme v spielbereit? (vorgepuffert oder das Programm liefert nichts mehr nach) */
+static int bt_voice_ready(Voice *v)
+{
+    if (!v->used || v->rd == v->wr)
+        return 0;
+    if (!v->ready && (v->wr - v->rd >= (uint64_t)mix_rate * BT_PREROLL_MS / 1000 ||
+                      time_us() - v->last_write_us >= BT_IDLE_US))
+        v->ready = 1;
+    return v->ready;
 }
 
 static void mixer_thread(void *arg)
 {
     (void)arg;
     for (;;) {
-        int used = 0, data = 0;
+        int used = 0, data = 0, waiting = 0;
+        int bt = bt_route();
         for (int i = 0; i < MAX_VOICES; i++) {
             used |= voices[i].used;
-            data |= voices[i].used && voices[i].rd != voices[i].wr;
+            if (bt) {
+                int r = bt_voice_ready(&voices[i]);
+                data |= r;
+                waiting |= !r && voices[i].used && voices[i].rd != voices[i].wr;
+            } else {
+                data |= voices[i].used && voices[i].rd != voices[i].wr;
+            }
         }
-        if (bt_route()) { /* Soundbar verbunden: Ton ueber Bluetooth */
+        if (bt) { /* Soundbar verbunden: Ton ueber Bluetooth */
             if (running)
                 hw_stop();
+            bt_mixing = 1;
             bt_mix(data);
-            event_wait(&mix_event, data ? 5 : 100);
+            bt_mixing = 0;
+            event_wait(&mix_event, data || waiting ? 5 : 100);
             continue;
         }
         bt_t0_us = 0;
@@ -801,6 +848,7 @@ int64_t hda_write(uint32_t pid, const void *buf, uint64_t len)
             v->prev_r = r;
             done++;
         }
+        v->last_write_us = time_us();
         if (!running)
             event_signal(&mix_event);
     }
@@ -852,8 +900,17 @@ int hda_volume(int percent)
         volume = percent > 100 ? 100 : percent;
         if (present)
             set_dac_volume();
+        bt_abs_volume_set(volume); /* Soundbar mit absoluter Lautstaerke: dort einstellen */
     }
     return volume;
+}
+
+/* Die Soundbar meldet ihre Lautstaerke (eigene Tasten, Fernbedienung): uebernehmen, ohne sie zurueckzuschicken */
+void hda_volume_remote(int percent)
+{
+    volume = percent < 0 ? 0 : percent > 100 ? 100 : percent;
+    if (present)
+        set_dac_volume();
 }
 
 /* ---------- Start ---------- */

@@ -110,6 +110,12 @@ int bt_key_add(const BtKey *k);
 enum { BT_KEY_NONE, BT_KEY_PLAY, BT_KEY_PAUSE, BT_KEY_STOP, BT_KEY_NEXT, BT_KEY_PREV };
 int bt_media_key(void); /* naechste Taste oder BT_KEY_NONE */
 
+/* AVRCP 1.4 "Absolute Volume": die Soundbar regelt selbst und meldet jede Aenderung (auch ueber ihre Tasten und die
+ * Fernbedienung); die Gesamtlautstaerke folgt ihr, und hda_volume stellt sie dort ein. Solange das laeuft, rechnet
+ * der Mischer den Ton nicht digital leiser. */
+int  bt_abs_volume_active(void);
+void bt_abs_volume_set(int percent); /* von hda_volume: an die Soundbar schicken (im Thread "bt") */
+
 /* A2DP (a2dp.c): ist die Soundbar bereit, mischt hda.c in diesen Strom statt auf die Soundkarte */
 int      bt_a2dp_active(void);                               /* 1 = Ton geht ueber Bluetooth */
 uint32_t bt_a2dp_write(const int16_t *stereo, uint32_t frames); /* 48 kHz Stereo; Zahl angenommener Frames */

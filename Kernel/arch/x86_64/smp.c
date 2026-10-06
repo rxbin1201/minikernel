@@ -94,10 +94,12 @@ void bkl_acquire(void)
         }
     }
     bkl_owner = (int)c->index;
-    if (t0 && holder && bkl_reports < 40) {
+    if (t0 && holder && bkl_reports < 200) {
         bkl_reports++;
-        kprintf("smp: CPU %u wartete %u ms auf den BKL - gehalten von Thread '%s'\n", c->index,
-                (uint32_t)((time_us() - t0) / 1000), holder);
+        uint64_t now = time_ms(); /* Zeitpunkt seit dem Start: Meldungen lassen sich so einem Ereignis zuordnen */
+        kprintf("smp: CPU %u wartete %u ms auf den BKL - gehalten von Thread '%s' (bei %lu,%01lu s)\n", c->index,
+                (uint32_t)((time_us() - t0) / 1000), holder, (unsigned long)(now / 1000),
+                (unsigned long)(now % 1000 / 100));
     }
 
     /* Hat eine andere CPU inzwischen Kernel-Seiten ausgeblendet oder umgestellt, koennte der TLB dieser CPU noch

@@ -37,7 +37,7 @@ WLAN/Bluetooth, Monitor 3440x1440 ueber HDMI/DisplayPort).
 | **USB** | 🟡 | xHCI (USB 1-3), Hubs, Tastatur, Maus, Massenspeicher, Bluetooth; Transfers per Interrupt | Ohne xHCI (EHCI/OHCI), USB-Audio, Gamepads, Webcams |
 | **Netzwerk** | 🟡 | Intel e1000/e1000e/I217-I219, IPv4, DHCP, DNS, NTP, UDP, TCP nach aussen, `wget` (HTTP) | HTTPS/TLS, TCP-Server (listen/accept), IPv6, andere Netzwerkkarten (Realtek, ...) |
 | **WLAN** | 🟡 | Intel AX200: suchen, verbinden mit offenen und WPA2-PSK-Netzen, DHCP, im Desktop | Schnelle Raten (802.11n/ac/ax, hoechstens 54 Mbit/s), WPA3-only, Enterprise, andere Karten |
-| **Bluetooth** | 🟡 | Intel AX200: Firmware laden, suchen, koppeln, Musik an Lautsprecher/Kopfhoerer (A2DP, SBC), Fernbedienung (AVRCP) | Tastaturen/Maeuse (HID), Freisprechen, Bluetooth LE, AAC |
+| **Bluetooth** | 🟡 | Intel AX200: Firmware laden, suchen, koppeln, Musik an Lautsprecher/Kopfhoerer (A2DP, SBC), Fernbedienung und Lautstaerke der Soundbar (AVRCP 1.4) | Tastaturen/Maeuse (HID), Freisprechen, Bluetooth LE, AAC |
 | **Grafik** | ✅ | GOP-Framebuffer ueberall; Intel Gen9 (Skylake bis Comet Lake): Moduswechsel, HDMI/DP, Hotplug, Hardware-Zeiger, Doppelpufferung | AMD- und NVIDIA-Treiber, mehrere Monitore gleichzeitig |
 | **3D** | 🟡 | Intel Gen9: eigene Shader, kleines OpenGL 1.x/1.5 (Texturen, Licht, Tiefentest, Mischen, Vertex-Buffer); Desktop setzt auf der GPU zusammen | Mip-Maps, programmierbare Shader fuer Programme, Mesa |
 | **Ton** | ✅ | Intel HD Audio, 8 Programme gleichzeitig, WAV und MP3, Ausgabe waehlbar (Lautsprecher, Kopfhoerer, Bluetooth) | Mikrofon/Aufnahme, Lautstaerke je Programm im Menue, HDMI-Ton |
@@ -295,7 +295,11 @@ bt disconnect
 | Suche | klassisch (Inquiry mit RSSI/Namen) und LE gleichzeitig |
 | Verbindung (`btconn.c`) | ACL mit Flusskontrolle, Secure Simple Pairing ("Just Works") bzw. PIN 0000, Verschluesselung, L2CAP, AVDTP-Endpunkte; Schluessel in `bt_keys.cfg` |
 | A2DP (`a2dp.c`, `sbc.c`) | SBC 48 kHz Stereo, Bitpool 53, RTP; der Mischer (`hda.c`) spielt alle Programme ueber Bluetooth statt ueber die Soundkarte; nach 2 s Stille Suspend |
-| AVRCP | Tasten der Soundbar: lauter/leiser/stumm direkt, Play/Pause/Stop/vor/zurueck an `music` (`SYS_BT 10`) |
+| AVRCP | Tasten der Soundbar: Play/Pause/Stop/vor/zurueck an `music` (`SYS_BT 10`), lauter/leiser als Taste direkt am Mischer |
+| Absolute Volume | AVRCP 1.4: MiniKernel meldet sich bei der Soundbar fuer Lautstaerke-Aenderungen an (RegisterNotification) und stellt sie mit SetAbsoluteVolume ein - Tasten und Fernbedienung der Soundbar und der Regler in der Taskleiste bleiben gleich, der Ton wird nicht mehr digital leiser gerechnet |
+
+Bei Bluetooth spielt eine Stimme erst, wenn 0,5 s vorgepuffert sind (oder das Programm nichts mehr nachliefert);
+laeuft sie leer, wird neu vorgepuffert statt Stille zu schicken - kein Stottern am Liedanfang.
 
 Der SBC-Encoder rechnet nur mit Ganzzahlen und ist gegen den Decoder von BlueZ (libsbc) geprueft (Selbsttest `sbc`,
 bitgenau gegen den Host).
